@@ -55,10 +55,17 @@ import importlib.util
 from ab_dashboard import DashboardClient, ensure_dashboard_running
 from simulator import simulate_turn
 
+if (HARNESS_DIR.parent / "strategies").exists():
+    DEFAULT_BASELINE_MODULE: str = "strategies.strategy_baseline"
+    DEFAULT_VARIANT_MODULE: str = "strategies.strategy_variant"
+else:
+    DEFAULT_BASELINE_MODULE: str = "example_snakes.baseline"
+    DEFAULT_VARIANT_MODULE: str = "example_snakes.variant"
+
 _strategy_baseline: Any = None
 _strategy_variant: Any = None
-_baseline_module_name: str = "example_snakes.survival"
-_variant_module_name: str = "example_snakes.variant_template"
+_baseline_module_name: str = DEFAULT_BASELINE_MODULE
+_variant_module_name: str = DEFAULT_VARIANT_MODULE
 
 
 def load_strategy_module(module_or_path: str) -> Any:
@@ -1387,14 +1394,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--baseline-module",
         type=str,
-        default="example_snakes.survival",
-        help="Module name or file path for baseline snake strategy",
+        default=DEFAULT_BASELINE_MODULE,
+        help=f"Module name or file path for baseline snake strategy (default: {DEFAULT_BASELINE_MODULE})",
     )
     parser.add_argument(
         "--variant-module",
         type=str,
-        default="example_snakes.variant_template",
-        help="Module name or file path for variant snake strategy",
+        default=DEFAULT_VARIANT_MODULE,
+        help=f"Module name or file path for variant snake strategy (default: {DEFAULT_VARIANT_MODULE})",
     )
     parser.add_argument(
         "--skip-smoke",
@@ -1409,8 +1416,8 @@ def parse_args() -> argparse.Namespace:
 def run_ab_test_engine(
     desc: str = "Unspecified Experiment",
     modes: str = "all",
-    baseline_module: str = "example_snakes.survival",
-    variant_module: str = "example_snakes.variant_template",
+    baseline_module: Optional[str] = None,
+    variant_module: Optional[str] = None,
     skip_smoke: bool = False,
     threads: int = THREADS,
     min_games: int = MIN_GAMES,
@@ -1420,6 +1427,10 @@ def run_ab_test_engine(
     port_var: int = PORT_VARIANT,
     dashboard_port: int = DASHBOARD_PORT,
 ) -> None:
+    if baseline_module is None:
+        baseline_module = DEFAULT_BASELINE_MODULE
+    if variant_module is None:
+        variant_module = DEFAULT_VARIANT_MODULE
     init_strategies(baseline_module, variant_module)
     cli_path = find_battlesnake_cli()
     python_bin = find_python_interpreter()

@@ -1,5 +1,5 @@
 """
-survival.py — Reference "don't kill yourself this turn" baseline strategy.
+baseline.py — Reference "don't kill yourself this turn" baseline strategy.
 
 Pure Python, no C extension, no heuristics.
 Rejects any move leading to:

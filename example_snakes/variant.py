@@ -1,7 +1,7 @@
 """
-variant_template.py — Runnable starter template for experimental Battlesnake strategy variants.
+variant.py — Runnable starter template for experimental Battlesnake strategy variants.
 
-Runnable copy of survival.py with an annotated hook for testing new algorithmic ideas,
+Runnable copy of baseline.py with an annotated hook for testing new algorithmic ideas,
 heuristics, tree searches, or food-seeking behaviors.
 """
 
