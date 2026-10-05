@@ -36,4 +36,4 @@ See `example_snakes/baseline.py` and `example_snakes/variant.py` for reference i
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+GNU General Public License v3. See [LICENSE](LICENSE) for details.
