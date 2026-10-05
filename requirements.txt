@@ -1,0 +1,2 @@
+# Battlesnake A/B Testing Harness
+# Pure Python standard library - no external dependencies required for headless simulation.

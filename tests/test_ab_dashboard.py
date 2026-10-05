@@ -65,9 +65,9 @@ class TestDashboardSkip(unittest.TestCase):
             client = DashboardClient(port=port)
             self.assertTrue(client.is_running())
 
-            # Background thread triggers skip after 0.3s
+            # Background thread triggers skip
             def _trigger_skip():
-                time.sleep(0.3)
+                time.sleep(0.02)
                 client.skip_mode()
 
             t = threading.Thread(target=_trigger_skip, daemon=True)
@@ -119,20 +119,20 @@ class TestDashboardSkip(unittest.TestCase):
                 for m in matrix
             ]
 
-            # In background, skip duel after 0.2s, then skip standard after duel finishes
+            # In background, skip duel after 0.02s, then skip standard after duel finishes
             def _skip_controller():
-                time.sleep(0.2)
+                time.sleep(0.02)
                 client.skip_mode()
                 # Wait until standard mode is initialized
                 while True:
-                    time.sleep(0.1)
+                    time.sleep(0.01)
                     if client.is_running():
                         try:
                             import urllib.request, json
                             with urllib.request.urlopen(f"http://localhost:{port}/api/data") as resp:
                                 data = json.loads(resp.read().decode())
                                 if data.get("game_mode") == "standard":
-                                    time.sleep(0.2)
+                                    time.sleep(0.02)
                                     client.skip_mode()
                                     break
                         except Exception:

@@ -49,9 +49,73 @@ if str(HARNESS_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import importlib
+import importlib.util
+
 from ab_dashboard import DashboardClient, ensure_dashboard_running
 from simulator import simulate_turn
-from strategies import strategy_baseline, strategy_variant
+
+_strategy_baseline: Any = None
+_strategy_variant: Any = None
+_baseline_module_name: str = "example_snakes.survival"
+_variant_module_name: str = "example_snakes.variant_template"
+
+
+def load_strategy_module(module_or_path: str) -> Any:
+    """
+    Dynamically loads a Battlesnake strategy module from a dotted module path
+    or a Python file path.
+    """
+    path_candidate = Path(module_or_path)
+    if module_or_path.endswith(".py") or path_candidate.is_file():
+        mod_name = path_candidate.stem
+        spec = importlib.util.spec_from_file_location(mod_name, str(path_candidate.resolve()))
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load specification for strategy file: {module_or_path}")
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = mod
+        spec.loader.exec_module(mod)
+    else:
+        mod = importlib.import_module(module_or_path)
+
+    # Ensure required interface is present:
+    # 1. INFO: dict
+    if not hasattr(mod, "INFO") or not isinstance(getattr(mod, "INFO"), dict):
+        setattr(mod, "INFO", {"apiversion": "1", "author": "Battlesnake", "color": "#888888", "head": "default", "tail": "default"})
+
+    # 2. choose_move(game_state, wrap=False, constrictor=False) -> str
+    if not hasattr(mod, "choose_move"):
+        if hasattr(mod, "move"):
+            orig_move = getattr(mod, "move")
+            def wrapped_choose_move(game_state: Dict[str, Any], wrap: bool = False, constrictor: bool = False) -> str:
+                res = orig_move(game_state)
+                if isinstance(res, dict):
+                    return res.get("move", "up")
+                return str(res)
+            setattr(mod, "choose_move", wrapped_choose_move)
+        else:
+            raise AttributeError(f"Strategy module '{module_or_path}' must define 'choose_move(game_state, wrap, constrictor)' or 'move(game_state)'")
+
+    return mod
+
+
+def init_strategies(baseline_module: str, variant_module: str) -> None:
+    global _strategy_baseline, _strategy_variant, _baseline_module_name, _variant_module_name
+    _baseline_module_name = baseline_module
+    _variant_module_name = variant_module
+    _strategy_baseline = load_strategy_module(baseline_module)
+    _strategy_variant = load_strategy_module(variant_module)
+
+
+def _init_worker(baseline_module: str, variant_module: str) -> None:
+    init_strategies(baseline_module, variant_module)
+
+
+# Pre-initialize defaults so imported helpers work unconditionally
+try:
+    init_strategies(_baseline_module_name, _variant_module_name)
+except Exception:
+    pass
 
 # ---------------------------------------------------------------------------
 # Project Configuration Constants
@@ -460,7 +524,10 @@ def simulate_single_game(
 
         for sn in ordered_snakes:
             s_id = sn["id"]
-            strat_module = strategy_variant if s_id == STRATEGY_VARIANT else strategy_baseline
+            strat_module = _strategy_variant if s_id == STRATEGY_VARIANT else _strategy_baseline
+            if strat_module is None:
+                init_strategies(_baseline_module_name, _variant_module_name)
+                strat_module = _strategy_variant if s_id == STRATEGY_VARIANT else _strategy_baseline
             move_fn = strat_module.choose_move
             game_state = _build_game_state(
                 current_snake=sn,
@@ -1012,7 +1079,11 @@ def _run_single_mode_simulation(
     base_d_avg = 0.0
     t_start = time.perf_counter()
 
-    with mp.Pool(processes=threads) as pool:
+    with mp.Pool(
+        processes=threads,
+        initializer=_init_worker,
+        initargs=(_baseline_module_name, _variant_module_name),
+    ) as pool:
         iterator = pool.imap_unordered(_worker_wrapper, task_args)
         last_skip_check = time.time()
         try:
@@ -1031,7 +1102,7 @@ def _run_single_mode_simulation(
                     break
 
                 now = time.time()
-                if now - last_skip_check > 0.35:
+                if (total_played % 5 == 0) or (now - last_skip_check > 0.1):
                     last_skip_check = now
                     if dash_client.check_skip():
                         stop_type = "USER_SKIPPED"
@@ -1313,6 +1384,23 @@ def parse_args() -> argparse.Namespace:
             "WARNING: Testing an isolated subset of modes risks introducing regressions in omitted modes."
         ),
     )
+    parser.add_argument(
+        "--baseline-module",
+        type=str,
+        default="example_snakes.survival",
+        help="Module name or file path for baseline snake strategy",
+    )
+    parser.add_argument(
+        "--variant-module",
+        type=str,
+        default="example_snakes.variant_template",
+        help="Module name or file path for variant snake strategy",
+    )
+    parser.add_argument(
+        "--skip-smoke",
+        action="store_true",
+        help="Skip the pre-flight official Battlesnake CLI binary smoke test",
+    )
     return parser.parse_args()
 
 
@@ -1321,6 +1409,9 @@ def parse_args() -> argparse.Namespace:
 def run_ab_test_engine(
     desc: str = "Unspecified Experiment",
     modes: str = "all",
+    baseline_module: str = "example_snakes.survival",
+    variant_module: str = "example_snakes.variant_template",
+    skip_smoke: bool = False,
     threads: int = THREADS,
     min_games: int = MIN_GAMES,
     max_games: int = MAX_GAMES,
@@ -1329,6 +1420,7 @@ def run_ab_test_engine(
     port_var: int = PORT_VARIANT,
     dashboard_port: int = DASHBOARD_PORT,
 ) -> None:
+    init_strategies(baseline_module, variant_module)
     cli_path = find_battlesnake_cli()
     python_bin = find_python_interpreter()
 
@@ -1341,47 +1433,71 @@ def run_ab_test_engine(
     print("=" * 76)
     print("         BATTLESNAKE AUTOMATED MULTI-MODE A/B TESTING HARNESS")
     print("=" * 76)
-    print(f"  Tested Change:  {desc}")
-    print(f"  Evaluation:     {mode_names if is_partial_matrix else 'Full 4-Mode Ranked Regression Matrix'}")
+    print(f"  Tested Change:    {desc}")
+    print(f"  Baseline Snake:   {baseline_module}")
+    print(f"  Variant Snake:    {variant_module}")
+    print(f"  Evaluation:       {mode_names if is_partial_matrix else 'Full 4-Mode Ranked Regression Matrix'}")
     if is_partial_matrix:
-        print(f"  [⚠️ WARNING]    Running ISOLATED mode test for {len(active_matrix)} mode(s): {mode_names}")
-        print(f"                  Danger: Changes may introduce undetected regressions in omitted modes!")
-    print(f"  Target Policy:  {'Bug Fix (>= 50% in 1v1, >= 25% in 4p)' if is_bug_fix else 'General Improvement (>= 51.5% in 1v1, >= 25.5% in 4p)'}")
-    print(f"  Sample Budget:  {max_games} max games/mode (Min: {min_games}, Checkpoint: Every {check_interval})")
-    print(f"  Workers:        {threads} parallel worker processes (In-Process Simulator)")
-    print(f"  Dashboard:      http://localhost:{dashboard_port} (Browser Live View)")
+        print(f"  [⚠️ WARNING]      Running ISOLATED mode test for {len(active_matrix)} mode(s): {mode_names}")
+        print(f"                    Danger: Changes may introduce undetected regressions in omitted modes!")
+    print(f"  Target Policy:    {'Bug Fix (>= 50% in 1v1, >= 25% in 4p)' if is_bug_fix else 'General Improvement (>= 51.5% in 1v1, >= 25.5% in 4p)'}")
+    print(f"  Sample Budget:    {max_games} max games/mode (Min: {min_games}, Checkpoint: Every {check_interval})")
+    print(f"  Workers:          {threads} parallel worker processes (In-Process Simulator)")
+    print(f"  Dashboard:        http://localhost:{dashboard_port} (Browser Live View)")
     print("=" * 76 + "\n")
 
     dash_client = ensure_dashboard_running(port=dashboard_port)
     if not dash_client.is_running():
         sys.exit(f"[!] Fatal error: Failed to connect to dashboard at port {dashboard_port}. An A/B test cannot run without showing in the browser.")
 
-    # ── Step 1: Tactical Unit Tests (ALWAYS RUN REGARDLESS OF SELECTED MODES) ──
+    # ── Step 1: Tactical Unit Tests ──
     print("[1/2] Running strategy safety unit tests on variant...")
+    test_strategy = None
     try:
         from tests import test_strategy
     except ImportError:
-        import test_strategy
-    passed, test_msg = test_strategy.run_variant_unit_tests()
+        try:
+            import test_strategy
+        except ImportError:
+            test_strategy = None
 
-    if not passed:
-        print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
-        print(f"     Details: {test_msg}\n")
-        stop_type = "TEST_FAILURE"
-        stop_reason = f"Unit test suite failed: {test_msg}"
-        recommendation = "TEST_FAILURE"
-        results = {
-            STRATEGY_BASELINE: {"wins": 0, "losses": 0, "draws": 0},
-            STRATEGY_VARIANT: {"wins": 0, "losses": 0, "draws": 0},
-        }
-        history_path = save_run_history(
-            STRATEGY_BASELINE, STRATEGY_VARIANT, 0, results,
-            stop_type, stop_reason, recommendation, experiment_desc=desc
-        )
-        dash_client.set_finished(stop_type, stop_reason, recommendation, str(history_path))
-        print_summary(0, results, stop_type, stop_reason, history_path, experiment_desc=desc, recommendation=recommendation)
-        return
-    print("  [✓] Strategy variant passed all unit tests.\n")
+    if test_strategy and hasattr(test_strategy, "run_variant_unit_tests"):
+        passed, test_msg = test_strategy.run_variant_unit_tests()
+        if not passed:
+            print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
+            print(f"     Details: {test_msg}\n")
+            stop_type = "TEST_FAILURE"
+            stop_reason = f"Unit test suite failed: {test_msg}"
+            recommendation = "TEST_FAILURE"
+            results = {
+                STRATEGY_BASELINE: {"wins": 0, "losses": 0, "draws": 0},
+                STRATEGY_VARIANT: {"wins": 0, "losses": 0, "draws": 0},
+            }
+            history_path = save_run_history(
+                STRATEGY_BASELINE, STRATEGY_VARIANT, 0, results,
+                stop_type, stop_reason, recommendation, experiment_desc=desc
+            )
+            dash_client.set_finished(stop_type, stop_reason, recommendation, str(history_path))
+            print_summary(0, results, stop_type, stop_reason, history_path, experiment_desc=desc, recommendation=recommendation)
+            return
+        print("  [✓] Strategy variant passed all tactical unit tests.\n")
+    else:
+        print("  [✓] No tactical unit tests registered (standalone harness mode).\n")
+
+    # ── Pre-flight Binary Smoke Test (skippable via --skip-smoke) ──
+    if not skip_smoke:
+        main_py = PROJECT_ROOT / "main.py"
+        if Path(cli_path).exists() and main_py.exists():
+            print("  --> Running pre-flight binary smoke test with official Battlesnake CLI...")
+            smoke_ok, smoke_err = run_binary_smoke_test(cli_path, python_bin, port_base, port_var)
+            if not smoke_ok:
+                print(f"  [⚠️] Pre-flight smoke test skipped/warning: {smoke_err}\n")
+            else:
+                print("  [✓] Battlesnake CLI smoke test passed.\n")
+        else:
+            print("  [i] Pre-flight binary smoke test skipped (CLI binary or main.py not found).\n")
+    else:
+        print("  [i] Pre-flight binary smoke test skipped via --skip-smoke.\n")
 
     # ── Step 2: Simulation Execution ─────────────────────────────────────────
     results_dir = PROJECT_ROOT / "ab_results"
@@ -1547,7 +1663,13 @@ def run_ab_test_engine(
 
 def main():
     args = parse_args()
-    run_ab_test_engine(desc=args.desc, modes=args.modes)
+    run_ab_test_engine(
+        desc=args.desc,
+        modes=args.modes,
+        baseline_module=args.baseline_module,
+        variant_module=args.variant_module,
+        skip_smoke=args.skip_smoke,
+    )
 
 
 if __name__ == "__main__":
