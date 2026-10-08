@@ -26,6 +26,7 @@ Usage:
 """
 
 import argparse
+import copy
 import csv
 from datetime import datetime
 import json
@@ -855,6 +856,53 @@ def save_run_history(
     return history_file
 
 
+# ── Checkpoint Persistence & Resumption ──────────────────────────────────────
+
+CHECKPOINT_FILE_NAME = ".active_checkpoint.json"
+
+
+def get_checkpoint_path(results_dir: Path) -> Path:
+    return results_dir / CHECKPOINT_FILE_NAME
+
+
+def load_checkpoint(results_dir: Path) -> Optional[Dict[str, Any]]:
+    path = get_checkpoint_path(results_dir)
+    if not path.is_file():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return None
+
+
+def save_checkpoint(results_dir: Path, data: Dict[str, Any]) -> None:
+    try:
+        results_dir.mkdir(parents=True, exist_ok=True)
+        path = get_checkpoint_path(results_dir)
+        tmp_path = path.with_suffix(".json.tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, default=str)
+        tmp_path.replace(path)
+    except Exception:
+        pass
+
+
+def clear_checkpoint(results_dir: Path) -> None:
+    try:
+        path = get_checkpoint_path(results_dir)
+        if path.is_file():
+            path.unlink()
+        tmp_path = path.with_suffix(".json.tmp")
+        if tmp_path.is_file():
+            tmp_path.unlink()
+    except Exception:
+        pass
+
+
 def print_summary(
     total_games: int,
     results: dict,
@@ -1039,6 +1087,8 @@ def _run_single_mode_simulation(
     matrix_progress: Optional[List[dict]] = None,
     results_dir: Optional[Path] = None,
     base_seed: int = 42_000,
+    resume_mode_state: Optional[Dict[str, Any]] = None,
+    checkpoint_callback: Optional[Any] = None,
 ) -> Dict[str, Any]:
     if results_dir is None:
         results_dir = PROJECT_ROOT / "ab_results"
@@ -1064,26 +1114,42 @@ def _run_single_mode_simulation(
         matrix_progress=matrix_progress,
     )
 
-    task_args = [(i, base_seed + i, mode) for i in range(1, max_games + 1)]
-
-    snakes_stats = {
-        STRATEGY_VARIANT: {"wins": 0, "losses": 0, "draws": 0},
-        STRATEGY_BASELINE: {"wins": 0, "losses": 0, "draws": 0},
-    }
-
-    results = {
-        STRATEGY_BASELINE: {"wins": 0, "losses": 0, "draws": 0},
-        STRATEGY_VARIANT: {"wins": 0, "losses": 0, "draws": 0},
-    }
-    rows: List[Dict[str, Any]] = []
+    if resume_mode_state and resume_mode_state.get("mode") == mode and resume_mode_state.get("total_played", 0) > 0:
+        total_played = resume_mode_state["total_played"]
+        results = copy.deepcopy(resume_mode_state["results"])
+        snakes_stats = copy.deepcopy(resume_mode_state["snakes_stats"])
+        rows = list(resume_mode_state.get("rows", []))
+        total_var_depth = float(resume_mode_state.get("total_var_depth", 0.0))
+        total_base_depth = float(resume_mode_state.get("total_base_depth", 0.0))
+        completed_games = {r["game"] for r in rows}
+        if completed_games:
+            remaining_games = [i for i in range(1, max_games + 1) if i not in completed_games]
+        else:
+            remaining_games = [i for i in range(total_played + 1, max_games + 1)]
+        task_args = [(i, base_seed + i, mode) for i in remaining_games]
+        var_w = snakes_stats.get(STRATEGY_VARIANT, {}).get("wins", 0)
+        print(f"  [Resume] Resuming {mode_name} with {len(remaining_games)} games remaining ({total_played} prior games restored, {var_w} variant wins)...")
+        if resume_mode_state.get("csv_path") and Path(resume_mode_state["csv_path"]).parent.exists():
+            csv_path = Path(resume_mode_state["csv_path"])
+    else:
+        total_played = 0
+        total_var_depth = 0.0
+        total_base_depth = 0.0
+        rows = []
+        snakes_stats = {
+            STRATEGY_VARIANT: {"wins": 0, "losses": 0, "draws": 0},
+            STRATEGY_BASELINE: {"wins": 0, "losses": 0, "draws": 0},
+        }
+        results = {
+            STRATEGY_BASELINE: {"wins": 0, "losses": 0, "draws": 0},
+            STRATEGY_VARIANT: {"wins": 0, "losses": 0, "draws": 0},
+        }
+        task_args = [(i, base_seed + i, mode) for i in range(1, max_games + 1)]
 
     stop_type = "MAXIMUM_REACHED"
     stop_reason = f"Reached maximum configured game limit ({max_games} games)."
-    total_played = 0
-    total_var_depth = 0.0
-    total_base_depth = 0.0
-    var_d_avg = 0.0
-    base_d_avg = 0.0
+    var_d_avg = (total_var_depth / total_played) if total_played else 0.0
+    base_d_avg = (total_base_depth / total_played) if total_played else 0.0
     t_start = time.perf_counter()
 
     with mp.Pool(
@@ -1209,6 +1275,19 @@ def _run_single_mode_simulation(
                         f"({turns:>3} turns, {dur_ms:>5.0f}ms) | Win Share: {var_win_share:>5.1f}% (Var: {var_win_share:.1f}% vs Base: {base_win_share:.1f}%) | Depth: V {var_d_avg:.1f} vs B {base_d_avg:.1f}"
                     )
 
+                if checkpoint_callback and (total_played % 2 == 0 or total_played >= max_games):
+                    checkpoint_callback(
+                        mode=mode,
+                        mode_name=mode_name,
+                        total_played=total_played,
+                        results=results,
+                        snakes_stats=snakes_stats,
+                        rows=rows,
+                        total_var_depth=total_var_depth,
+                        total_base_depth=total_base_depth,
+                        csv_path=str(csv_path),
+                    )
+
                 # Continuous dynamic statistical confidence check
                 if total_played >= min_games:
                     curr_high_stop, curr_low_stop = get_statistical_thresholds(total_played, num_snakes)
@@ -1239,6 +1318,18 @@ def _run_single_mode_simulation(
                         break
         except KeyboardInterrupt:
             print("\n[!] Interrupted by user. Terminating worker pool...")
+            if checkpoint_callback and total_played > 0:
+                checkpoint_callback(
+                    mode=mode,
+                    mode_name=mode_name,
+                    total_played=total_played,
+                    results=results,
+                    snakes_stats=snakes_stats,
+                    rows=rows,
+                    total_var_depth=total_var_depth,
+                    total_base_depth=total_base_depth,
+                    csv_path=str(csv_path),
+                )
             pool.terminate()
             pool.join()
             dash_client.set_finished(
@@ -1408,6 +1499,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip the pre-flight official Battlesnake CLI binary smoke test",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume an interrupted A/B benchmark run from the last saved checkpoint in ab_results/",
+    )
     return parser.parse_args()
 
 
@@ -1419,6 +1515,7 @@ def run_ab_test_engine(
     baseline_module: Optional[str] = None,
     variant_module: Optional[str] = None,
     skip_smoke: bool = False,
+    resume: bool = False,
     threads: int = THREADS,
     min_games: int = MIN_GAMES,
     max_games: int = MAX_GAMES,
@@ -1515,6 +1612,47 @@ def run_ab_test_engine(
     results_dir.mkdir(parents=True, exist_ok=True)
     t_wall_start = time.perf_counter()
 
+    checkpoint_data: Dict[str, Any] = {
+        "desc": desc,
+        "modes": modes,
+        "completed_modes": [],
+        "current_mode_state": None,
+    }
+
+    if resume:
+        loaded = load_checkpoint(results_dir)
+        if loaded:
+            print(f"  [Resume] Active checkpoint found for '{loaded.get('desc', 'Previous Run')}'. Resuming...")
+            checkpoint_data = loaded
+        else:
+            print("  [Resume] No active checkpoint file found in ab_results/. Starting fresh run.")
+    else:
+        clear_checkpoint(results_dir)
+
+    def _checkpoint_callback(
+        mode: str,
+        mode_name: str,
+        total_played: int,
+        results: dict,
+        snakes_stats: dict,
+        rows: list,
+        total_var_depth: float,
+        total_base_depth: float,
+        csv_path: str = "",
+    ) -> None:
+        checkpoint_data["current_mode_state"] = {
+            "mode": mode,
+            "mode_name": mode_name,
+            "total_played": total_played,
+            "results": copy.deepcopy(results),
+            "snakes_stats": copy.deepcopy(snakes_stats),
+            "rows": list(rows),
+            "total_var_depth": total_var_depth,
+            "total_base_depth": total_base_depth,
+            "csv_path": csv_path,
+        }
+        save_checkpoint(results_dir, checkpoint_data)
+
     matrix_title = f"Selected Modes Matrix ({mode_names})" if is_partial_matrix else "Full 4-Mode Ranked Regression Matrix Suite"
     print(f"[2/2] Executing {matrix_title}...")
     matrix_progress = [
@@ -1553,28 +1691,56 @@ def run_ab_test_engine(
             else (THRESHOLD_4P_BUG_FIX if is_bug_fix else THRESHOLD_4P_IMPROVEMENT)
         )
 
-        matrix_progress[idx]["status"] = "RUNNING"
-        dash_client.update_matrix(matrix_progress)
-
-        res = _run_single_mode_simulation(
-            mode=m_mode,
-            mode_name=m_name,
-            num_snakes=num_snakes,
-            target_share=target_share,
-            high_stop=high_stop,
-            low_stop=low_stop,
-            min_games=min_games,
-            max_games=max_games,
-            check_interval=check_interval,
-            threads=threads,
-            dash_client=dash_client,
-            desc=desc,
-            is_bug_fix=is_bug_fix,
-            keep_threshold=m_keep_thresh,
-            matrix_progress=matrix_progress,
-            results_dir=results_dir,
-            base_seed=42_000 + idx * 10_000,
+        completed_entry = next(
+            (c for c in checkpoint_data.get("completed_modes", []) if c.get("mode") == m_mode),
+            None,
         )
+
+        if completed_entry:
+            res = completed_entry
+            print(
+                f"\n  --> [Resume] Skipping '{m_name}' (already completed in checkpoint: "
+                f"{res.get('total_played', 0)} games, Var Share: {res.get('var_win_share', 0.0):.1f}%, Decision: {res.get('decision', 'N/A')})"
+            )
+        else:
+            matrix_progress[idx]["status"] = "RUNNING"
+            dash_client.update_matrix(matrix_progress)
+
+            resume_mode_state = None
+            if (
+                checkpoint_data.get("current_mode_state")
+                and checkpoint_data["current_mode_state"].get("mode") == m_mode
+            ):
+                resume_mode_state = checkpoint_data["current_mode_state"]
+
+            res = _run_single_mode_simulation(
+                mode=m_mode,
+                mode_name=m_name,
+                num_snakes=num_snakes,
+                target_share=target_share,
+                high_stop=high_stop,
+                low_stop=low_stop,
+                min_games=min_games,
+                max_games=max_games,
+                check_interval=check_interval,
+                threads=threads,
+                dash_client=dash_client,
+                desc=desc,
+                is_bug_fix=is_bug_fix,
+                keep_threshold=m_keep_thresh,
+                matrix_progress=matrix_progress,
+                results_dir=results_dir,
+                base_seed=42_000 + idx * 10_000,
+                resume_mode_state=resume_mode_state,
+                checkpoint_callback=_checkpoint_callback,
+            )
+
+            # Record this mode as completed in checkpoint
+            checkpoint_data["completed_modes"] = [
+                c for c in checkpoint_data.get("completed_modes", []) if c.get("mode") != m_mode
+            ] + [res]
+            checkpoint_data["current_mode_state"] = None
+            save_checkpoint(results_dir, checkpoint_data)
 
         matrix_results.append(res)
         total_games_all += res["total_played"]
@@ -1671,6 +1837,9 @@ def run_ab_test_engine(
         history_path=history_path,
     )
 
+    # Simulation suite finished; clean up active checkpoint
+    clear_checkpoint(results_dir)
+
 
 def main():
     args = parse_args()
@@ -1680,6 +1849,7 @@ def main():
         baseline_module=args.baseline_module,
         variant_module=args.variant_module,
         skip_smoke=args.skip_smoke,
+        resume=args.resume,
     )
 
 
