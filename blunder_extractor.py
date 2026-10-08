@@ -39,7 +39,11 @@ OPPOSITE_MOVES: Dict[str, str] = {
 def parse_coord(pt: Any) -> Tuple[int, int]:
     """Extract (x, y) tuple from dict or tuple."""
     if isinstance(pt, dict):
-        return int(pt["x"]), int(pt["y"])
+        x = pt.get("x") if "x" in pt else pt.get("X")
+        y = pt.get("y") if "y" in pt else pt.get("Y")
+        if x is not None and y is not None:
+            return int(x), int(y)
+        raise KeyError(f"Missing coordinate keys in dict: {pt!r}")
     if isinstance(pt, (tuple, list)):
         return int(pt[0]), int(pt[1])
     if hasattr(pt, "x") and hasattr(pt, "y"):
@@ -70,9 +74,54 @@ def get_move_between(src: Tuple[int, int], dst: Tuple[int, int], width: int, hei
 
 def fetch_replay_from_url(url: str, timeout_sec: float = 10.0) -> Dict[str, Any]:
     """
-    Fetches game replay data from a Battlesnake engine URL or play URL.
+    Fetches game replay data from a Battlesnake engine URL, play URL, or arena URL.
     Converts play.battlesnake.com/g/<id> to engine.battlesnake.com/games/<id>.
+    Fetches arena.battlesnake.com/games/<id> via Arena REST API with paginated frames.
     """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Battlesnake Blunder Extractor/1.0)",
+        "Accept": "application/json",
+    }
+    arena_match = re.search(r"arena\.battlesnake\.com/(?:g|games)/([a-zA-Z0-9\-]+)", url)
+    if arena_match:
+        game_id = arena_match.group(1)
+        meta_url = f"https://arena.battlesnake.com/api/games/{game_id}"
+        req = urllib.request.Request(meta_url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+                meta_data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.URLError as err:
+            raise RuntimeError(f"Failed to fetch game from {meta_url}: {err}") from err
+
+        all_frames = []
+        offset = 0
+        while True:
+            frames_url = f"https://arena.battlesnake.com/api/games/{game_id}/frames?offset={offset}"
+            req_f = urllib.request.Request(frames_url, headers=headers)
+            try:
+                with urllib.request.urlopen(req_f, timeout=timeout_sec) as resp:
+                    page_data = json.loads(resp.read().decode("utf-8"))
+            except urllib.error.URLError as err:
+                raise RuntimeError(f"Failed to fetch frames from {frames_url}: {err}") from err
+            page_frames = page_data.get("Frames", [])
+            if not page_frames:
+                break
+            all_frames.extend(page_frames)
+            if len(page_frames) < 100:
+                break
+            offset += len(page_frames)
+
+        game_info = meta_data.get("Game", {})
+        return {
+            "game": {
+                "id": game_info.get("ID", game_id),
+                "ruleset": game_info.get("Ruleset", {"name": "standard"}),
+                "width": game_info.get("Width", 11),
+                "height": game_info.get("Height", 11),
+            },
+            "frames": all_frames,
+        }
+
     match = re.search(r"battlesnake\.com/(?:g|games)/([a-zA-Z0-9\-]+)", url)
     if match:
         game_id = match.group(1)
@@ -80,10 +129,6 @@ def fetch_replay_from_url(url: str, timeout_sec: float = 10.0) -> Dict[str, Any]
     else:
         api_url = url
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Battlesnake Blunder Extractor/1.0)",
-        "Accept": "application/json",
-    }
     req = urllib.request.Request(api_url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
@@ -116,21 +161,21 @@ def normalize_replay_data(raw_data: Any) -> Tuple[Dict[str, Any], List[Dict[str,
         return metadata, frames
 
     if isinstance(raw_data, dict):
-        if "frames" in raw_data:
-            game_meta = raw_data.get("game", {})
+        if "frames" in raw_data or "Frames" in raw_data:
+            game_meta = raw_data.get("game", raw_data.get("Game", {}))
             metadata = {
-                "id": game_meta.get("id", raw_data.get("id", "game_replay")),
-                "ruleset": game_meta.get("ruleset", raw_data.get("ruleset", {"name": "standard"})),
-                "width": raw_data.get("width", game_meta.get("width", 11)),
-                "height": raw_data.get("height", game_meta.get("height", 11)),
+                "id": game_meta.get("id", game_meta.get("ID", raw_data.get("id", "game_replay"))),
+                "ruleset": game_meta.get("ruleset", game_meta.get("Ruleset", raw_data.get("ruleset", {"name": "standard"}))),
+                "width": raw_data.get("width", game_meta.get("width", game_meta.get("Width", 11))),
+                "height": raw_data.get("height", game_meta.get("height", game_meta.get("Height", 11))),
             }
-            frames = raw_data["frames"]
-            if frames and "width" in frames[0]:
-                metadata["width"] = frames[0]["width"]
-                metadata["height"] = frames[0]["height"]
+            frames = raw_data.get("frames", raw_data.get("Frames", []))
+            if frames and ("width" in frames[0] or "Width" in frames[0]):
+                metadata["width"] = frames[0].get("width", frames[0].get("Width", 11))
+                metadata["height"] = frames[0].get("height", frames[0].get("Height", 11))
             elif frames and "board" in frames[0]:
-                metadata["width"] = frames[0]["board"].get("width", 11)
-                metadata["height"] = frames[0]["board"].get("height", 11)
+                metadata["width"] = frames[0]["board"].get("width", frames[0]["board"].get("Width", 11))
+                metadata["height"] = frames[0]["board"].get("height", frames[0]["board"].get("Height", 11))
             return metadata, frames
 
         if "turns" in raw_data:
@@ -142,31 +187,33 @@ def normalize_replay_data(raw_data: Any) -> Tuple[Dict[str, Any], List[Dict[str,
 
 def extract_frame_board(frame: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
     """Extracts width, height, food, hazards, and snakes list from a frame."""
-    width = int(frame.get("width", metadata.get("width", 11)))
-    height = int(frame.get("height", metadata.get("height", 11)))
+    width = int(frame.get("width", frame.get("Width", metadata.get("width", 11))))
+    height = int(frame.get("height", frame.get("Height", metadata.get("height", 11))))
 
-    if "board" in frame:
-        b = frame["board"]
-        width = int(b.get("width", width))
-        height = int(b.get("height", height))
-        food = [parse_coord(f) for f in b.get("food", [])]
-        hazards = [parse_coord(h) for h in b.get("hazards", [])]
-        snakes = b.get("snakes", [])
+    if "board" in frame or "Board" in frame:
+        b = frame.get("board", frame.get("Board", {}))
+        width = int(b.get("width", b.get("Width", width)))
+        height = int(b.get("height", b.get("Height", height)))
+        food = [parse_coord(f) for f in b.get("food", b.get("Food", []))]
+        hazards = [parse_coord(h) for h in b.get("hazards", b.get("Hazards", []))]
+        snakes = b.get("snakes", b.get("Snakes", []))
     else:
-        food = [parse_coord(f) for f in frame.get("food", [])]
-        hazards = [parse_coord(h) for h in frame.get("hazards", [])]
-        snakes = frame.get("snakes", [])
+        food = [parse_coord(f) for f in frame.get("food", frame.get("Food", []))]
+        hazards = [parse_coord(h) for h in frame.get("hazards", frame.get("Hazards", []))]
+        snakes = frame.get("snakes", frame.get("Snakes", []))
 
     parsed_snakes = []
     for s in snakes:
-        body = [parse_coord(p) for p in s.get("body", [])]
+        body = [parse_coord(p) for p in s.get("body", s.get("Body", []))]
+        death = s.get("death", s.get("Death"))
+        eliminated = s.get("eliminated", False) or (death is not None) or (len(body) == 0)
         parsed_snakes.append({
-            "id": str(s.get("id", s.get("name", "snake"))),
-            "name": str(s.get("name", s.get("id", "snake"))),
-            "health": int(s.get("health", 100)),
+            "id": str(s.get("id", s.get("ID", s.get("name", s.get("Name", "snake"))))),
+            "name": str(s.get("name", s.get("Name", s.get("id", s.get("ID", "snake"))))),
+            "health": int(s.get("health", s.get("Health", 100))),
             "body": body,
-            "death": s.get("death"),
-            "eliminated": s.get("eliminated", False) or (s.get("death") is not None) or (len(body) == 0),
+            "death": death,
+            "eliminated": eliminated,
         })
 
     return {
@@ -175,7 +222,7 @@ def extract_frame_board(frame: Dict[str, Any], metadata: Dict[str, Any]) -> Dict
         "food": food,
         "hazards": hazards,
         "snakes": parsed_snakes,
-        "turn": int(frame.get("turn", 0)),
+        "turn": int(frame.get("turn", frame.get("Turn", 0))),
     }
 
 
@@ -278,7 +325,7 @@ def find_blunders(
             if not chosen_move and snake_next and snake_next.get("death"):
                 # Infer from death info or fallback
                 death_info = snake_next["death"]
-                cause = death_info.get("cause", "")
+                cause = death_info.get("cause", death_info.get("Cause", ""))
             else:
                 cause = ""
 
