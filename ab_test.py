@@ -54,6 +54,7 @@ import importlib
 import importlib.util
 
 from ab_dashboard import DashboardClient, ensure_dashboard_running
+from blunder_extractor import find_blunders, generate_unit_test_code, BlunderDetection
 from simulator import simulate_turn
 
 if (HARNESS_DIR.parent / "strategies").exists():
@@ -117,6 +118,19 @@ def init_strategies(baseline_module: str, variant_module: str) -> None:
 
 def _init_worker(baseline_module: str, variant_module: str) -> None:
     init_strategies(baseline_module, variant_module)
+
+
+def create_worker_pool(
+    threads: int = 8,
+    baseline_module: str = DEFAULT_BASELINE_MODULE,
+    variant_module: str = DEFAULT_VARIANT_MODULE,
+) -> mp.pool.Pool:
+    """Creates a persistent multiprocessing worker pool pre-initialized with strategy modules."""
+    return mp.Pool(
+        processes=threads,
+        initializer=_init_worker,
+        initargs=(baseline_module, variant_module),
+    )
 
 
 # Pre-initialize defaults so imported helpers work unconditionally
@@ -1069,6 +1083,358 @@ def print_matrix_summary(
     print()
 
 
+# ── Automated Post-Benchmark Blunder Pipeline ────────────────────────────────
+
+def replay_game_for_blunders(
+    game_num: int,
+    seed: int,
+    mode: str,
+    max_turns: int = 1000,
+    target_snake: str = STRATEGY_VARIANT,
+) -> Tuple[List[Dict[str, Any]], List[BlunderDetection]]:
+    """
+    Replays a specific game match turn-by-turn with full frame tracking
+    and runs blunder_extractor.find_blunders to detect any avoidable fatal blunders.
+    """
+    num_snakes = 4 if mode in ("standard", "ffa", "royale", "constrictor") else 2
+    wrap = mode in ("wrapped", "wrapped-constrictor", "spicy-meteors")
+    constrictor = mode in ("constrictor", "wrapped-constrictor")
+
+    board, snakes, rng = _setup_initial_board(seed, game_num=game_num, num_snakes=num_snakes, mode=mode)
+    init_strategies(_baseline_module_name, _variant_module_name)
+
+    frames: List[Dict[str, Any]] = []
+    turn = 0
+
+    while turn < max_turns and len(snakes) > 1:
+        # 1. Snapshot board before move
+        frame_curr = {
+            "turn": turn,
+            "board": {
+                "width": board["width"],
+                "height": board["height"],
+                "food": [{"x": f["x"], "y": f["y"]} for f in board["food"]],
+                "hazards": [{"x": hz["x"], "y": hz["y"]} for hz in board.get("hazards", [])],
+                "snakes": [
+                    {
+                        "id": s["id"],
+                        "name": s["name"],
+                        "health": s["health"],
+                        "body": [{"x": pt["x"], "y": pt["y"]} for pt in s["body"]],
+                        "eliminated": False,
+                        "death": None,
+                    }
+                    for s in snakes
+                ],
+            },
+        }
+        frames.append(frame_curr)
+
+        # 2. In Royale mode, update hazard sauce depth
+        if mode == "royale":
+            sauce_depth = min(turn // 25, (board["width"] + 1) // 2)
+            if sauce_depth > 0:
+                w, h = board["width"], board["height"]
+                board["hazards"] = [
+                    {"x": x, "y": y}
+                    for x in range(w)
+                    for y in range(h)
+                    if min(x, w - 1 - x, y, h - 1 - y) < sauce_depth
+                ]
+            else:
+                board["hazards"] = []
+
+        # 3. Query moves for each active snake
+        moves: Dict[str, str] = {}
+        turn_offset = turn % len(snakes)
+        ordered_snakes = snakes[turn_offset:] + snakes[:turn_offset]
+
+        for sn in ordered_snakes:
+            s_id = sn["id"]
+            strat_module = _strategy_variant if s_id == STRATEGY_VARIANT else _strategy_baseline
+            move_fn = strat_module.choose_move
+            game_state = _build_game_state(
+                current_snake=sn,
+                active_snakes=ordered_snakes,
+                current_food=board["food"],
+                board_width=board["width"],
+                board_height=board["height"],
+                turn=turn,
+                game_id=f"replay_{game_num}_{seed}",
+                mode=mode,
+                hazards=board.get("hazards", []),
+            )
+            chosen_move, _ = _run_timed_move(move_fn, game_state, wrap=wrap, constrictor=constrictor)
+            moves[s_id] = chosen_move if (chosen_move in ("up", "down", "left", "right")) else "up"
+
+        # 4. Forward simulate turn with all snakes tracked
+        new_board, all_snakes = simulate_turn(
+            board,
+            snakes,
+            moves,
+            wrap=wrap,
+            constrictor=constrictor,
+            hazard_damage=14,
+            return_all_snakes=True,
+        )
+        turn += 1
+        board = new_board
+        alive_snakes = [s for s in all_snakes if not s.get("eliminated")]
+        snakes = alive_snakes
+
+        # 5. Check if target snake died
+        target_dead = any(s["id"] == target_snake and s.get("eliminated") for s in all_snakes)
+        if target_dead:
+            # Append final frame with death state
+            frame_final = {
+                "turn": turn,
+                "board": {
+                    "width": board["width"],
+                    "height": board["height"],
+                    "food": [{"x": f["x"], "y": f["y"]} for f in board["food"]],
+                    "hazards": [{"x": hz["x"], "y": hz["y"]} for hz in board.get("hazards", [])],
+                    "snakes": [
+                        {
+                            "id": s["id"],
+                            "name": s["name"],
+                            "health": s["health"],
+                            "body": [{"x": pt["x"], "y": pt["y"]} for pt in s["body"]],
+                            "eliminated": s.get("eliminated", False),
+                            "death": {"cause": s.get("eliminated_cause", "collision"), "turn": turn} if s.get("eliminated") else None,
+                        }
+                        for s in all_snakes
+                    ],
+                },
+            }
+            frames.append(frame_final)
+            break
+
+        # 6. Food spawn logic
+        if not constrictor:
+            occupied = {(seg["x"], seg["y"]) for sn in snakes for seg in sn["body"]}
+            occupied.update((f["x"], f["y"]) for f in board["food"])
+            unoccupied = [
+                (x, y)
+                for x in range(board["width"])
+                for y in range(board["height"])
+                if (x, y) not in occupied
+            ]
+            num_food = len(board["food"])
+            food_needed = 0
+            if num_food < 1:
+                food_needed = 1 - num_food
+            elif rng.randint(1, 100) <= 15:
+                food_needed = 1
+
+            if food_needed > 0 and unoccupied:
+                rng.shuffle(unoccupied)
+                for p in unoccupied[:food_needed]:
+                    board["food"].append({"x": p[0], "y": p[1]})
+        else:
+            board["food"] = []
+
+    metadata = {
+        "id": f"replay_{mode}_{game_num}_{seed}",
+        "ruleset": {"name": mode},
+        "width": board["width"],
+        "height": board["height"],
+    }
+    blunders = find_blunders(metadata, frames, target_snake=target_snake)
+    return frames, blunders
+
+
+def _load_mode_rows(mode_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Loads game rows from mode result or falls back to CSV file if needed."""
+    if mode_result.get("rows"):
+        return mode_result["rows"]
+    csv_path = mode_result.get("csv_path")
+    if csv_path and Path(csv_path).exists():
+        loaded_rows = []
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                loaded_rows.append(row)
+        return loaded_rows
+    return []
+
+
+def extract_post_benchmark_blunders(
+    matrix_results: List[Dict[str, Any]],
+    max_losses: int = 5,
+    results_dir: Optional[Path] = None,
+) -> Tuple[int, List[Dict[str, Any]], Optional[Path]]:
+    """
+    Extracts worst variant losses across matrix results, replays them,
+    and runs blunder extraction to detect avoidable blunders.
+    """
+    all_variant_losses: List[Dict[str, Any]] = []
+
+    for m in matrix_results:
+        if m.get("total_played", 0) <= 0:
+            continue
+        mode = m["mode"]
+        mode_name = m.get("name", mode.upper())
+        rows = _load_mode_rows(m)
+
+        for row in rows:
+            winner = row.get("winner")
+            is_loss = False
+            if winner != STRATEGY_VARIANT:
+                tied = row.get("tied_snakes", [])
+                if isinstance(tied, str):
+                    tied = [s.strip() for s in tied.replace("[", "").replace("]", "").replace("'", "").split(",") if s.strip()]
+                if winner != "DRAW" or STRATEGY_VARIANT not in tied:
+                    is_loss = True
+            if is_loss:
+                all_variant_losses.append({
+                    "game": int(row["game"]),
+                    "seed": int(row["seed"]),
+                    "mode": mode,
+                    "mode_name": mode_name,
+                    "turns": int(row["turns"]),
+                })
+
+    if not all_variant_losses:
+        return 0, [], None
+
+    # Sort variant losses by turns ascending (shortest turn count = earliest death / most likely blunder)
+    all_variant_losses.sort(key=lambda x: x["turns"])
+    target_losses = all_variant_losses[:max_losses]
+
+    detected_blunders: List[Dict[str, Any]] = []
+
+    for loss in target_losses:
+        try:
+            _, blunders = replay_game_for_blunders(
+                game_num=loss["game"],
+                seed=loss["seed"],
+                mode=loss["mode"],
+                max_turns=loss["turns"] + 2,
+                target_snake=STRATEGY_VARIANT,
+            )
+            for b in blunders:
+                clean_mode = re.sub(r"[^a-zA-Z0-9_]", "_", loss["mode"].lower())
+                clean_cause = re.sub(r"[^a-zA-Z0-9_]", "_", b.blunder_cause)
+                method_name = f"test_blunder_{clean_mode}_g{loss['game']}_t{b.turn}_{clean_cause}"
+                test_code = generate_unit_test_code(b, method_name=method_name)
+                detected_blunders.append({
+                    "game": loss["game"],
+                    "seed": loss["seed"],
+                    "mode": loss["mode"],
+                    "mode_name": loss["mode_name"],
+                    "loss_turns": loss["turns"],
+                    "blunder_turn": b.turn,
+                    "blunder_move": b.blunder_move,
+                    "blunder_cause": b.blunder_cause,
+                    "safe_moves": b.safe_moves,
+                    "test_code": test_code,
+                    "method_name": method_name,
+                })
+        except Exception as err:
+            print(f"  [⚠️] Could not replay Game #{loss['game']} ({loss['mode_name']}, Seed {loss['seed']}): {err}")
+
+    output_test_file: Optional[Path] = None
+    if detected_blunders and results_dir:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_test_file = results_dir / f"blunder_tests_{ts}.py"
+        output_json_file = results_dir / f"blunder_report_{ts}.json"
+
+        # Format standalone test file
+        test_file_lines = [
+            "#!/usr/bin/env python3",
+            '"""Auto-generated blunder regression test suite from post-benchmark analysis."""',
+            "",
+            "import copy",
+            "import unittest",
+            "",
+            "import strategies.strategy_baseline as strategy_baseline",
+            "import strategies.strategy_variant as strategy_variant",
+            "",
+            "",
+            "class TestExtractedBlunders(unittest.TestCase):",
+        ]
+        for db in detected_blunders:
+            indented_code = "    " + db["test_code"].replace("\n", "\n    ").rstrip()
+            test_file_lines.append(indented_code)
+            test_file_lines.append("")
+
+        test_file_lines.extend([
+            "",
+            'if __name__ == "__main__":',
+            "    unittest.main()",
+            "",
+        ])
+
+        with open(output_test_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(test_file_lines))
+
+        with open(output_json_file, "w", encoding="utf-8") as f:
+            json_data = [
+                {k: v for k, v in db.items() if k != "test_code"}
+                for db in detected_blunders
+            ]
+            json.dump(json_data, f, indent=2)
+
+    return len(target_losses), detected_blunders, output_test_file
+
+
+def print_blunder_summary(
+    total_losses_analyzed: int,
+    detected_blunders: List[Dict[str, Any]],
+    output_test_file: Optional[Path] = None,
+) -> None:
+    """Prints a formatted blunder extraction scorecard to console."""
+    sep = "=" * 76
+    sub_sep = "-" * 76
+
+    print()
+    print(sep)
+    print("               AUTOMATED POST-BENCHMARK BLUNDER REPORT")
+    print(sep)
+    if total_losses_analyzed == 0:
+        print("  [✓] Zero variant losses recorded across tested modes; no blunders to analyze.")
+        print(sep)
+        print()
+        return
+
+    print(f"  Analyzed {total_losses_analyzed} shortest-turn variant loss(es) across completed modes.")
+    if not detected_blunders:
+        print("  [✓] No avoidable 1-step fatal blunders detected.")
+        print("      (All analyzed losses were tactical space traps, head-to-head concessions,")
+        print("       or unavoidable endgames where 0 safe legal moves existed).")
+    else:
+        print(f"  [⚠️] Detected {len(detected_blunders)} avoidable fatal blunder(s):")
+        print(sub_sep)
+        for idx, b in enumerate(detected_blunders, 1):
+            print(f"  [{idx}] Mode: {b['mode_name']} | Game #{b['game']} (Seed {b['seed']}) | Died Turn {b['loss_turns']}")
+            print(f"      Turn {b['blunder_turn']}: Chose '{b['blunder_move']}' ({b['blunder_cause']})")
+            print(f"      Safe alternatives available: {b['safe_moves']}")
+        print(sub_sep)
+        if output_test_file and output_test_file.exists():
+            rel_path = output_test_file.relative_to(PROJECT_ROOT) if output_test_file.is_relative_to(PROJECT_ROOT) else output_test_file
+            print(f"  📝 Regression test suite written to: {rel_path}")
+    print(sep)
+    print()
+
+
+def run_post_benchmark_blunder_pipeline(
+    matrix_results: List[Dict[str, Any]],
+    max_losses: int = 5,
+    results_dir: Optional[Path] = None,
+) -> None:
+    """Executes post-benchmark blunder replay and displays summary report."""
+    total_analyzed, blunders, test_file = extract_post_benchmark_blunders(
+        matrix_results=matrix_results,
+        max_losses=max_losses,
+        results_dir=results_dir,
+    )
+    print_blunder_summary(
+        total_losses_analyzed=total_analyzed,
+        detected_blunders=blunders,
+        output_test_file=test_file,
+    )
+
+
 def _run_single_mode_simulation(
     mode: str,
     mode_name: str,
@@ -1089,6 +1455,7 @@ def _run_single_mode_simulation(
     base_seed: int = 42_000,
     resume_mode_state: Optional[Dict[str, Any]] = None,
     checkpoint_callback: Optional[Any] = None,
+    pool: Optional[mp.pool.Pool] = None,
 ) -> Dict[str, Any]:
     if results_dir is None:
         results_dir = PROJECT_ROOT / "ab_results"
@@ -1152,12 +1519,15 @@ def _run_single_mode_simulation(
     base_d_avg = (total_base_depth / total_played) if total_played else 0.0
     t_start = time.perf_counter()
 
-    with mp.Pool(
-        processes=threads,
-        initializer=_init_worker,
-        initargs=(_baseline_module_name, _variant_module_name),
-    ) as pool:
-        iterator = pool.imap_unordered(_worker_wrapper, task_args)
+    local_pool = None
+    if pool is None or getattr(pool, "_state", None) != mp.pool.RUN:
+        local_pool = create_worker_pool(threads, _baseline_module_name, _variant_module_name)
+        active_pool = local_pool
+    else:
+        active_pool = pool
+
+    try:
+        iterator = active_pool.imap_unordered(_worker_wrapper, task_args)
         last_skip_check = time.time()
         try:
             while True:
@@ -1168,7 +1538,7 @@ def _run_single_mode_simulation(
                         stop_type = "USER_SKIPPED"
                         stop_reason = f"Mode '{mode_name}' skipped by user via dashboard."
                         print(f"\n[⏭️] Mode '{mode_name}' skipped by user via dashboard.\n")
-                        pool.terminate()
+                        active_pool.terminate()
                         break
                     continue
                 except StopIteration:
@@ -1181,7 +1551,7 @@ def _run_single_mode_simulation(
                         stop_type = "USER_SKIPPED"
                         stop_reason = f"Mode '{mode_name}' skipped by user via dashboard."
                         print(f"\n[⏭️] Mode '{mode_name}' skipped by user via dashboard.\n")
-                        pool.terminate()
+                        active_pool.terminate()
                         break
 
                 total_played += 1
@@ -1330,8 +1700,8 @@ def _run_single_mode_simulation(
                     total_base_depth=total_base_depth,
                     csv_path=str(csv_path),
                 )
-            pool.terminate()
-            pool.join()
+            active_pool.terminate()
+            active_pool.join()
             dash_client.set_finished(
                 stop_type="MANUAL_ABORT",
                 stop_reason="Simulation interrupted by user",
@@ -1339,6 +1709,13 @@ def _run_single_mode_simulation(
                 csv_path="",
             )
             sys.exit(130)
+    finally:
+        if local_pool is not None:
+            try:
+                local_pool.close()
+                local_pool.join()
+            except Exception:
+                pass
 
     duration_sec = time.perf_counter() - t_start
 
@@ -1408,6 +1785,7 @@ def _run_single_mode_simulation(
         "decision": decision,
         "duration_sec": duration_sec,
         "csv_path": str(csv_path),
+        "rows": rows,
     }
 
 
@@ -1678,103 +2056,125 @@ def run_ab_test_engine(
         STRATEGY_VARIANT: {"wins": 0, "losses": 0, "draws": 0},
     }
 
-    for idx, m_spec in enumerate(active_matrix):
-        m_mode = m_spec["mode"]
-        m_name = m_spec["name"]
-        num_snakes = m_spec["num_snakes"]
-        target_share = m_spec["target_share"]
-        high_stop = m_spec["high_stop"]
-        low_stop = m_spec["low_stop"]
-        m_keep_thresh = (
-            (THRESHOLD_BUG_FIX if is_bug_fix else THRESHOLD_IMPROVEMENT)
-            if num_snakes == 2
-            else (THRESHOLD_4P_BUG_FIX if is_bug_fix else THRESHOLD_4P_IMPROVEMENT)
-        )
+    shared_pool = None
+    try:
+        shared_pool = create_worker_pool(threads, _baseline_module_name, _variant_module_name)
+    except Exception as e:
+        print(f"[!] Warning: Could not pre-allocate shared worker pool: {e}")
 
-        completed_entry = next(
-            (c for c in checkpoint_data.get("completed_modes", []) if c.get("mode") == m_mode),
-            None,
-        )
-
-        if completed_entry:
-            res = completed_entry
-            print(
-                f"\n  --> [Resume] Skipping '{m_name}' (already completed in checkpoint: "
-                f"{res.get('total_played', 0)} games, Var Share: {res.get('var_win_share', 0.0):.1f}%, Decision: {res.get('decision', 'N/A')})"
-            )
-        else:
-            matrix_progress[idx]["status"] = "RUNNING"
-            dash_client.update_matrix(matrix_progress)
-
-            resume_mode_state = None
-            if (
-                checkpoint_data.get("current_mode_state")
-                and checkpoint_data["current_mode_state"].get("mode") == m_mode
-            ):
-                resume_mode_state = checkpoint_data["current_mode_state"]
-
-            res = _run_single_mode_simulation(
-                mode=m_mode,
-                mode_name=m_name,
-                num_snakes=num_snakes,
-                target_share=target_share,
-                high_stop=high_stop,
-                low_stop=low_stop,
-                min_games=min_games,
-                max_games=max_games,
-                check_interval=check_interval,
-                threads=threads,
-                dash_client=dash_client,
-                desc=desc,
-                is_bug_fix=is_bug_fix,
-                keep_threshold=m_keep_thresh,
-                matrix_progress=matrix_progress,
-                results_dir=results_dir,
-                base_seed=42_000 + idx * 10_000,
-                resume_mode_state=resume_mode_state,
-                checkpoint_callback=_checkpoint_callback,
+    try:
+        for idx, m_spec in enumerate(active_matrix):
+            m_mode = m_spec["mode"]
+            m_name = m_spec["name"]
+            num_snakes = m_spec["num_snakes"]
+            target_share = m_spec["target_share"]
+            high_stop = m_spec["high_stop"]
+            low_stop = m_spec["low_stop"]
+            m_keep_thresh = (
+                (THRESHOLD_BUG_FIX if is_bug_fix else THRESHOLD_IMPROVEMENT)
+                if num_snakes == 2
+                else (THRESHOLD_4P_BUG_FIX if is_bug_fix else THRESHOLD_4P_IMPROVEMENT)
             )
 
-            # Record this mode as completed in checkpoint
-            checkpoint_data["completed_modes"] = [
-                c for c in checkpoint_data.get("completed_modes", []) if c.get("mode") != m_mode
-            ] + [res]
-            checkpoint_data["current_mode_state"] = None
-            save_checkpoint(results_dir, checkpoint_data)
+            completed_entry = next(
+                (c for c in checkpoint_data.get("completed_modes", []) if c.get("mode") == m_mode),
+                None,
+            )
 
-        matrix_results.append(res)
-        total_games_all += res["total_played"]
-        for k in ("wins", "losses", "draws"):
-            agg_results[STRATEGY_BASELINE][k] += res["results"][STRATEGY_BASELINE][k]
-            agg_results[STRATEGY_VARIANT][k] += res["results"][STRATEGY_VARIANT][k]
+            if completed_entry:
+                res = completed_entry
+                print(
+                    f"\n  --> [Resume] Skipping '{m_name}' (already completed in checkpoint: "
+                    f"{res.get('total_played', 0)} games, Var Share: {res.get('var_win_share', 0.0):.1f}%, Decision: {res.get('decision', 'N/A')})"
+                )
+            else:
+                matrix_progress[idx]["status"] = "RUNNING"
+                dash_client.update_matrix(matrix_progress)
 
-        if res["stop_type"] == "USER_SKIPPED":
-            matrix_progress[idx]["status"] = "SKIPPED"
-            matrix_progress[idx]["decision"] = "SKIPPED"
-        elif res["decision"] == "KEEP":
-            matrix_progress[idx]["status"] = "PASSED"
-            matrix_progress[idx]["decision"] = "KEEP"
-        elif res["decision"] == "PARITY":
-            matrix_progress[idx]["status"] = "PARITY"
-            matrix_progress[idx]["decision"] = "PARITY"
-        else:
-            matrix_progress[idx]["status"] = "FAILED"
-            matrix_progress[idx]["decision"] = "REVERT"
-        matrix_progress[idx]["win_share"] = res["var_win_share"]
-        matrix_progress[idx]["games"] = res["total_played"]
-        matrix_progress[idx]["reason"] = res["stop_reason"]
-        dash_client.update_matrix(matrix_progress)
+                resume_mode_state = None
+                if (
+                    checkpoint_data.get("current_mode_state")
+                    and checkpoint_data["current_mode_state"].get("mode") == m_mode
+                ):
+                    resume_mode_state = checkpoint_data["current_mode_state"]
 
-        # Early stoppage: ONLY halt remaining matrix modes if a regression is confirmed (REVERT)
-        if res["decision"] == "REVERT" and res.get("stop_type") != "USER_SKIPPED":
-            print(f"\n[🛑] EARLY STOPPAGE: Mode '{m_name}' confirmed regression ({res['var_win_share']:.1f}% vs {target_share:.1f}% target).")
-            print("     Halting remaining matrix modes early as regression is confirmed.\n")
-            for rem_idx in range(idx + 1, len(active_matrix)):
-                matrix_progress[rem_idx]["status"] = "SKIPPED"
-                matrix_progress[rem_idx]["decision"] = "SKIPPED"
-                matrix_progress[rem_idx]["reason"] = f"Skipped: Prior mode '{m_name}' confirmed regression"
+                if shared_pool is None or getattr(shared_pool, "_state", None) != mp.pool.RUN:
+                    try:
+                        shared_pool = create_worker_pool(threads, _baseline_module_name, _variant_module_name)
+                    except Exception as e:
+                        print(f"[!] Warning: Could not allocate shared worker pool for {m_name}: {e}")
+                        shared_pool = None
+
+                res = _run_single_mode_simulation(
+                    mode=m_mode,
+                    mode_name=m_name,
+                    num_snakes=num_snakes,
+                    target_share=target_share,
+                    high_stop=high_stop,
+                    low_stop=low_stop,
+                    min_games=min_games,
+                    max_games=max_games,
+                    check_interval=check_interval,
+                    threads=threads,
+                    dash_client=dash_client,
+                    desc=desc,
+                    is_bug_fix=is_bug_fix,
+                    keep_threshold=m_keep_thresh,
+                    matrix_progress=matrix_progress,
+                    results_dir=results_dir,
+                    base_seed=42_000 + idx * 10_000,
+                    resume_mode_state=resume_mode_state,
+                    checkpoint_callback=_checkpoint_callback,
+                    pool=shared_pool,
+                )
+
+                # Record this mode as completed in checkpoint
+                checkpoint_data["completed_modes"] = [
+                    c for c in checkpoint_data.get("completed_modes", []) if c.get("mode") != m_mode
+                ] + [res]
+                checkpoint_data["current_mode_state"] = None
+                save_checkpoint(results_dir, checkpoint_data)
+
+            matrix_results.append(res)
+            total_games_all += res["total_played"]
+            for k in ("wins", "losses", "draws"):
+                agg_results[STRATEGY_BASELINE][k] += res["results"][STRATEGY_BASELINE][k]
+                agg_results[STRATEGY_VARIANT][k] += res["results"][STRATEGY_VARIANT][k]
+
+            if res["stop_type"] == "USER_SKIPPED":
+                matrix_progress[idx]["status"] = "SKIPPED"
+                matrix_progress[idx]["decision"] = "SKIPPED"
+            elif res["decision"] == "KEEP":
+                matrix_progress[idx]["status"] = "PASSED"
+                matrix_progress[idx]["decision"] = "KEEP"
+            elif res["decision"] == "PARITY":
+                matrix_progress[idx]["status"] = "PARITY"
+                matrix_progress[idx]["decision"] = "PARITY"
+            else:
+                matrix_progress[idx]["status"] = "FAILED"
+                matrix_progress[idx]["decision"] = "REVERT"
+            matrix_progress[idx]["win_share"] = res["var_win_share"]
+            matrix_progress[idx]["games"] = res["total_played"]
+            matrix_progress[idx]["reason"] = res["stop_reason"]
             dash_client.update_matrix(matrix_progress)
-            break
+
+            # Early stoppage: ONLY halt remaining matrix modes if a regression is confirmed (REVERT)
+            if res["decision"] == "REVERT" and res.get("stop_type") != "USER_SKIPPED":
+                print(f"\n[🛑] EARLY STOPPAGE: Mode '{m_name}' confirmed regression ({res['var_win_share']:.1f}% vs {target_share:.1f}% target).")
+                print("     Halting remaining matrix modes early as regression is confirmed.\n")
+                for rem_idx in range(idx + 1, len(active_matrix)):
+                    matrix_progress[rem_idx]["status"] = "SKIPPED"
+                    matrix_progress[rem_idx]["decision"] = "SKIPPED"
+                    matrix_progress[rem_idx]["reason"] = f"Skipped: Prior mode '{m_name}' confirmed regression"
+                dash_client.update_matrix(matrix_progress)
+                break
+    finally:
+        if shared_pool is not None:
+            try:
+                shared_pool.close()
+                shared_pool.join()
+            except Exception:
+                pass
 
     total_wall_sec = time.perf_counter() - t_wall_start
     revert_modes = [r for r in matrix_results if r["decision"] == "REVERT" and r.get("stop_type") != "USER_SKIPPED"]
@@ -1836,6 +2236,16 @@ def run_ab_test_engine(
         experiment_desc=desc,
         history_path=history_path,
     )
+
+    # Automated post-benchmark blunder extraction on worst variant losses
+    try:
+        run_post_benchmark_blunder_pipeline(
+            matrix_results=matrix_results,
+            max_losses=5,
+            results_dir=results_dir,
+        )
+    except Exception as e:
+        print(f"\n[⚠️] Post-benchmark blunder extraction encountered an error: {e}\n")
 
     # Simulation suite finished; clean up active checkpoint
     clear_checkpoint(results_dir)
