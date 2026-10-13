@@ -26,6 +26,34 @@ from harness.ab_test import (
 from harness.ab_dashboard import DashboardClient
 
 
+class _InlineResultIterator:
+    def __init__(self, function, items):
+        self._results = iter(function(item) for item in items)
+
+    def next(self, timeout=None):
+        return next(self._results)
+
+
+class _InlinePool:
+    def __init__(self):
+        self._state = mp.pool.RUN
+        self.closed = False
+        self.joined = False
+
+    def imap_unordered(self, function, items):
+        return _InlineResultIterator(function, items)
+
+    def close(self):
+        self.closed = True
+        self._state = mp.pool.CLOSE
+
+    def join(self):
+        self.joined = True
+
+    def terminate(self):
+        self._state = mp.pool.TERMINATE
+
+
 class TestWorkerPoolRecycling(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
@@ -47,14 +75,14 @@ class TestWorkerPoolRecycling(unittest.TestCase):
         dash_mock = MagicMock(spec=DashboardClient)
         dash_mock.check_skip.return_value = False
 
-        shared_pool = create_worker_pool(threads=2)
+        shared_pool = _InlinePool()
         try:
             # Mock simulate_single_game to return instantly
             def mock_game(game_num, seed, mode="duel"):
                 return {
                     "game": game_num,
                     "seed": seed,
-                    "winner": STRATEGY_VARIANT,
+                    "winner": STRATEGY_BASELINE,
                     "tied_snakes": [],
                     "turns": 20,
                     "duration_ms": 10.0,
@@ -84,6 +112,7 @@ class TestWorkerPoolRecycling(unittest.TestCase):
 
                 # Verify shared_pool is STILL open and running!
                 self.assertEqual(getattr(shared_pool, "_state", None), mp.pool.RUN)
+                self.assertFalse(shared_pool.closed)
                 self.assertEqual(res1["total_played"], 5)
 
                 # Now run a second mode using the EXACT SAME shared_pool!
@@ -107,6 +136,7 @@ class TestWorkerPoolRecycling(unittest.TestCase):
                 )
 
                 self.assertEqual(getattr(shared_pool, "_state", None), mp.pool.RUN)
+                self.assertFalse(shared_pool.closed)
                 self.assertEqual(res2["total_played"], 5)
         finally:
             shared_pool.close()
@@ -128,7 +158,10 @@ class TestWorkerPoolRecycling(unittest.TestCase):
                 "var_avg_depth": 5.0,
             }
 
-        with patch("harness.ab_test.simulate_single_game", side_effect=mock_game):
+        local_pool = _InlinePool()
+        with patch("harness.ab_test.simulate_single_game", side_effect=mock_game), patch(
+            "harness.ab_test.create_worker_pool", return_value=local_pool
+        ) as create_pool:
             # Calling with pool=None creates a local pool and cleans it up
             res = _run_single_mode_simulation(
                 mode="duel",
@@ -149,6 +182,9 @@ class TestWorkerPoolRecycling(unittest.TestCase):
                 pool=None,
             )
             self.assertEqual(res["total_played"], 3)
+            create_pool.assert_called_once()
+            self.assertTrue(local_pool.closed)
+            self.assertTrue(local_pool.joined)
 
 
 if __name__ == "__main__":
