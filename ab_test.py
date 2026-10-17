@@ -32,6 +32,7 @@ from datetime import datetime
 import json
 import math
 import multiprocessing as mp
+import multiprocessing.pool
 import os
 from pathlib import Path
 import random
@@ -121,7 +122,7 @@ def _init_worker(baseline_module: str, variant_module: str) -> None:
 
 
 def create_worker_pool(
-    threads: int = 8,
+    threads: int = 6,
     baseline_module: str = DEFAULT_BASELINE_MODULE,
     variant_module: str = DEFAULT_VARIANT_MODULE,
 ) -> mp.pool.Pool:
@@ -142,7 +143,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 # Project Configuration Constants
 # ---------------------------------------------------------------------------
-THREADS = 8                 # Fixed simulation worker process count (Updated per user instruction)
+THREADS = 6                 # Fixed simulation worker process count (Updated per user instruction: lowered from 8 to 6)
 MIN_GAMES = 30             # Minimum games before evaluating dynamic statistical early stop (rethought from fixed 50)
 MAX_GAMES = 200            # Maximum games to play before hard stop
 CHECK_INTERVAL = 1         # Evaluate statistical confidence dynamically on every completed game (>= MIN_GAMES)
