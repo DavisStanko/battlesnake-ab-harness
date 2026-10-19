@@ -28,7 +28,9 @@ from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
 
 def load_run_history() -> list:
-    history_file = Path(__file__).parent / "ab_results" / "ab_history.json"
+    history_file = Path(__file__).resolve().parent.parent / "ab_results" / "ab_history.json"
+    if not history_file.exists():
+        history_file = Path(__file__).parent / "ab_results" / "ab_history.json"
     if history_file.exists():
         try:
             with history_file.open("r", encoding="utf-8") as f:

@@ -581,6 +581,14 @@ class TestDashboardSkip(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_load_run_history_resolution(self):
+        from ab_dashboard import load_run_history
+        history = load_run_history()
+        self.assertIsInstance(history, list)
+        self.assertGreater(len(history), 0)
+        last_entry = history[-1]
+        self.assertIn("recommendation", last_entry)
+
 
 if __name__ == "__main__":
     unittest.main()
