@@ -552,6 +552,35 @@ class TestDashboardSkip(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
+    def test_dashboard_favicon_tags_and_endpoints(self):
+        import urllib.request
+        import xml.etree.ElementTree as ET
+        from ab_dashboard import DASHBOARD_HTML, FAVICON_SVG
+
+        # 1. HTML has favicon link tags
+        self.assertIn('rel="icon"', DASHBOARD_HTML)
+        self.assertIn('data:image/svg+xml,', DASHBOARD_HTML)
+        self.assertIn('/favicon.ico', DASHBOARD_HTML)
+
+        # 2. FAVICON_SVG is valid XML and contains snake emoji
+        root = ET.fromstring(FAVICON_SVG)
+        self.assertIn("svg", root.tag)
+        self.assertIn("🐍", FAVICON_SVG)
+
+        # 3. HTTP GET for /favicon.ico and /favicon.svg returns 200 and image/svg+xml
+        server, port = start_dashboard_server(self.state, preferred_port=0, timeout_seconds=60)
+        try:
+            for endpoint in ("/favicon.ico", "/favicon.svg", "/favicon.ico?v=2"):
+                req = urllib.request.Request(f"http://localhost:{port}{endpoint}")
+                with urllib.request.urlopen(req) as resp:
+                    self.assertEqual(resp.status, 200)
+                    self.assertEqual(resp.headers.get("Content-Type"), "image/svg+xml")
+                    body = resp.read().decode("utf-8")
+                    self.assertEqual(body, FAVICON_SVG)
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()
