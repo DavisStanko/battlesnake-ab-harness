@@ -44,10 +44,18 @@ class TestDashboardSkip(unittest.TestCase):
             # Initially false
             self.assertFalse(client.check_skip())
 
-            # Trigger skip
-            resp = client.skip_mode()
-            self.assertEqual(resp.get("status"), "ok")
-            self.assertTrue(resp.get("skip_requested"))
+            # Action endpoints return 405 error
+            resp_skip = client.skip_mode()
+            self.assertEqual(resp_skip.get("status"), "error")
+            self.assertEqual(resp_skip.get("code"), 405)
+
+            resp_cancel = client.cancel_test()
+            self.assertEqual(resp_cancel.get("status"), "error")
+            self.assertEqual(resp_cancel.get("code"), 405)
+
+            # Direct state manipulation for atomic consume
+            with self.state.lock:
+                self.state.skip_requested = True
 
             # Atomic consume returns True first time
             self.assertTrue(client.check_skip())
@@ -65,10 +73,11 @@ class TestDashboardSkip(unittest.TestCase):
             client = DashboardClient(port=port)
             self.assertTrue(client.is_running())
 
-            # Background thread triggers skip
+            # Background thread triggers skip via internal state
             def _trigger_skip():
                 time.sleep(0.02)
-                client.skip_mode()
+                with self.state.lock:
+                    self.state.skip_requested = True
 
             t = threading.Thread(target=_trigger_skip, daemon=True)
             t.start()
@@ -122,7 +131,8 @@ class TestDashboardSkip(unittest.TestCase):
             # In background, skip duel after 0.02s, then skip standard after duel finishes
             def _skip_controller():
                 time.sleep(0.02)
-                client.skip_mode()
+                with self.state.lock:
+                    self.state.skip_requested = True
                 # Wait until standard mode is initialized
                 while True:
                     time.sleep(0.01)
@@ -133,7 +143,8 @@ class TestDashboardSkip(unittest.TestCase):
                                 data = json.loads(resp.read().decode())
                                 if data.get("game_mode") == "standard":
                                     time.sleep(0.02)
-                                    client.skip_mode()
+                                    with self.state.lock:
+                                        self.state.skip_requested = True
                                     break
                         except Exception:
                             pass
@@ -513,6 +524,33 @@ class TestDashboardSkip(unittest.TestCase):
         for pt in corners + cardinals:
             self.assertEqual(v_counts_2p[pt], 25, f"2P variant spawn at {pt} was visited {v_counts_2p[pt]} times, expected 25")
             self.assertEqual(b_counts_2p[pt], 25, f"2P baseline spawn at {pt} was visited {b_counts_2p[pt]} times, expected 25")
+
+    def test_view_only_post_endpoints_and_no_html_buttons(self):
+        import urllib.request
+        import urllib.error
+        from ab_dashboard import DASHBOARD_HTML
+
+        # Verify no <button> or action handlers in HTML
+        self.assertNotIn("<button", DASHBOARD_HTML)
+        self.assertNotIn("onclick", DASHBOARD_HTML)
+        self.assertNotIn("skipActiveMode", DASHBOARD_HTML)
+        self.assertNotIn("cancelActiveRun", DASHBOARD_HTML)
+
+        server, port = start_dashboard_server(self.state, preferred_port=0, timeout_seconds=60)
+        try:
+            # Action endpoints return 405 Method Not Allowed
+            for endpoint in ("/api/skip", "/api/cancel", "/api/stop", "/api/kill"):
+                req = urllib.request.Request(
+                    f"http://localhost:{port}{endpoint}",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"}
+                )
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(req)
+                self.assertEqual(ctx.exception.code, 405)
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

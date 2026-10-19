@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -1185,70 +1186,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .b-seg-3 { background: linear-gradient(90deg, #2563eb, #60a5fa) !important; border-left: 1px solid rgba(255, 255, 255, 0.2); }
     .b-sub-2 { background: linear-gradient(90deg, #1d4ed8, #2563eb) !important; border-left: 1px solid rgba(255, 255, 255, 0.15); }
     .b-sub-3 { background: linear-gradient(90deg, #2563eb, #3b82f6) !important; border-left: 1px solid rgba(255, 255, 255, 0.15); }
-
-    /* Skip Button */
-    .btn-skip {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.45rem;
-      background: rgba(245, 158, 11, 0.15);
-      border: 1px solid rgba(245, 158, 11, 0.45);
-      color: #fcd34d;
-      font-family: inherit;
-      font-weight: 700;
-      font-size: 0.8rem;
-      padding: 0.35rem 0.85rem;
-      border-radius: 9999px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      user-select: none;
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
-    .btn-skip:hover:not(:disabled) {
-      background: rgba(245, 158, 11, 0.35);
-      border-color: rgba(245, 158, 11, 0.8);
-      color: #ffffff;
-      box-shadow: 0 0 12px rgba(245, 158, 11, 0.4);
-      transform: translateY(-1px);
-    }
-    .btn-skip:disabled {
-      opacity: 0.35;
-      cursor: not-allowed;
-      transform: none;
-    }
-
-    /* Cancel / Stop Button */
-    .btn-cancel {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.45rem;
-      background: rgba(239, 68, 68, 0.15);
-      border: 1px solid rgba(239, 68, 68, 0.45);
-      color: #fca5a5;
-      font-family: inherit;
-      font-weight: 700;
-      font-size: 0.8rem;
-      padding: 0.35rem 0.85rem;
-      border-radius: 9999px;
-      cursor: pointer;
-      transition: all 0.2s ease;
-      user-select: none;
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
-    .btn-cancel:hover:not(:disabled) {
-      background: rgba(239, 68, 68, 0.35);
-      border-color: rgba(239, 68, 68, 0.8);
-      color: #ffffff;
-      box-shadow: 0 0 12px rgba(239, 68, 68, 0.4);
-      transform: translateY(-1px);
-    }
-    .btn-cancel:disabled {
-      opacity: 0.35;
-      cursor: not-allowed;
-      transform: none;
-    }
   </style>
 </head>
 <body>
@@ -1273,14 +1210,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span class="status-dot" id="statusDot"></span>
         <span id="statusText">CONNECTING...</span>
       </div>
-      <button class="btn-skip" id="skipBtnHeader" onclick="skipActiveMode()" title="Skip the current mode and advance to next">
-        <span>⏭️</span>
-        <span id="skipBtnText">Skip Mode</span>
-      </button>
-      <button class="btn-cancel" id="cancelBtnHeader" onclick="cancelActiveRun()" title="Stop the active A/B test run">
-        <span>⏹️</span>
-        <span id="cancelBtnText">Stop Run</span>
-      </button>
     </div>
   </header>
 
@@ -1505,42 +1434,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           setText(statusText, String(data.status || 'STOPPED').toUpperCase());
         }
       }
-
-      // Update skip and cancel buttons state
-      const skipBtn = document.getElementById('skipBtnHeader');
-      if (skipBtn) {
-        if (data.status === 'RUNNING' && data.runner_alive !== false) {
-          if (data.skip_requested) {
-            skipBtn.disabled = true;
-            skipBtn.style.opacity = '0.6';
-            skipBtn.style.pointerEvents = 'none';
-            setHTML(skipBtn, '<span>⏳</span> <span id="skipBtnText">Advancing...</span>');
-          } else {
-            skipBtn.disabled = false;
-            skipBtn.style.opacity = '1';
-            skipBtn.style.pointerEvents = 'auto';
-            setHTML(skipBtn, '<span>⏭️</span> <span id="skipBtnText">Skip Mode</span>');
-          }
-        } else {
-          skipBtn.disabled = true;
-          skipBtn.style.opacity = '0.35';
-          skipBtn.style.pointerEvents = 'none';
-          setHTML(skipBtn, '<span>⏭️</span> <span id="skipBtnText">Skip Mode</span>');
-        }
-      }
-
-      const cancelBtns = document.querySelectorAll('.btn-cancel');
-      cancelBtns.forEach(btn => {
-        if (data.status === 'RUNNING' && data.runner_alive !== false) {
-          btn.disabled = false;
-          btn.style.opacity = '1';
-          btn.style.pointerEvents = 'auto';
-        } else {
-          btn.disabled = true;
-          btn.style.opacity = '0.35';
-          btn.style.pointerEvents = 'none';
-        }
-      });
 
       const subtext = document.getElementById('headerSubtext');
       if (subtext) {
@@ -2015,62 +1908,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
   }
 
-  async function skipActiveMode() {
-    if (!confirm('Are you sure you want to skip the current test mode and advance to the next?')) return;
-    const skipBtn = document.getElementById('skipBtnHeader');
-    if (skipBtn) {
-      skipBtn.disabled = true;
-      skipBtn.style.opacity = '0.6';
-      skipBtn.style.pointerEvents = 'none';
-      skipBtn.innerHTML = '<span>⏳</span> <span id="skipBtnText">Skipping...</span>';
-    }
-    try {
-      const res = await fetch('/api/skip', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'skip' })
-      });
-      const data = await res.json();
-      console.log('Skip response:', data);
-      await updateDashboard();
-    } catch (err) {
-      console.error('Failed to skip test mode:', err);
-      alert('Error requesting skip: ' + err);
-      if (skipBtn) {
-        skipBtn.disabled = false;
-        skipBtn.style.opacity = '1';
-        skipBtn.style.pointerEvents = 'auto';
-        skipBtn.innerHTML = '<span>⏭️</span> <span id="skipBtnText">Skip Mode</span>';
-      }
-    }
-  }
-
-  async function cancelActiveRun() {
-    if (!confirm('Are you sure you want to stop the active A/B test run?')) return;
-    const btns = document.querySelectorAll('.btn-cancel');
-    btns.forEach(b => {
-      b.disabled = true;
-      b.innerHTML = '<span>⏳</span> <span>Stopping...</span>';
-    });
-    try {
-      const res = await fetch('/api/cancel', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'cancel' })
-      });
-      const data = await res.json();
-      console.log('Cancel response:', data);
-      await updateDashboard();
-    } catch (err) {
-      console.error('Failed to cancel test:', err);
-      alert('Error requesting stop: ' + err);
-      btns.forEach(b => {
-        b.disabled = false;
-        b.innerHTML = '<span>⏹️</span> <span>Stop Run</span>';
-      });
-    }
-  }
-
   setInterval(updateDashboard, 500);
   updateDashboard();
 </script>
@@ -2079,69 +1916,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 """
 
 def stop_active_tasks(state: DashboardState) -> Dict[str, Any]:
-    import signal
-    killed_pids = []
-    candidate_pids = set()
-    current_pid = os.getpid()
-    parent_pid = os.getppid()
-
-    with state.lock:
-        if state.active_pid and isinstance(state.active_pid, int):
-            if state.active_pid not in (current_pid, parent_pid):
-                candidate_pids.add(state.active_pid)
-
-    try:
-        for entry in os.listdir("/proc"):
-            if not entry.isdigit():
-                continue
-            pid = int(entry)
-            if pid in (current_pid, parent_pid):
-                continue
-            try:
-                with open(f"/proc/{pid}/cmdline", "rb") as f:
-                    cmdline = f.read().decode("utf-8", errors="ignore").replace("\x00", " ")
-                if "ab_test.py" in cmdline and "ab_dashboard.py" not in cmdline and "-c" not in cmdline:
-                    candidate_pids.add(pid)
-            except (OSError, IOError):
-                continue
-    except Exception:
-        pass
-
-    for p in list(candidate_pids):
-        try:
-            os.kill(p, 0)
-        except OSError:
-            continue
-
-        try:
-            os.kill(p, signal.SIGINT)
-            killed_pids.append(p)
-        except Exception:
-            try:
-                os.kill(p, signal.SIGTERM)
-                killed_pids.append(p)
-            except Exception:
-                pass
-
-    if killed_pids:
-        time.sleep(0.3)
-        for p in killed_pids:
-            try:
-                os.kill(p, 0)
-                os.kill(p, signal.SIGTERM)
-            except OSError:
-                pass
-
-    with state.lock:
-        state.status = "STOPPED"
-        state.stop_type = "MANUAL_ABORT"
-        state.stop_reason = "Run stopped by user via dashboard Stop button."
-        state.recommendation = "PENDING"
-        state.end_time = time.time()
-        state.active_pid = None
-        state.last_activity_time = time.time()
-
-    return {"status": "ok", "killed_pids": killed_pids}
+    return {"status": "error", "message": "Method Not Allowed - Dashboard is view-only"}
 
 
 class DashboardHandler(http.server.BaseHTTPRequestHandler):
@@ -2186,35 +1961,15 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(DASHBOARD_HTML.encode("utf-8"))
 
     def do_POST(self):
-        if self.path == "/api/skip":
+        if self.path in ("/api/skip", "/api/cancel", "/api/stop"):
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 0:
                 self.rfile.read(content_length)
-            resp_data = {"status": "error", "message": "No state initialized"}
-            if self.state:
-                with self.state.lock:
-                    self.state.skip_requested = True
-                    self.state.last_activity_time = time.time()
-                resp_data = {"status": "ok", "skip_requested": True}
-            self.send_response(200)
+            self.send_response(405)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            self.wfile.write(json.dumps(resp_data).encode("utf-8"))
-            return
-
-        if self.path in ("/api/cancel", "/api/stop"):
-            content_length = int(self.headers.get('Content-Length', 0))
-            if content_length > 0:
-                self.rfile.read(content_length)
-            resp_data = {"status": "error", "message": "No state initialized"}
-            if self.state:
-                resp_data = stop_active_tasks(self.state)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps(resp_data).encode("utf-8"))
+            self.wfile.write(json.dumps({"error": "Method Not Allowed - Dashboard is view-only"}).encode("utf-8"))
             return
 
         if self.path == "/api/update":
@@ -2236,6 +1991,15 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
             return
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length > 0:
+            self.rfile.read(content_length)
+        self.send_response(405)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps({"error": "Method Not Allowed - Dashboard is view-only"}).encode("utf-8"))
 
     def log_message(self, format, *args):
         pass
@@ -2338,6 +2102,8 @@ class DashboardClient:
             )
             with urllib.request.urlopen(req, timeout=3.0) as resp:
                 return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            return {"status": "error", "code": e.code, "error": f"HTTP {e.code}: {e.reason}"}
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -2359,6 +2125,8 @@ class DashboardClient:
             )
             with urllib.request.urlopen(req, timeout=3.0) as resp:
                 return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            return {"status": "error", "code": e.code, "error": f"HTTP {e.code}: {e.reason}"}
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
