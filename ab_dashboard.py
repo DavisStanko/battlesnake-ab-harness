@@ -27,17 +27,31 @@ import webbrowser
 from pathlib import Path
 from typing import Tuple, Dict, Any, Optional
 
-def load_run_history() -> list:
+_HISTORY_CACHE: Optional[list] = None
+_HISTORY_MTIME: float = 0.0
+
+def load_run_history(max_entries: int = 15) -> list:
+    global _HISTORY_CACHE, _HISTORY_MTIME
     history_file = Path(__file__).resolve().parent.parent / "ab_results" / "ab_history.json"
     if not history_file.exists():
         history_file = Path(__file__).parent / "ab_results" / "ab_history.json"
     if history_file.exists():
         try:
+            mtime = history_file.stat().st_mtime
+            if _HISTORY_CACHE is not None and mtime == _HISTORY_MTIME:
+                return _HISTORY_CACHE
             with history_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    for entry in data:
+                    sliced = data[-max_entries:] if len(data) > max_entries else data
+                    for entry in sliced:
                         if isinstance(entry, dict):
+                            entry.pop("games", None)
+                            if "matrix_results" in entry and isinstance(entry["matrix_results"], list):
+                                for mr in entry["matrix_results"]:
+                                    if isinstance(mr, dict):
+                                        mr.pop("games", None)
+                                        mr.pop("rows", None)
                             for key in ("baseline", "variant"):
                                 sub = entry.get(key)
                                 if isinstance(sub, dict):
@@ -46,9 +60,12 @@ def load_run_history() -> list:
                                             sub[num_k] = round(sub[num_k], 2)
                             if isinstance(entry.get("draws"), float):
                                 entry["draws"] = round(entry["draws"], 2)
-                    return data[-100:]
+                    _HISTORY_CACHE = sliced
+                    _HISTORY_MTIME = mtime
+                    return sliced
         except Exception:
-            pass
+            if _HISTORY_CACHE is not None:
+                return _HISTORY_CACHE
     return []
 
 class DashboardState:
@@ -98,6 +115,8 @@ class DashboardState:
 
         self.snakes_stats = self._init_snakes_stats(num_snakes, strategy_variant, strategy_baseline)
 
+        self.suite_start_time: Optional[float] = None
+        self._last_desc: str = experiment_desc
         self.start_time = time.time()
         self.end_time: Optional[float] = None
         self.csv_path = ""
@@ -135,7 +154,8 @@ class DashboardState:
                 self.early_stop_high = payload.get("early_stop_high", 35.0)
                 self.early_stop_low = payload.get("early_stop_low", 18.0)
                 self.threads = payload.get("threads", self.threads)
-                self.experiment_desc = payload.get("experiment_desc", "Unspecified Experiment")
+                new_desc = payload.get("experiment_desc", "Unspecified Experiment")
+                self.experiment_desc = new_desc
                 self.game_mode = payload.get("game_mode", "standard")
                 self.num_snakes = payload.get("num_snakes", 4)
                 self.target_win_share = payload.get("target_win_share", 25.0 if self.num_snakes == 4 else 50.0)
@@ -156,6 +176,12 @@ class DashboardState:
                 self.draws_variant = 0
                 self.snakes_stats = self._init_snakes_stats(self.num_snakes, self.strategy_variant, self.strategy_baseline)
                 self.start_time = time.time()
+                explicit_suite = payload.get("suite_start_time")
+                if explicit_suite:
+                    self.suite_start_time = float(explicit_suite)
+                elif self.suite_start_time is None or getattr(self, "_last_desc", None) != new_desc:
+                    self.suite_start_time = self.start_time
+                self._last_desc = new_desc
                 self.end_time = None
                 self.csv_path = ""
                 self.recommendation = "PENDING"
@@ -439,7 +465,9 @@ class DashboardState:
                 games_to_next = max(0, self.max_games - played)
 
             now = self.end_time or time.time()
-            elapsed = now - self.start_time
+            suite_start = getattr(self, "suite_start_time", None) or self.start_time
+            suite_elapsed = now - suite_start
+            mode_elapsed = now - self.start_time
 
             return {
                 "status": self.status,
@@ -493,7 +521,9 @@ class DashboardState:
                 "games_to_next_checkpoint": games_to_next,
                 "recommendation": self.recommendation,
                 "csv_path": self.csv_path,
-                "elapsed_seconds": round(elapsed, 1),
+                "elapsed_seconds": round(suite_elapsed, 1),
+                "mode_elapsed_seconds": round(mode_elapsed, 1),
+                "suite_elapsed_seconds": round(suite_elapsed, 1),
                 "snakes_stats": self.snakes_stats,
                 "run_history": load_run_history(),
                 "experiment_desc": self.experiment_desc
@@ -1404,8 +1434,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
 
   let lastHistoryJSON = '';
+  let isUpdating = false;
 
   async function updateDashboard() {
+    if (isUpdating) return;
+    isUpdating = true;
     try {
       const res = await fetch('/api/data');
       if (!res.ok) return;
@@ -1475,10 +1508,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       setText('threadsCount', (data.threads != null && data.threads > 0) ? data.threads : '-');
       setText('elapsedTime', formatSeconds(data.elapsed_seconds || 0));
+      const elapsedEl = document.getElementById('elapsedTime');
+      const modeElapsed = data.mode_elapsed_seconds || data.elapsed_seconds || 0;
+      if (elapsedEl && elapsedEl.parentElement) {
+        elapsedEl.parentElement.title = `Total Suite: ${formatSeconds(data.elapsed_seconds || 0)} | Current Mode: ${formatSeconds(modeElapsed)}`;
+      }
 
-      const elapsed = data.elapsed_seconds || 0;
       const isRunning = (data.status === 'RUNNING' && data.runner_alive !== false);
-      const pace = (isRunning && elapsed > 0) ? (data.total_played / elapsed) : 0;
+      const pace = (isRunning && modeElapsed > 0) ? (data.total_played / modeElapsed) : 0;
       if (isRunning) {
         setText('paceValue', `${pace.toFixed(3)} games/sec`);
       } else {
@@ -1912,6 +1949,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         statusDot.style.backgroundColor = 'var(--draw-color)';
         statusText.innerText = 'DISCONNECTED';
       }
+    } finally {
+      isUpdating = false;
     }
   }
 
@@ -2163,6 +2202,7 @@ class DashboardClient:
         target_win_share: Optional[float] = None,
         matrix_progress: Optional[list] = None,
         pid: Optional[int] = None,
+        suite_start_time: Optional[float] = None,
     ):
         payload = {
             "action": "init",
@@ -2180,6 +2220,8 @@ class DashboardClient:
             "num_snakes": num_snakes,
             "target_win_share": target_win_share if target_win_share is not None else (25.0 if num_snakes == 4 else 50.0),
         }
+        if suite_start_time is not None:
+            payload["suite_start_time"] = suite_start_time
         if matrix_progress is not None:
             payload["matrix_progress"] = matrix_progress
         self.post_update(payload, sync=True)

@@ -143,7 +143,7 @@ except Exception:
 # ---------------------------------------------------------------------------
 # Project Configuration Constants
 # ---------------------------------------------------------------------------
-THREADS = 6                 # Fixed simulation worker process count (Updated per user instruction: lowered from 8 to 6)
+THREADS = 7                 # Fixed simulation worker process count (Updated per user instruction: set to 7)
 MIN_GAMES = 30             # Minimum games before evaluating dynamic statistical early stop (rethought from fixed 50)
 MAX_GAMES = 200            # Maximum games to play before hard stop
 CHECK_INTERVAL = 1         # Evaluate statistical confidence dynamically on every completed game (>= MIN_GAMES)
@@ -1457,6 +1457,7 @@ def _run_single_mode_simulation(
     resume_mode_state: Optional[Dict[str, Any]] = None,
     checkpoint_callback: Optional[Any] = None,
     pool: Optional[mp.pool.Pool] = None,
+    suite_start_time: Optional[float] = None,
 ) -> Dict[str, Any]:
     if results_dir is None:
         results_dir = PROJECT_ROOT / "ab_results"
@@ -1480,6 +1481,7 @@ def _run_single_mode_simulation(
         num_snakes=num_snakes,
         target_win_share=target_share,
         matrix_progress=matrix_progress,
+        suite_start_time=suite_start_time,
     )
 
     if resume_mode_state and resume_mode_state.get("mode") == mode and resume_mode_state.get("total_played", 0) > 0:
@@ -1990,6 +1992,7 @@ def run_ab_test_engine(
     results_dir = PROJECT_ROOT / "ab_results"
     results_dir.mkdir(parents=True, exist_ok=True)
     t_wall_start = time.perf_counter()
+    t_suite_start = time.time()
 
     checkpoint_data: Dict[str, Any] = {
         "desc": desc,
@@ -2127,6 +2130,7 @@ def run_ab_test_engine(
                     resume_mode_state=resume_mode_state,
                     checkpoint_callback=_checkpoint_callback,
                     pool=shared_pool,
+                    suite_start_time=t_suite_start,
                 )
 
                 # Record this mode as completed in checkpoint
