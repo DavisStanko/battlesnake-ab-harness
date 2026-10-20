@@ -338,6 +338,7 @@ class DashboardState:
         self.num_snakes = num_snakes
         self.target_win_share = 25.0 if num_snakes == 4 else 50.0
         self.matrix_progress = []
+        self.run_type = "self"
 
         self.wins_baseline = 0
         self.losses_baseline = 0
@@ -378,6 +379,15 @@ class DashboardState:
             if action == "register_pid":
                 self.active_pid = payload.get("pid")
             elif action == "init":
+                if self.total_played > 0 and self.start_time:
+                    prev_elapsed = (self.end_time or time.time()) - self.start_time
+                    append_mode_timing(
+                        mode=self.game_mode,
+                        run_type=getattr(self, "run_type", "self"),
+                        games=self.total_played,
+                        elapsed_seconds=prev_elapsed,
+                    )
+                self.run_type = payload.get("run_type", getattr(self, "run_type", "self"))
                 self.active_pid = payload.get("pid", self.active_pid)
                 self.strategy_baseline = payload.get("strategy_baseline", "baseline")
                 self.strategy_variant = payload.get("strategy_variant", "variant")
@@ -525,6 +535,14 @@ class DashboardState:
                 self.recommendation = payload.get("recommendation", "REVERT")
                 self.csv_path = str(payload.get("csv_path", ""))
                 self.end_time = time.time()
+                if self.total_played > 0 and self.start_time:
+                    mode_elapsed = self.end_time - self.start_time
+                    append_mode_timing(
+                        mode=self.game_mode,
+                        run_type=getattr(self, "run_type", "self"),
+                        games=self.total_played,
+                        elapsed_seconds=mode_elapsed,
+                    )
 
     def update_game(self, game_num: int, seed: int, winner: str, turns: int = 0):
         with self.lock:
@@ -703,6 +721,15 @@ class DashboardState:
             suite_elapsed = now - suite_start
             mode_elapsed = now - self.start_time
 
+            eta_info = calculate_eta(
+                matrix_progress=live_matrix_progress if live_matrix_progress else self.matrix_progress,
+                current_mode=self.game_mode,
+                current_played=played,
+                current_max_games=self.target_games or self.max_games or 200,
+                current_mode_elapsed=mode_elapsed,
+                run_type=getattr(self, "run_type", "self"),
+            )
+
             return {
                 "status": self.status,
                 "stop_type": self.stop_type,
@@ -758,6 +785,9 @@ class DashboardState:
                 "elapsed_seconds": round(suite_elapsed, 1),
                 "mode_elapsed_seconds": round(mode_elapsed, 1),
                 "suite_elapsed_seconds": round(suite_elapsed, 1),
+                "eta_seconds": eta_info.get("total_eta_seconds"),
+                "eta_breakdown": eta_info.get("breakdown", []),
+                "run_type": getattr(self, "run_type", "self"),
                 "snakes_stats": self.snakes_stats,
                 "run_history": load_run_history(),
                 "experiment_desc": self.experiment_desc
@@ -2011,6 +2041,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         setText('runsSubtext', `${pctComplete}% Complete (${data.status === 'STOPPED' ? 'Stopped' : 'Done'})`);
       } else if (data.status === 'DISCONNECTED') {
         setText('runsSubtext', `${pctComplete}% Complete (Disconnected)`);
+      } else if (data.eta_seconds != null && data.eta_seconds > 0 && isRunning) {
+        const etaText = formatSeconds(data.eta_seconds);
+        setText('runsSubtext', `${pctComplete}% Complete (~${etaText} left)`);
+        const subEl = document.getElementById('runsSubtext');
+        if (subEl && data.eta_breakdown && data.eta_breakdown.length > 0) {
+          subEl.title = 'Total Run ETA: ' + data.eta_breakdown.map(b => `${b.mode}: ${b.games_left}G (~${formatSeconds(b.eta_seconds)})`).join(' | ');
+        }
       } else if (pace > 0 && isRunning) {
         const etaSec = remainingGames / pace;
         setText('runsSubtext', `${pctComplete}% Complete (~${formatSeconds(etaSec)} left)`);
