@@ -57,6 +57,7 @@ import importlib.util
 from ab_dashboard import DashboardClient, ensure_dashboard_running
 from blunder_extractor import find_blunders, generate_unit_test_code, BlunderDetection
 from simulator import simulate_turn
+import zoo_adapter
 
 if (HARNESS_DIR.parent / "strategies").exists():
     DEFAULT_BASELINE_MODULE: str = "strategies.strategy_baseline"
@@ -462,6 +463,12 @@ def _build_game_state(
                     "royale": {
                         "shrinkEveryNTurns": 25,
                     },
+                    "squad": {
+                        "allowBodyCollisions": False,
+                        "sharedElimination": False,
+                        "sharedHealth": False,
+                        "sharedLength": False,
+                    },
                 },
             },
             "map": "standard",
@@ -633,6 +640,332 @@ def simulate_single_game(
         "duration_ms": round(duration_ms, 2),
         "base_avg_depth": round(sum(base_depths) / len(base_depths), 2) if base_depths else 0.0,
         "var_avg_depth": round(sum(var_depths) / len(var_depths), 2) if var_depths else 0.0,
+    }
+
+
+def _setup_pool_initial_board(
+    seed: int,
+    game_num: int = 1,
+    eval_id: str = STRATEGY_VARIANT,
+    pool_opponents: Optional[List[Dict[str, str]]] = None,
+    width: int = 11,
+    height: int = 11,
+    num_snakes: int = 2,
+    mode: str = "standard",
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], random.Random]:
+    """Initializes board for pool evaluation matching spawn rules and balanced rotation."""
+    if pool_opponents is None or not pool_opponents:
+        pool_opponents = [{"slug": "unknown_pool_snake", "url": ""}]
+
+    rng = random.Random(seed)
+    mn, md, mx = 1, (width - 1) // 2, width - 2
+    corners = [(mn, mn), (mn, mx), (mx, mn), (mx, mx)]
+    cardinals = [(mn, md), (md, mn), (md, mx), (mx, md)]
+
+    if num_snakes == 4:
+        use_corners = ((game_num - 1) // 4) % 2 == 0
+        base_spawns = list(corners) if use_corners else list(cardinals)
+
+        eval_slot = (game_num - 1) % 4
+        snake_defs: List[Optional[Dict[str, str]]] = [None] * 4
+        snake_defs[eval_slot] = {"id": eval_id, "name": eval_id}
+
+        opp_idx = 0
+        for slot in range(4):
+            if snake_defs[slot] is None:
+                opp = pool_opponents[opp_idx % len(pool_opponents)]
+                snake_defs[slot] = {"id": f"{opp['slug']}_{opp_idx}", "name": opp["slug"]}
+                opp_idx += 1
+
+        snakes = [
+            {
+                "id": sdef["id"],
+                "name": sdef["name"],
+                "health": 100,
+                "body": [{"x": pt[0], "y": pt[1]}] * 3,
+                "head": {"x": pt[0], "y": pt[1]},
+                "length": 3,
+            }
+            for sdef, pt in zip(snake_defs, base_spawns)
+        ]
+    else:
+        use_corners = ((game_num - 1) // 4) % 2 == 0
+        pool_pts = list(corners) if use_corners else list(cardinals)
+        step = (game_num - 1) % 4
+        pairs = [(pool_pts[0], pool_pts[3]), (pool_pts[3], pool_pts[0]), (pool_pts[1], pool_pts[2]), (pool_pts[2], pool_pts[1])]
+        p_eval, p_opp = pairs[step]
+
+        opp = pool_opponents[0]
+        opp_def = {"id": opp["slug"], "name": opp["slug"]}
+
+        if (game_num - 1) % 2 == 0:
+            s_first, s_second = ({"id": eval_id, "name": eval_id}, p_eval), (opp_def, p_opp)
+        else:
+            s_first, s_second = (opp_def, p_opp), ({"id": eval_id, "name": eval_id}, p_eval)
+
+        snakes = [
+            {
+                "id": s_first[0]["id"],
+                "name": s_first[0]["name"],
+                "health": 100,
+                "body": [{"x": s_first[1][0], "y": s_first[1][1]}] * 3,
+                "head": {"x": s_first[1][0], "y": s_first[1][1]},
+                "length": 3,
+            },
+            {
+                "id": s_second[0]["id"],
+                "name": s_second[0]["name"],
+                "health": 100,
+                "body": [{"x": s_second[1][0], "y": s_second[1][1]}] * 3,
+                "head": {"x": s_second[1][0], "y": s_second[1][1]},
+                "length": 3,
+            },
+        ]
+
+    center = (md, (height - 1) // 2)
+    if mode == "constrictor":
+        food = []
+    else:
+        food = [{"x": center[0], "y": center[1]}]
+        for sn in snakes:
+            hx, hy = sn["head"]["x"], sn["head"]["y"]
+            candidates = [(hx - 1, hy - 1), (hx - 1, hy + 1), (hx + 1, hy - 1), (hx + 1, hy + 1)]
+            valid = []
+            for c in candidates:
+                if not (0 <= c[0] < width and 0 <= c[1] < height):
+                    continue
+                if c == center:
+                    continue
+                if (c[0] in (0, width - 1)) and (c[1] in (0, height - 1)):
+                    continue
+                is_away = False
+                if c[0] < hx < center[0] or center[0] < hx < c[0]:
+                    is_away = True
+                elif c[1] < hy < center[1] or center[1] < hy < c[1]:
+                    is_away = True
+                if is_away and not any(f["x"] == c[0] and f["y"] == c[1] for f in food):
+                    valid.append(c)
+            if valid:
+                chosen = rng.choice(valid)
+                food.append({"x": chosen[0], "y": chosen[1]})
+
+    board = {
+        "width": width,
+        "height": height,
+        "food": food,
+        "hazards": [],
+        "snakes": snakes,
+    }
+    return board, snakes, rng
+
+
+def simulate_single_pool_game(
+    game_num: int,
+    seed: int,
+    mode: str,
+    eval_id: str,
+    eval_strategy: Any,
+    pool_opponents: List[Dict[str, str]],
+    max_turns: int = 1000,
+) -> Dict[str, Any]:
+    """Runs a complete in-process game simulation between an evaluation strategy and pool opponents."""
+    t_game_start = time.perf_counter()
+    num_snakes = 4 if mode in ("standard", "ffa", "royale", "constrictor") else 2
+    wrap = mode in ("wrapped", "wrapped-constrictor", "spicy-meteors")
+    constrictor = mode in ("constrictor", "wrapped-constrictor")
+
+    board, snakes, rng = _setup_pool_initial_board(
+        seed=seed,
+        game_num=game_num,
+        eval_id=eval_id,
+        pool_opponents=pool_opponents,
+        num_snakes=num_snakes,
+        mode=mode,
+    )
+
+    # Initial /start calls on turn 0
+    for sn in snakes:
+        init_state = _build_game_state(
+            current_snake=sn,
+            active_snakes=snakes,
+            current_food=board["food"],
+            board_width=board["width"],
+            board_height=board["height"],
+            turn=0,
+            game_id=f"pool_{eval_id}_{game_num}_{seed}",
+            mode=mode,
+            hazards=board.get("hazards", []),
+        )
+        if sn["id"] == eval_id:
+            if hasattr(eval_strategy, "start"):
+                try:
+                    eval_strategy.start(init_state)
+                except Exception:
+                    pass
+        else:
+            try:
+                zoo_adapter.start(init_state)
+            except Exception:
+                pass
+
+    turn = 1
+    winner = None
+    tied_snakes: List[str] = []
+
+    while turn < max_turns:
+        if len(snakes) == 0:
+            winner = "DRAW"
+            break
+        elif len(snakes) == 1:
+            winner = snakes[0]["id"]
+            break
+
+        if mode == "royale":
+            sauce_depth = min(turn // 25, (board["width"] + 1) // 2)
+            if sauce_depth > 0:
+                w, h = board["width"], board["height"]
+                board["hazards"] = [
+                    {"x": x, "y": y}
+                    for x in range(w)
+                    for y in range(h)
+                    if min(x, w - 1 - x, y, h - 1 - y) < sauce_depth
+                ]
+            else:
+                board["hazards"] = []
+
+        moves: Dict[str, str] = {}
+        last_alive_snakes = [s["id"] for s in snakes]
+        turn_offset = turn % len(snakes)
+        ordered_snakes = snakes[turn_offset:] + snakes[:turn_offset]
+
+        for sn in ordered_snakes:
+            s_id = sn["id"]
+            game_state = _build_game_state(
+                current_snake=sn,
+                active_snakes=ordered_snakes,
+                current_food=board["food"],
+                board_width=board["width"],
+                board_height=board["height"],
+                turn=turn,
+                game_id=f"pool_{eval_id}_{game_num}_{seed}",
+                mode=mode,
+                hazards=board.get("hazards", []),
+            )
+            if s_id == eval_id:
+                chosen_move, _ = _run_timed_move(eval_strategy.choose_move, game_state, wrap=wrap, constrictor=constrictor)
+            else:
+                chosen_move = zoo_adapter.choose_move(game_state, wrap=wrap, constrictor=constrictor)
+            moves[s_id] = chosen_move if (chosen_move in ("up", "down", "left", "right")) else "up"
+
+        board, snakes = simulate_turn(board, snakes, moves, wrap=wrap, constrictor=constrictor, hazard_damage=14)
+        turn += 1
+
+        if len(snakes) == 1:
+            winner = snakes[0]["id"]
+            break
+        elif len(snakes) == 0:
+            winner = "DRAW"
+            tied_snakes = list(last_alive_snakes)
+            break
+
+        if num_snakes > 2:
+            eval_alive = any(s["id"] == eval_id for s in snakes)
+            if not eval_alive:
+                winner = "POOL_OPPONENTS"
+                break
+
+        if not constrictor:
+            occupied = {(seg["x"], seg["y"]) for sn in snakes for seg in sn["body"]}
+            occupied.update((f["x"], f["y"]) for f in board["food"])
+            unoccupied = [
+                (x, y)
+                for x in range(board["width"])
+                for y in range(board["height"])
+                if (x, y) not in occupied
+            ]
+            num_food = len(board["food"])
+            food_needed = 0
+            if num_food < 1:
+                food_needed = 1 - num_food
+            elif rng.randint(1, 100) <= 15:
+                food_needed = 1
+
+            if food_needed > 0 and unoccupied:
+                rng.shuffle(unoccupied)
+                for p in unoccupied[:food_needed]:
+                    board["food"].append({"x": p[0], "y": p[1]})
+        else:
+            board["food"] = []
+
+    if winner is None:
+        winner = "DRAW"
+        tied_snakes = [s["id"] for s in snakes]
+
+    if winner == eval_id:
+        score = 1.0
+        won = True
+    elif winner == "DRAW":
+        if eval_id in tied_snakes:
+            score = 1.0 / len(tied_snakes)
+            won = False
+        else:
+            score = 0.0
+            won = False
+    else:
+        score = 0.0
+        won = False
+
+    duration_ms = (time.perf_counter() - t_game_start) * 1000.0
+    return {
+        "game_num": game_num,
+        "seed": seed,
+        "eval_id": eval_id,
+        "winner": winner,
+        "won": won,
+        "score": score,
+        "turns": turn,
+        "duration_ms": round(duration_ms, 2),
+    }
+
+
+_pool_worker_cand_strat = None
+_pool_worker_base_strat = None
+
+
+def _pool_worker_init(pool_snakes: List[Dict[str, str]], cand_module: str, base_module: str) -> None:
+    global _pool_worker_cand_strat, _pool_worker_base_strat
+    zoo_adapter.register_pool(pool_snakes)
+    _pool_worker_cand_strat = load_strategy_module(cand_module)
+    _pool_worker_base_strat = load_strategy_module(base_module)
+
+
+def _pool_worker_run(args: Tuple[int, int, str, List[Dict[str, str]]]) -> Dict[str, Any]:
+    game_num, seed, mode, opponents = args
+    cand_res = simulate_single_pool_game(
+        game_num=game_num,
+        seed=seed,
+        mode=mode,
+        eval_id=STRATEGY_VARIANT,
+        eval_strategy=_pool_worker_cand_strat,
+        pool_opponents=opponents,
+    )
+    base_res = simulate_single_pool_game(
+        game_num=game_num,
+        seed=seed,
+        mode=mode,
+        eval_id=STRATEGY_BASELINE,
+        eval_strategy=_pool_worker_base_strat,
+        pool_opponents=opponents,
+    )
+    diff = cand_res["score"] - base_res["score"]
+    return {
+        "game_num": game_num,
+        "seed": seed,
+        "mode": mode,
+        "opponents": [o["slug"] for o in opponents],
+        "cand": cand_res,
+        "base": base_res,
+        "diff": diff,
     }
 
 
@@ -869,6 +1202,40 @@ def save_run_history(
 
     export_history_csv(history, history_csv_file)
     return history_file
+
+
+def append_results_ledger(
+    description: str,
+    self_play_delta: Optional[str] = None,
+    pool_delta: Optional[str] = None,
+    decision: str = "PARITY",
+    run_date: Optional[str] = None,
+    ledger_path: Optional[Path] = None,
+) -> Path:
+    """
+    Appends one row per experiment to harness/results_ledger.csv:
+    date, description, self-play delta if run, pool delta per mode, decision.
+    """
+    if ledger_path is None:
+        ledger_path = HARNESS_DIR / "results_ledger.csv"
+    if run_date is None:
+        run_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    file_exists = ledger_path.exists()
+    header = ["date", "description", "self-play delta if run", "pool delta per mode", "decision"]
+
+    with open(ledger_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(header)
+        writer.writerow([
+            run_date,
+            description,
+            self_play_delta if self_play_delta is not None else "",
+            pool_delta if pool_delta is not None else "",
+            decision,
+        ])
+    return ledger_path
 
 
 # ── Checkpoint Persistence & Resumption ──────────────────────────────────────
@@ -1881,6 +2248,18 @@ def parse_args() -> argparse.Namespace:
         help="Skip the pre-flight official Battlesnake CLI binary smoke test",
     )
     parser.add_argument(
+        "--pool",
+        type=str,
+        default=None,
+        help="Path to pool config JSON file (list of {slug, url} for zoo snakes served through the adapter module)",
+    )
+    parser.add_argument(
+        "--pool-games",
+        type=int,
+        default=20,
+        help="Number of paired games per mode to evaluate against the pool",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Resume an interrupted A/B benchmark run from the last saved checkpoint in ab_results/",
@@ -1904,7 +2283,21 @@ def run_ab_test_engine(
     port_base: int = PORT_BASELINE,
     port_var: int = PORT_VARIANT,
     dashboard_port: int = DASHBOARD_PORT,
+    pool: Optional[str] = None,
+    pool_games: int = 20,
 ) -> None:
+    if pool is not None:
+        run_pool_benchmark(
+            pool_config_path=pool,
+            pool_games=pool_games,
+            desc=desc,
+            modes=modes,
+            baseline_module=baseline_module,
+            variant_module=variant_module,
+            threads=threads,
+            skip_smoke=skip_smoke,
+        )
+        return
     if baseline_module is None:
         baseline_module = DEFAULT_BASELINE_MODULE
     if variant_module is None:
@@ -2255,6 +2648,282 @@ def run_ab_test_engine(
     # Simulation suite finished; clean up active checkpoint
     clear_checkpoint(results_dir)
 
+    # Append self-play row to harness/results_ledger.csv
+    try:
+        self_play_deltas = [
+            f"{r['mode']}: {r['var_win_share'] - r['target_share']:+.1f}%"
+            for r in matrix_results
+        ]
+        append_results_ledger(
+            description=desc,
+            self_play_delta=", ".join(self_play_deltas),
+            pool_delta="",
+            decision=overall_recommendation,
+        )
+    except Exception as e:
+        print(f"[!] Warning: Could not append self-play result to ledger: {e}")
+
+
+def run_pool_benchmark(
+    pool_config_path: str,
+    pool_games: int = 20,
+    desc: str = "Unspecified Pool Experiment",
+    modes: str = "all",
+    baseline_module: Optional[str] = None,
+    variant_module: Optional[str] = None,
+    threads: int = THREADS,
+    skip_smoke: bool = False,
+) -> Dict[str, Any]:
+    """
+    Evaluates candidate strategy vs pool and baseline strategy vs pool using the same seed stream.
+    Reports win share per mode for both, the difference, and the paired z-score.
+    Appends experiment results to harness/results_ledger.csv.
+    """
+    if baseline_module is None:
+        baseline_module = DEFAULT_BASELINE_MODULE
+    if variant_module is None:
+        variant_module = DEFAULT_VARIANT_MODULE
+    init_strategies(baseline_module, variant_module)
+
+    pool_file = Path(pool_config_path)
+    if not pool_file.is_file():
+        sys.exit(f"[!] Error: Pool config file '{pool_config_path}' not found.")
+    try:
+        with open(pool_file, "r", encoding="utf-8") as f:
+            pool_snakes = json.load(f)
+    except Exception as e:
+        sys.exit(f"[!] Error reading pool config JSON: {e}")
+
+    if not isinstance(pool_snakes, list) or not pool_snakes:
+        sys.exit(f"[!] Error: Pool config '{pool_config_path}' must contain a non-empty list of {{slug, url}} objects.")
+
+    for item in pool_snakes:
+        if not isinstance(item, dict) or "slug" not in item or "url" not in item:
+            sys.exit(f"[!] Error: Each entry in pool config must have 'slug' and 'url' keys: {item}")
+
+    zoo_adapter.register_pool(pool_snakes)
+
+    active_matrix = parse_selected_modes(modes)
+    is_partial_matrix = len(active_matrix) < len(MODES_MATRIX)
+    mode_names = ", ".join([m["name"] for m in active_matrix])
+    pool_slugs = [s.get("slug", "unknown") for s in pool_snakes]
+
+    print("=" * 80)
+    print("             BATTLESNAKE EXTERNAL POOL EVALUATION HARNESS")
+    print("=" * 80)
+    print(f"  Tested Change:    {desc}")
+    print(f"  Candidate Snake:  {variant_module}")
+    print(f"  Baseline Snake:   {baseline_module}")
+    print(f"  External Pool:    {len(pool_snakes)} snakes ({', '.join(pool_slugs)})")
+    print(f"  Evaluation Modes: {mode_names if is_partial_matrix else 'Full 4-Mode Matrix'}")
+    if is_partial_matrix:
+        print(f"  [⚠️ WARNING]      Running ISOLATED mode test for {len(active_matrix)} mode(s): {mode_names}")
+    print(f"  Sample Budget:    {pool_games} paired games per mode (Common Random Numbers)")
+    print(f"  Workers:          {threads} parallel worker processes")
+    print("=" * 80 + "\n")
+
+    # Step 1: Tactical unit tests
+    if not skip_smoke:
+        print("[1/2] Running strategy safety unit tests on variant...")
+        test_strategy = None
+        try:
+            from tests import test_strategy
+        except ImportError:
+            try:
+                import test_strategy
+            except ImportError:
+                test_strategy = None
+
+        if test_strategy and hasattr(test_strategy, "run_variant_unit_tests"):
+            passed, test_msg = test_strategy.run_variant_unit_tests()
+            if not passed:
+                print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
+                print(f"     Details: {test_msg}\n")
+                sys.exit(1)
+            print("  [✓] Strategy variant passed all tactical unit tests.\n")
+        else:
+            print("  [✓] Tactical unit tests skipped (standalone harness mode).\n")
+    else:
+        print("  [i] Pre-flight unit tests skipped via --skip-smoke.\n")
+
+    print("[2/2] Executing External Pool Evaluation Suite...")
+    t_suite_start = time.perf_counter()
+    all_mode_stats = []
+
+    for idx, m_spec in enumerate(active_matrix):
+        m_mode = m_spec["mode"]
+        m_name = m_spec["name"]
+        num_snakes = m_spec["num_snakes"]
+        base_seed = 42_000 + idx * 10_000
+
+        print(f"\n>>> Running Mode: {m_name} ({pool_games} paired games)...")
+        print("-" * 80)
+
+        tasks = []
+        for g in range(1, pool_games + 1):
+            seed = base_seed + g
+            if num_snakes == 2:
+                opponents = [pool_snakes[(g - 1) % len(pool_snakes)]]
+            else:
+                if len(pool_snakes) >= 3:
+                    opponents = [pool_snakes[(g - 1 + i) % len(pool_snakes)] for i in range(3)]
+                else:
+                    opponents = [pool_snakes[i % len(pool_snakes)] for i in range(3)]
+            tasks.append((g, seed, m_mode, opponents))
+
+        mode_results = []
+        t_mode_start = time.perf_counter()
+        worker_count = min(threads, len(tasks))
+
+        if worker_count > 1:
+            with mp.Pool(
+                worker_count,
+                initializer=_pool_worker_init,
+                initargs=(pool_snakes, variant_module, baseline_module),
+            ) as pool:
+                for res in pool.imap_unordered(_pool_worker_run, tasks):
+                    mode_results.append(res)
+                    g_num = res["game_num"]
+                    opp_str = ", ".join(res["opponents"])
+                    cand_res = res["cand"]
+                    base_res = res["base"]
+                    c_outcome = "WIN" if cand_res["won"] else ("DRAW" if cand_res["score"] > 0 else "LOSS")
+                    b_outcome = "WIN" if base_res["won"] else ("DRAW" if base_res["score"] > 0 else "LOSS")
+                    d_str = f"{res['diff']:+.1f}" if res["diff"] != 0 else " 0.0"
+                    print(
+                        f"  [Game {len(mode_results):2d}/{pool_games}] vs {opp_str:<22s} | "
+                        f"Cand: {c_outcome:<4s} ({cand_res['turns']:3d}t) | "
+                        f"Base: {b_outcome:<4s} ({base_res['turns']:3d}t) | Δ: {d_str}"
+                    )
+        else:
+            _pool_worker_init(pool_snakes, variant_module, baseline_module)
+            for task in tasks:
+                res = _pool_worker_run(task)
+                mode_results.append(res)
+                g_num = res["game_num"]
+                opp_str = ", ".join(res["opponents"])
+                cand_res = res["cand"]
+                base_res = res["base"]
+                c_outcome = "WIN" if cand_res["won"] else ("DRAW" if cand_res["score"] > 0 else "LOSS")
+                b_outcome = "WIN" if base_res["won"] else ("DRAW" if base_res["score"] > 0 else "LOSS")
+                d_str = f"{res['diff']:+.1f}" if res["diff"] != 0 else " 0.0"
+                print(
+                    f"  [Game {len(mode_results):2d}/{pool_games}] vs {opp_str:<22s} | "
+                    f"Cand: {c_outcome:<4s} ({cand_res['turns']:3d}t) | "
+                    f"Base: {b_outcome:<4s} ({base_res['turns']:3d}t) | Δ: {d_str}"
+                )
+
+        mode_results.sort(key=lambda r: r["game_num"])
+        N = len(mode_results)
+        cand_total = sum(r["cand"]["score"] for r in mode_results)
+        base_total = sum(r["base"]["score"] for r in mode_results)
+        cand_win_share = (cand_total / N) * 100.0 if N > 0 else 0.0
+        base_win_share = (base_total / N) * 100.0 if N > 0 else 0.0
+        delta = cand_win_share - base_win_share
+
+        diffs = [r["diff"] for r in mode_results]
+        mean_d = sum(diffs) / N if N > 0 else 0.0
+        if N > 1:
+            var_d = sum((d - mean_d) ** 2 for d in diffs) / (N - 1)
+            se_d = math.sqrt(var_d / N) * 100.0
+        else:
+            var_d = 0.0
+            se_d = 0.0
+
+        z_score = (delta / se_d) if se_d > 1e-6 else 0.0
+
+        if z_score >= 1.645 and delta > 0:
+            decision = "KEEP"
+            decision_desc = "Confident improvement (z >= +1.645)"
+        elif z_score <= -1.645 and delta < 0:
+            decision = "REVERT"
+            decision_desc = "Confident regression (z <= -1.645)"
+        else:
+            decision = "PARITY"
+            decision_desc = "Parity (within confidence band)"
+
+        t_mode_elapsed = time.perf_counter() - t_mode_start
+
+        print("-" * 80)
+        print(f"Mode Results: {m_name}")
+        print(f"  Candidate Win Share: {cand_total:.1f}/{N} ({cand_win_share:.1f}%)")
+        print(f"  Baseline Win Share:  {base_total:.1f}/{N} ({base_win_share:.1f}%)")
+        print(f"  Difference (Δ):      {delta:+.1f}%")
+        print(f"  Paired Z-Score:      z = {z_score:+.2f}")
+        print(f"  Decision:            {decision} ({decision_desc})")
+        print(f"  Wall Time:           {t_mode_elapsed:.1f}s")
+        print("\nOpponent Head-to-Head Breakdown:")
+        print(f"  {'Opponent':<24s} {'Games':>5s} {'Candidate Win%':>15s} {'Baseline Win%':>15s} {'Delta':>10s}")
+        print("  " + "-" * 74)
+
+        opp_stats: Dict[str, Dict[str, Any]] = {}
+        for r in mode_results:
+            for opp in r["opponents"]:
+                if opp not in opp_stats:
+                    opp_stats[opp] = {"games": 0, "cand_score": 0.0, "base_score": 0.0}
+                opp_stats[opp]["games"] += 1
+                opp_stats[opp]["cand_score"] += r["cand"]["score"]
+                opp_stats[opp]["base_score"] += r["base"]["score"]
+
+        for opp, s in sorted(opp_stats.items()):
+            g_cnt = s["games"]
+            c_pct = (s["cand_score"] / g_cnt) * 100.0 if g_cnt > 0 else 0.0
+            b_pct = (s["base_score"] / g_cnt) * 100.0 if g_cnt > 0 else 0.0
+            d_pct = c_pct - b_pct
+            print(f"  {opp:<24s} {g_cnt:5d} {c_pct:14.1f}% {b_pct:14.1f}% {d_pct:+9.1f}%")
+
+        all_mode_stats.append({
+            "mode": m_mode,
+            "name": m_name,
+            "games": N,
+            "cand_win_share": cand_win_share,
+            "base_win_share": base_win_share,
+            "delta": delta,
+            "z_score": z_score,
+            "decision": decision,
+        })
+
+    reverts = [m for m in all_mode_stats if m["decision"] == "REVERT"]
+    keeps = [m for m in all_mode_stats if m["decision"] == "KEEP"]
+    if reverts:
+        overall_decision = "REVERT"
+        overall_reason = f"{len(reverts)} of {len(all_mode_stats)} mode(s) confirmed regression."
+    elif keeps:
+        overall_decision = "KEEP"
+        overall_reason = f"{len(keeps)} of {len(all_mode_stats)} mode(s) confirmed improvement."
+    else:
+        overall_decision = "PARITY"
+        overall_reason = "All tested modes performed at parity with no regression detected."
+
+    total_wall_sec = time.perf_counter() - t_suite_start
+    print("\n" + "=" * 80)
+    print("                         POOL EVALUATION SUMMARY")
+    print("=" * 80)
+    print(f"  {'Mode':<18s} {'Games':>6s} {'Candidate':>11s} {'Baseline':>11s} {'Delta (Δ)':>11s} {'Paired z':>10s} {'Decision':>10s}")
+    print("  " + "-" * 76)
+    for m in all_mode_stats:
+        print(f"  {m['name']:<18s} {m['games']:6d} {m['cand_win_share']:10.1f}% {m['base_win_share']:10.1f}% {m['delta']:+10.1f}% {m['z_score']:+9.2f} {m['decision']:>10s}")
+    print("=" * 80)
+    print(f"  Overall Decision: {overall_decision}")
+    print(f"  Reason:           {overall_reason}")
+    print(f"  Total Wall Time:  {total_wall_sec:.1f}s")
+
+    pool_delta_per_mode = ", ".join([f"{m['mode']}: {m['delta']:+.1f}% (z={m['z_score']:+.2f})" for m in all_mode_stats])
+    ledger_path = append_results_ledger(
+        description=desc,
+        self_play_delta="",
+        pool_delta=pool_delta_per_mode,
+        decision=overall_decision,
+    )
+    print(f"  Results Ledger:   Appended row to {ledger_path.resolve()}")
+    print("=" * 80 + "\n")
+
+    return {
+        "all_mode_stats": all_mode_stats,
+        "overall_decision": overall_decision,
+        "total_wall_sec": total_wall_sec,
+    }
+
 
 def main():
     args = parse_args()
@@ -2265,6 +2934,8 @@ def main():
         variant_module=args.variant_module,
         skip_smoke=args.skip_smoke,
         resume=args.resume,
+        pool=args.pool,
+        pool_games=args.pool_games,
     )
 
 

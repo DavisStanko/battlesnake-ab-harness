@@ -12,10 +12,12 @@ Serves a real-time dark-mode web interface displaying:
 """
 
 import argparse
+import collections
 import http.server
 import json
 import os
 import socketserver
+import statistics
 import subprocess
 import sys
 import threading
@@ -25,10 +27,242 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from pathlib import Path
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Any, Optional, List
 
 _HISTORY_CACHE: Optional[list] = None
 _HISTORY_MTIME: float = 0.0
+
+MODE_TIMINGS_FILE = Path(__file__).resolve().parent / "mode_timings.json"
+_MODE_TIMINGS_CACHE: Optional[list] = None
+_MODE_TIMINGS_MTIME: float = 0.0
+
+
+def load_mode_timings(timings_path: Optional[Path] = None) -> list:
+    """Loads persistent mode timing history from mode_timings.json with mtime caching."""
+    global _MODE_TIMINGS_CACHE, _MODE_TIMINGS_MTIME
+    p = timings_path or MODE_TIMINGS_FILE
+    if not p.is_file():
+        return []
+    try:
+        mtime = p.stat().st_mtime
+        if _MODE_TIMINGS_CACHE is not None and mtime == _MODE_TIMINGS_MTIME and timings_path is None:
+            return _MODE_TIMINGS_CACHE
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                if timings_path is None:
+                    _MODE_TIMINGS_CACHE = data
+                    _MODE_TIMINGS_MTIME = mtime
+                return data
+    except Exception:
+        if _MODE_TIMINGS_CACHE is not None and timings_path is None:
+            return _MODE_TIMINGS_CACHE
+    return []
+
+
+def append_mode_timing(
+    mode: str,
+    run_type: str = "self",
+    games: int = 0,
+    elapsed_seconds: float = 0.0,
+    timings_path: Optional[Path] = None,
+) -> None:
+    """Appends {mode, run_type, games, elapsed_seconds} to persistent mode_timings.json."""
+    if not mode or games <= 0 or elapsed_seconds <= 0:
+        return
+    p = timings_path or MODE_TIMINGS_FILE
+    mode_clean = str(mode).strip().lower()
+    run_type_clean = str(run_type).strip().lower()
+    new_entry = {
+        "mode": mode_clean,
+        "run_type": run_type_clean,
+        "games": int(games),
+        "elapsed_seconds": round(float(elapsed_seconds), 2),
+    }
+
+    entries = []
+    if p.is_file():
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                d = json.load(f)
+                if isinstance(d, list):
+                    entries = d
+        except Exception:
+            entries = []
+
+    # Deduplicate if last entry is identical
+    if entries:
+        last = entries[-1]
+        if (
+            last.get("mode") == new_entry["mode"]
+            and last.get("run_type") == new_entry["run_type"]
+            and last.get("games") == new_entry["games"]
+            and abs(last.get("elapsed_seconds", 0) - new_entry["elapsed_seconds"]) < 5.0
+        ):
+            return
+
+    entries.append(new_entry)
+    tmp_path = p.with_suffix(".tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(entries, f, indent=2)
+        os.replace(tmp_path, p)
+    except Exception:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
+def get_mode_medians(
+    timings: list,
+    target_run_type: str = "self",
+) -> Dict[str, float]:
+    """Computes median seconds-per-game per mode for the target run_type, falling back to any run_type."""
+    by_mode_runtype = collections.defaultdict(list)
+    by_mode_any = collections.defaultdict(list)
+
+    target_rt = target_run_type.strip().lower()
+    for entry in timings:
+        m = str(entry.get("mode", "")).strip().lower()
+        rt = str(entry.get("run_type", "self")).strip().lower()
+        g = entry.get("games", 0)
+        el = entry.get("elapsed_seconds", 0.0)
+        if m and g > 0 and el > 0:
+            spg = float(el) / float(g)
+            by_mode_runtype[(m, rt)].append(spg)
+            by_mode_any[m].append(spg)
+
+    medians = {}
+    for m in by_mode_any:
+        if (m, target_rt) in by_mode_runtype:
+            medians[m] = float(statistics.median(by_mode_runtype[(m, target_rt)]))
+        elif m in by_mode_any:
+            medians[m] = float(statistics.median(by_mode_any[m]))
+    return medians
+
+
+def calculate_eta(
+    matrix_progress: Optional[list],
+    current_mode: str,
+    current_played: int,
+    current_max_games: int,
+    current_mode_elapsed: float,
+    run_type: str = "self",
+    mode_timings: Optional[list] = None,
+    timings_path: Optional[Path] = None,
+    min_stable_games: int = 20,
+) -> Dict[str, Any]:
+    """
+    Computes total ETA across all modes with remaining games:
+    1. For current mode:
+       If current_played >= min_stable_games, blends using live rate (mode_elapsed / current_played).
+       Before threshold, uses history median for this mode.
+    2. For modes still to come:
+       Uses history median seconds-per-game for that mode and run_type.
+    3. A mode with no history falls back to current mode's rate.
+    4. A run with no history at all behaves exactly as dashboard does now (current mode remaining / pace).
+    """
+    timings = mode_timings if mode_timings is not None else load_mode_timings(timings_path)
+    has_any_history = bool(timings and len(timings) > 0)
+
+    curr_live_spg = (current_mode_elapsed / current_played) if (current_played > 0 and current_mode_elapsed > 0) else None
+    is_curr_stable = bool(current_played >= min_stable_games and curr_live_spg is not None)
+
+    # Legacy fallback when no history at all
+    if not has_any_history:
+        rem = max(0, current_max_games - current_played)
+        legacy_eta = (rem * curr_live_spg) if curr_live_spg is not None else None
+        return {
+            "total_eta_seconds": round(legacy_eta, 1) if legacy_eta is not None else None,
+            "has_history": False,
+            "is_stable": is_curr_stable,
+            "breakdown": [{
+                "mode": current_mode,
+                "games_left": rem,
+                "rate_spg": round(curr_live_spg, 3) if curr_live_spg is not None else None,
+                "rate_source": "legacy",
+                "eta_seconds": round(legacy_eta, 1) if legacy_eta is not None else None,
+            }],
+        }
+
+    medians = get_mode_medians(timings, target_run_type=run_type)
+
+    # Fallback rate for modes with no history:
+    # "A mode with no history falls back to the current mode's rate (today's behavior)."
+    curr_mode_clean = str(current_mode).strip().lower()
+    fallback_spg = curr_live_spg if curr_live_spg is not None else medians.get(curr_mode_clean)
+
+    # Determine modes with remaining games
+    modes_to_calc = []
+    if matrix_progress and isinstance(matrix_progress, list):
+        for item in matrix_progress:
+            m_name = str(item.get("mode", "")).strip().lower()
+            status = str(item.get("status", "PENDING")).strip().upper()
+            m_max = item.get("max_games", 200) or 200
+            is_curr = (m_name == curr_mode_clean or status == "RUNNING")
+            if is_curr:
+                m_left = max(0, (current_max_games or m_max) - current_played)
+            else:
+                if status in ("PASSED", "PARITY", "FAILED", "SKIPPED"):
+                    m_left = 0
+                else:
+                    m_left = m_max
+            modes_to_calc.append((m_name, m_left, is_curr))
+    else:
+        m_left = max(0, current_max_games - current_played)
+        modes_to_calc.append((curr_mode_clean, m_left, True))
+
+    total_eta = 0.0
+    breakdown = []
+    has_valid_rate = False
+
+    for m_name, m_left, is_curr in modes_to_calc:
+        if m_left <= 0:
+            continue
+
+        spg = None
+        source = "history"
+
+        if is_curr:
+            if is_curr_stable:
+                spg = curr_live_spg
+                source = "live"
+            else:
+                spg = medians.get(m_name) or fallback_spg
+                source = "history" if m_name in medians else "fallback"
+        else:
+            spg = medians.get(m_name) or fallback_spg
+            source = "history" if m_name in medians else "fallback"
+
+        if spg is not None and spg > 0:
+            has_valid_rate = True
+            mode_eta = m_left * spg
+            total_eta += mode_eta
+            breakdown.append({
+                "mode": m_name,
+                "games_left": m_left,
+                "rate_spg": round(spg, 3),
+                "rate_source": source,
+                "eta_seconds": round(mode_eta, 1),
+            })
+        else:
+            breakdown.append({
+                "mode": m_name,
+                "games_left": m_left,
+                "rate_spg": None,
+                "rate_source": "none",
+                "eta_seconds": None,
+            })
+
+    final_eta = round(total_eta, 1) if has_valid_rate else None
+    return {
+        "total_eta_seconds": final_eta,
+        "has_history": True,
+        "is_stable": is_curr_stable,
+        "breakdown": breakdown,
+    }
 
 def load_run_history(max_entries: int = 15) -> list:
     global _HISTORY_CACHE, _HISTORY_MTIME
