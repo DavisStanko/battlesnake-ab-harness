@@ -2117,9 +2117,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span class="status-dot" id="headerUnitDot" style="background-color: var(--draw-color);"></span>
         <span id="headerUnitText">Unit Tests: Pending</span>
       </div>
-      <div class="badge" id="headerEtaBadge" style="display: none;" title="Total Run Estimated Time Remaining">
-        ⏳ Total ETA: <span id="headerEtaText" style="font-weight: 700; margin-left: 0.25rem;">--</span>
-      </div>
       <div class="badge">
         ⏱️ <span id="elapsedTime">0s</span>
       </div>
@@ -2195,6 +2192,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div id="stageCol-depth"><span id="stageStatus-depth"></span><span id="stageScore-depth"></span><span id="stageMeta-depth"></span></div>
       <div id="stageCol-self"><span id="stageStatus-self"></span><span id="stageScore-self"></span><span id="stageMeta-self"></span></div>
       <div id="stageCol-pool"><span id="stageStatus-pool"></span><span id="stageScore-pool"></span><span id="stageMeta-pool"></span></div>
+      <span id="headerEtaBadge"><span id="headerEtaText"></span></span>
     </div>
 
     <!-- Stage Detail Panel (Expanded below rail, Requirement 1) -->
@@ -2970,20 +2968,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    // Header Total Run ETA (Requirement 7)
+    // Header Total Run ETA (Removed: redundant with run progress)
     const headerEtaBadge = document.getElementById('headerEtaBadge');
-    const headerEtaText = document.getElementById('headerEtaText');
-    if (headerEtaBadge && headerEtaText) {
-      if (isRunning && data.eta_seconds != null && data.eta_seconds > 0) {
-        headerEtaBadge.style.display = 'inline-flex';
-        headerEtaText.innerText = formatSeconds(data.eta_seconds);
-        if (data.eta_breakdown && data.eta_breakdown.length > 0) {
-          headerEtaBadge.title = 'Total Run ETA: ' + data.eta_breakdown.map(b => `${b.mode}: ${b.games_left}G (~${formatSeconds(b.eta_seconds)})`).join(' | ');
-        }
-      } else {
-        headerEtaBadge.style.display = 'none';
-      }
-    }
+    if (headerEtaBadge) headerEtaBadge.style.display = 'none';
 
     // Pipeline Subtitle
     const subEl = document.getElementById('pipelineSubtitle');
