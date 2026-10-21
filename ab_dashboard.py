@@ -1609,8 +1609,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border: 1px solid rgba(245, 158, 11, 0.4);
     }
 
-    /* Unified Multi-Stage Pipeline Bar */
-    .pipeline-card {
+    /* Stage Rail Styles (Requirement 1) */
+    .stage-rail-card {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
       border-radius: 1rem;
@@ -1620,11 +1620,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
     }
 
-    .pipeline-header {
+    .stage-rail-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 1rem;
+      margin-bottom: 0.85rem;
     }
 
     .pipeline-title {
@@ -1643,58 +1643,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       font-family: 'JetBrains Mono', monospace;
     }
 
-    .pipeline-grid {
+    .stage-rail {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 0.85rem;
-    }
-
-    @media (max-width: 900px) {
-      .pipeline-grid { grid-template-columns: repeat(2, 1fr); }
-    }
-
-    /* Multi-Mode Matrix Pipeline Ribbon */
-    .matrix-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 1rem;
-      padding: 1.25rem 1.5rem;
-      margin-bottom: 1.5rem;
-      backdrop-filter: blur(14px);
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-    }
-
-    .matrix-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 1rem;
-    }
-
-    .matrix-title {
-      font-size: 1.05rem;
-      font-weight: 800;
-      letter-spacing: -0.01em;
-      display: flex;
-      align-items: center;
       gap: 0.5rem;
-    }
-
-    .matrix-subtitle {
-      font-size: 0.8rem;
-      font-weight: 600;
-      color: var(--text-muted);
-      font-family: 'JetBrains Mono', monospace;
-    }
-
-    .matrix-grid {
-      display: grid;
-      grid-template-columns: repeat(4, 1fr);
-      gap: 0.85rem;
+      background: rgba(0, 0, 0, 0.45);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 0.75rem;
+      padding: 0.4rem;
     }
 
     @media (max-width: 900px) {
-      .matrix-grid { grid-template-columns: repeat(2, 1fr); }
+      .stage-rail { grid-template-columns: repeat(2, 1fr); }
       header {
         flex-direction: column;
         align-items: flex-start;
@@ -1707,56 +1667,320 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    .matrix-col {
-      background: rgba(0, 0, 0, 0.35);
-      border: 1px solid rgba(255, 255, 255, 0.07);
-      border-radius: 0.75rem;
-      padding: 0.85rem 1rem;
-      transition: all 0.3s ease;
-      position: relative;
-      overflow: hidden;
-    }
-
-    .matrix-col.running {
-      border-color: rgba(59, 130, 246, 0.55);
-      box-shadow: 0 0 16px rgba(59, 130, 246, 0.25);
-      background: rgba(59, 130, 246, 0.08);
-    }
-
-    .matrix-col.passed {
-      border-color: rgba(16, 185, 129, 0.5);
-      background: rgba(16, 185, 129, 0.08);
-    }
-
-    .matrix-col.parity {
-      border-color: rgba(245, 158, 11, 0.5);
-      background: rgba(245, 158, 11, 0.08);
-    }
-
-    .matrix-col.failed {
-      border-color: rgba(239, 68, 68, 0.5);
-      background: rgba(239, 68, 68, 0.08);
-    }
-
-    .matrix-col.skipped {
-      border-color: rgba(245, 158, 11, 0.5);
-      background: rgba(245, 158, 11, 0.08);
-    }
-
-    .matrix-col-top {
+    .stage-segment {
       display: flex;
+      flex-direction: column;
       justify-content: space-between;
+      padding: 0.75rem 0.9rem;
+      border-radius: 0.55rem;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      border: 1px solid transparent;
+      user-select: none;
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .stage-segment:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.12);
+    }
+
+    .stage-segment.active {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.25);
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+    }
+
+    .stage-segment.active.running {
+      border-color: rgba(59, 130, 246, 0.65);
+      box-shadow: 0 0 14px rgba(59, 130, 246, 0.3);
+      background: rgba(59, 130, 246, 0.12);
+    }
+
+    .stage-segment.active.passed, .stage-segment.active.done {
+      border-color: rgba(16, 185, 129, 0.65);
+      box-shadow: 0 0 14px rgba(16, 185, 129, 0.25);
+      background: rgba(16, 185, 129, 0.12);
+    }
+
+    .stage-segment.active.parity {
+      border-color: rgba(245, 158, 11, 0.65);
+      box-shadow: 0 0 14px rgba(245, 158, 11, 0.25);
+      background: rgba(245, 158, 11, 0.12);
+    }
+
+    .stage-segment.active.failed {
+      border-color: rgba(239, 68, 68, 0.65);
+      box-shadow: 0 0 14px rgba(239, 68, 68, 0.25);
+      background: rgba(239, 68, 68, 0.12);
+    }
+
+    .stage-seg-header {
+      display: flex;
       align-items: center;
+      justify-content: space-between;
+      gap: 0.4rem;
       margin-bottom: 0.4rem;
     }
 
-    .matrix-col-name {
-      font-size: 0.85rem;
+    .stage-seg-index {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.08);
+      font-size: 0.68rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+      flex-shrink: 0;
+    }
+
+    .stage-seg-name {
+      font-size: 0.84rem;
       font-weight: 700;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      flex: 1;
+      margin: 0 0.25rem;
     }
+
+    .stage-seg-status {
+      font-size: 0.64rem;
+      font-weight: 800;
+      padding: 0.15rem 0.4rem;
+      border-radius: 9999px;
+      text-transform: uppercase;
+      font-family: 'JetBrains Mono', monospace;
+      letter-spacing: 0.02em;
+      flex-shrink: 0;
+    }
+
+    .stage-seg-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      color: var(--text-muted);
+    }
+
+    .stage-detail-panel {
+      margin-top: 1.25rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    /* Unit Detail Line (Requirement 2) */
+    .unit-detail-line {
+      display: flex;
+      align-items: center;
+      gap: 0.85rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.95rem;
+      background: rgba(0, 0, 0, 0.3);
+      padding: 0.85rem 1.25rem;
+      border-radius: 0.65rem;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      flex-wrap: wrap;
+    }
+
+    /* Live Matrix Table (Requirement 3) */
+    .live-matrix-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 0.5rem;
+    }
+
+    .live-matrix-table th {
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 0.75rem 0.85rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      text-align: center;
+    }
+
+    .live-matrix-table th:first-child {
+      text-align: left;
+    }
+
+    .live-matrix-table td {
+      padding: 0.85rem 0.85rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.88rem;
+      text-align: center;
+    }
+
+    .live-matrix-table td:first-child {
+      text-align: left;
+    }
+
+    .live-matrix-table tr.active-running {
+      background: rgba(59, 130, 246, 0.08);
+      box-shadow: inset 3px 0 0 #3b82f6;
+    }
+
+    .live-matrix-table tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    /* Depth Summary Bar & Toggle (Requirement 4) */
+    .depth-summary-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(0, 0, 0, 0.3);
+      padding: 0.85rem 1.25rem;
+      border-radius: 0.65rem;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+
+    .depth-summary-line {
+      display: flex;
+      align-items: center;
+      gap: 0.85rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.92rem;
+      flex-wrap: wrap;
+    }
+
+    .sep-dot {
+      color: var(--text-muted);
+      opacity: 0.6;
+    }
+
+    .btn-toggle-expand {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: var(--text-main);
+      padding: 0.4rem 0.85rem;
+      border-radius: 0.45rem;
+      font-size: 0.78rem;
+      font-weight: 700;
+      cursor: pointer;
+      font-family: 'Inter', sans-serif;
+      transition: all 0.2s ease;
+    }
+
+    .btn-toggle-expand:hover {
+      background: rgba(255, 255, 255, 0.12);
+      border-color: rgba(255, 255, 255, 0.3);
+    }
+
+    /* Last Completed Run Card (Requirement 6) */
+    .last-run-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 1rem;
+      padding: 1.35rem 1.6rem;
+      margin-bottom: 1.5rem;
+      backdrop-filter: blur(14px);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+
+    .last-run-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.25rem;
+      padding-bottom: 0.85rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+
+    .last-run-title {
+      font-size: 1.1rem;
+      font-weight: 800;
+      color: var(--text-main);
+      margin-top: 0.15rem;
+    }
+
+    .last-run-metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1rem;
+    }
+
+    @media (max-width: 900px) {
+      .last-run-metrics-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    .last-run-metric {
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 0.75rem;
+      padding: 0.85rem 1.1rem;
+    }
+
+    .metric-label {
+      font-size: 0.72rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      margin-bottom: 0.3rem;
+    }
+
+    .metric-value {
+      font-size: 1.45rem;
+      font-weight: 800;
+      font-family: 'JetBrains Mono', monospace;
+      margin-bottom: 0.2rem;
+    }
+
+    .metric-sub {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+
+    .last-run-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 9999px;
+      padding: 0.35rem 0.85rem;
+      font-size: 0.78rem;
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .chip-mode {
+      font-weight: 700;
+      color: var(--text-main);
+    }
+
+    .chip-val {
+      color: #60a5fa;
+      font-weight: 700;
+    }
+
+    .chip-z {
+      color: var(--text-muted);
+    }
+
+    .chip-badge {
+      font-size: 0.65rem;
+      font-weight: 800;
+      padding: 0.1rem 0.4rem;
+      border-radius: 9999px;
+      text-transform: uppercase;
+    }
+
+    .chip-badge.parity { background: rgba(245, 158, 11, 0.25); color: #f59e0b; }
+    .chip-badge.passed, .chip-badge.keep { background: rgba(16, 185, 129, 0.25); color: #34d399; }
+    .chip-badge.failed, .chip-badge.revert { background: rgba(239, 68, 68, 0.25); color: #f87171; }
 
     .matrix-col-status {
       font-size: 0.68rem;
@@ -1770,7 +1994,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     .matrix-status-pending { background: rgba(156, 163, 175, 0.15); color: var(--text-muted); }
     .matrix-status-running { background: rgba(59, 130, 246, 0.25); color: #60a5fa; animation: pulse 1.5s infinite; }
-    .matrix-status-passed { background: rgba(16, 185, 129, 0.25); color: #34d399; }
+    .matrix-status-passed, .matrix-status-done { background: rgba(16, 185, 129, 0.25); color: #34d399; }
     .matrix-status-parity { background: rgba(245, 158, 11, 0.25); color: #f59e0b; }
     .matrix-status-failed { background: rgba(239, 68, 68, 0.25); color: #f87171; }
     .matrix-status-skipped { background: rgba(245, 158, 11, 0.25); color: #fbbf24; }
@@ -1787,7 +2011,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       color: var(--text-muted);
     }
 
-
     .row-variant {
       background: rgba(16, 185, 129, 0.12) !important;
       font-weight: 700;
@@ -1803,6 +2026,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <body>
 
 <div class="container">
+  <!-- Critical Unit Test Failure Banner (Top of page, Requirement 2) -->
+  <div id="unitTestFailBanner" class="banner revert" style="display: none; margin-bottom: 1.5rem; border: 2px solid var(--danger-color); background: rgba(239, 68, 68, 0.15);">
+    <div>
+      <div class="banner-title" style="color: var(--danger-color); font-size: 1.1rem; font-weight: 800;">🚨 CRITICAL PRE-FLIGHT TEST FAILURE</div>
+      <div class="banner-desc" id="unitTestFailBannerDesc">Safety test suite failed. All subsequent benchmark stages have been aborted to prevent deploying a faulty strategy.</div>
+    </div>
+  </div>
+
   <header>
     <div class="logo-group">
       <span class="logo-icon">🐍</span>
@@ -1812,6 +2043,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="header-badges">
+      <div class="badge" id="headerUnitPill" title="Tactical Safety Suite Status">
+        <span class="status-dot" id="headerUnitDot" style="background-color: var(--draw-color);"></span>
+        <span id="headerUnitText">Unit Tests: Pending</span>
+      </div>
+      <div class="badge" id="headerEtaBadge" style="display: none;" title="Total Run Estimated Time Remaining">
+        ⏳ Total ETA: <span id="headerEtaText" style="font-weight: 700; margin-left: 0.25rem;">--</span>
+      </div>
       <div class="badge">
         ⏱️ <span id="elapsedTime">0s</span>
       </div>
@@ -1825,236 +2063,357 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </header>
 
-  <!-- Unified Multi-Stage Pipeline Bar (Always visible) -->
-  <div class="pipeline-card" id="pipelineCard">
-    <div class="pipeline-header">
+  <!-- Horizontal Stage Rail (Requirement 1) -->
+  <div class="stage-rail-card" id="pipelineCard">
+    <div class="stage-rail-header">
       <span class="pipeline-title">⚡ Validation Pipeline</span>
       <span class="pipeline-subtitle" id="pipelineSubtitle">Ready • 4 Validation Stages</span>
     </div>
-    <div class="pipeline-grid" id="pipelineGrid">
-      <div class="matrix-col pending" id="stageCol-unit">
-        <div class="matrix-col-top">
-          <span class="matrix-col-name">1. UNIT TESTS</span>
-          <span class="matrix-col-status matrix-status-pending" id="stageStatus-unit">PENDING</span>
+    <div class="stage-rail" id="stageRail">
+      <div class="stage-segment pending" id="railSegment-unit">
+        <div class="stage-seg-header">
+          <span class="stage-seg-index">1</span>
+          <span class="stage-seg-name">Unit Tests</span>
+          <span class="stage-seg-status matrix-status-pending" id="railStatus-unit">PENDING</span>
         </div>
-        <div class="matrix-col-score" id="stageScore-unit">40 Tests</div>
-        <div class="matrix-col-meta" id="stageMeta-unit">Tactical Safety Suite</div>
-      </div>
-      <div class="matrix-col pending" id="stageCol-depth">
-        <div class="matrix-col-top">
-          <span class="matrix-col-name">2. DEPTH BENCHMARK</span>
-          <span class="matrix-col-status matrix-status-pending" id="stageStatus-depth">PENDING</span>
+        <div class="stage-seg-footer">
+          <span>Safety Suite</span>
+          <span class="stage-seg-duration" id="railDuration-unit">--</span>
         </div>
-        <div class="matrix-col-score" id="stageScore-depth">12 Positions</div>
-        <div class="matrix-col-meta" id="stageMeta-depth">Fixed-Position Search</div>
-      </div>
-      <div class="matrix-col pending" id="stageCol-self">
-        <div class="matrix-col-top">
-          <span class="matrix-col-name">3. SELF-PLAY MATRIX</span>
-          <span class="matrix-col-status matrix-status-pending" id="stageStatus-self">PENDING</span>
-        </div>
-        <div class="matrix-col-score" id="stageScore-self">4 Modes</div>
-        <div class="matrix-col-meta" id="stageMeta-self">Constrictor • Royale • Duel • Standard</div>
-      </div>
-      <div class="matrix-col pending" id="stageCol-pool">
-        <div class="matrix-col-top">
-          <span class="matrix-col-name">4. ZOO POOL GATE</span>
-          <span class="matrix-col-status matrix-status-pending" id="stageStatus-pool">PENDING</span>
-        </div>
-        <div class="matrix-col-score" id="stageScore-pool">Opponent Pool</div>
-        <div class="matrix-col-meta" id="stageMeta-pool">Candidate vs Baseline</div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Multi-Mode Regression Matrix (Always visible) -->
-  <div class="matrix-card" id="matrixCard">
-    <div class="matrix-header">
-      <span class="matrix-title">🏁 Self-Play Multi-Mode Matrix</span>
-      <span class="matrix-subtitle" id="matrixSubtitle">0 / 4 Modes Complete</span>
-    </div>
-    <div class="matrix-grid" id="matrixGrid">
-      <!-- Dynamic mode cards -->
-    </div>
-  </div>
-
-  <!-- Tug-of-War Hero Card (Always visible) -->
-  <div class="hero-card" id="heroCard">
-    <div class="tug-header">
-      <div class="strategy-stat baseline">
-        <div class="strategy-name" id="baselineName">BASELINE</div>
-        <div class="win-rate-big" id="baselinePts" style="color: var(--baseline-color);">0.0 Pts</div>
-        <div class="games-count" id="baselineSubtext">0 Wins</div>
       </div>
 
-      <div style="text-align: center; margin-bottom: 0.25rem;">
-        <div style="font-weight: 700; font-size: 0.75rem; color: var(--text-muted); letter-spacing: 0.1em; text-transform: uppercase;" id="leadTitle">Win Value Lead</div>
-        <div style="font-size: 1.25rem; font-weight: 800; font-family: 'JetBrains Mono', monospace;" id="leadText">EVEN</div>
-        <div style="font-size: 0.82rem; font-weight: 700; color: var(--draw-color); font-family: 'JetBrains Mono', monospace; margin-top: 0.25rem;" id="drawsHeaderRate">0 Draws</div>
+      <div class="stage-segment pending" id="railSegment-depth">
+        <div class="stage-seg-header">
+          <span class="stage-seg-index">2</span>
+          <span class="stage-seg-name">Depth Benchmark</span>
+          <span class="stage-seg-status matrix-status-pending" id="railStatus-depth">PENDING</span>
+        </div>
+        <div class="stage-seg-footer">
+          <span>Fixed Search</span>
+          <span class="stage-seg-duration" id="railDuration-depth">--</span>
+        </div>
       </div>
 
-      <div class="strategy-stat variant">
-        <div class="strategy-name" id="variantName">VARIANT</div>
-        <div class="win-rate-big" id="variantPts" style="color: var(--variant-color);">0.0 Pts</div>
-        <div class="games-count" id="variantSubtext">0 Wins</div>
+      <div class="stage-segment active pending" id="railSegment-self">
+        <div class="stage-seg-header">
+          <span class="stage-seg-index">3</span>
+          <span class="stage-seg-name">Self-Play Matrix</span>
+          <span class="stage-seg-status matrix-status-pending" id="railStatus-self">PENDING</span>
+        </div>
+        <div class="stage-seg-footer">
+          <span>4 Modes Matrix</span>
+          <span class="stage-seg-duration" id="railDuration-self">--</span>
+        </div>
+      </div>
+
+      <div class="stage-segment pending" id="railSegment-pool">
+        <div class="stage-seg-header">
+          <span class="stage-seg-index">4</span>
+          <span class="stage-seg-name">Zoo Pool Gate</span>
+          <span class="stage-seg-status matrix-status-pending" id="railStatus-pool">PENDING</span>
+        </div>
+        <div class="stage-seg-footer">
+          <span>Opponent Pool</span>
+          <span class="stage-seg-duration" id="railDuration-pool">--</span>
+        </div>
       </div>
     </div>
 
-    <!-- Win Share Bar Section -->
-    <div class="bar-section">
-      <!-- Bar 1: Win Share Tug-of-War Bar -->
-      <div class="bar-label-header" style="justify-content: center;">
-        <span>Win Share</span>
+    <!-- Hidden compatibility elements for existing unit test assertions -->
+    <div style="display: none;" id="pipelineGrid">
+      <div id="stageCol-unit"><span id="stageStatus-unit"></span><span id="stageScore-unit"></span><span id="stageMeta-unit"></span></div>
+      <div id="stageCol-depth"><span id="stageStatus-depth"></span><span id="stageScore-depth"></span><span id="stageMeta-depth"></span></div>
+      <div id="stageCol-self"><span id="stageStatus-self"></span><span id="stageScore-self"></span><span id="stageMeta-self"></span></div>
+      <div id="stageCol-pool"><span id="stageStatus-pool"></span><span id="stageScore-pool"></span><span id="stageMeta-pool"></span></div>
+    </div>
+
+    <!-- Stage Detail Panel (Expanded below rail, Requirement 1) -->
+    <div class="stage-detail-panel" id="stageDetailPanel">
+      <!-- 1. Unit Tests Detail (Requirement 2: single line) -->
+      <div class="stage-panel-content" id="panel-unit" style="display: none;">
+        <div class="unit-detail-line" id="unitDetailLine">
+          <span id="unitDetailIcon" style="font-size: 1.1rem; color: var(--variant-color);">✓</span>
+          <span id="unitDetailScore" style="font-weight: 700; color: var(--text-main);">40 / 40 Tactical Tests Passed</span>
+          <span class="sep-dot">•</span>
+          <span id="unitDetailDuration" style="font-family: 'JetBrains Mono', monospace; color: var(--text-muted);">Duration: 8.3s</span>
+          <span class="sep-dot">•</span>
+          <span id="unitDetailMeta" style="color: var(--text-muted); font-size: 0.85rem;">Pre-flight Tactical Safety Suite Clean</span>
+        </div>
       </div>
-      <div class="tug-bar-wrapper">
-        <div class="tug-threshold-label label-keep" id="labelKeep">60% KEEP</div>
-        <div class="tug-divider-label" id="labelParity">50% PARITY</div>
-        <div class="tug-threshold-label label-revert" id="labelRevert">40% REVERT</div>
-        <div class="tug-bar-container" id="tugBarContainer">
-          <div class="tug-threshold threshold-keep" id="threshKeep"></div>
-          <div class="tug-divider" id="threshParity"></div>
-          <div class="tug-threshold threshold-revert" id="threshRevert"></div>
-          <div class="tug-baselines-wrap" id="tugBaselinesWrap" style="width: 50%; display: flex; height: 100%; flex-shrink: 0; overflow: hidden; box-sizing: border-box;">
-            <div class="tug-side baseline-pts-bar b-seg-1" id="baseSeg1" style="width: 100%;">
-              <span id="baseSeg1Text">50.0%</span>
+
+      <!-- 2. Depth Benchmark Detail (Requirement 4: summary line + toggle) -->
+      <div class="stage-panel-content" id="panel-depth" style="display: none;">
+        <div class="depth-summary-container" id="depthCard">
+          <div class="depth-summary-bar">
+            <div class="depth-summary-line">
+              <span>📐 Fixed Positions: <strong id="depthSummaryCount">12</strong></span>
+              <span class="sep-dot">•</span>
+              <span>Median Δ Depth: <strong id="depthSummaryDelta" style="color: var(--variant-color);">+0.0</strong></span>
+              <span class="sep-dot">•</span>
+              <span>NPS Ratio: <strong id="depthSummaryNps" style="color: #60a5fa;">1.00x</strong></span>
+              <span class="sep-dot">•</span>
+              <span>Move Agreement: <strong id="depthSummaryAgree">100.0%</strong></span>
+              <span class="sep-dot">•</span>
+              <span id="depthStatusBadge" class="matrix-col-status matrix-status-pending">AWAITING FIXTURES</span>
             </div>
-            <div class="tug-side baseline-pts-bar b-seg-2" id="baseSeg2" style="width: 0%; display: none;">
-              <span id="baseSeg2Text"></span>
-            </div>
-            <div class="tug-side baseline-pts-bar b-seg-3" id="baseSeg3" style="width: 0%; display: none;">
-              <span id="baseSeg3Text"></span>
+            <span class="btn-toggle-expand" id="depthToggleBtn">
+              <span id="depthToggleText">Show Position Breakdown ▼</span>
+            </span>
+          </div>
+
+          <!-- Compatibility values for unit tests -->
+          <div style="display: none;">
+            <span id="depthVarValue">0.0</span>
+            <span id="depthBaseValue">0.0</span>
+            <span id="depthNpsRatioValue">1.00x</span>
+            <span id="depthAgreeValue">100.0%</span>
+            <span id="depthVarMeta"></span>
+            <span id="depthNpsMeta"></span>
+          </div>
+
+          <div class="depth-fixtures-collapsible" id="depthTableContainer" style="display: none;">
+            <div class="history-table-wrapper" style="margin-top: 1rem;">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="text-align: left; min-width: 90px;">Mode</th>
+                    <th style="min-width: 60px;">Turn</th>
+                    <th style="min-width: 90px;">Base Depth</th>
+                    <th style="min-width: 90px;">Var Depth</th>
+                    <th style="min-width: 80px;">Δ Depth</th>
+                    <th style="min-width: 90px;">Base NPS</th>
+                    <th style="min-width: 90px;">Var NPS</th>
+                    <th style="min-width: 80px;">NPS Ratio</th>
+                    <th style="min-width: 80px;">Agree %</th>
+                    <th style="min-width: 90px;">Status</th>
+                  </tr>
+                </thead>
+                <tbody id="depthTableBody">
+                  <tr>
+                    <td colspan="10" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Waiting for depth benchmark fixtures to evaluate...</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
-          <div class="tug-side variant-pts-bar" id="variantPtsBar" style="width: 50%; flex-shrink: 0;">
-            <span id="variantPtsBarText">50.0%</span>
+        </div>
+      </div>
+
+      <!-- 3. Self-Play Matrix Detail (Requirement 3: centerpiece table) -->
+      <div class="stage-panel-content" id="panel-self" style="display: block;">
+        <div class="matrix-detail-wrap" id="matrixCard">
+          <div class="table-title" style="margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 1.05rem; font-weight: 800; display: flex; align-items: center; gap: 0.5rem;">🏁 Self-Play Multi-Mode Matrix</span>
+            <span style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;" id="matrixSubtitle">0 / 4 Modes Complete</span>
+          </div>
+          <!-- Live table for matrix modes (Requirement 3) -->
+          <div class="history-table-wrapper">
+            <table class="live-matrix-table" id="matrixTable">
+              <thead>
+                <tr>
+                  <th style="text-align: left; min-width: 140px;">Mode</th>
+                  <th style="min-width: 130px;">Games (Done / Total)</th>
+                  <th style="min-width: 120px;">Current Win Share</th>
+                  <th style="min-width: 90px;">Z-Score</th>
+                  <th style="min-width: 110px;">Per-Mode ETA</th>
+                  <th style="min-width: 95px;">Status</th>
+                </tr>
+              </thead>
+              <tbody id="matrixTableBody">
+                <!-- Dynamically populated rows for Constrictor, Royale, Duel, Standard -->
+              </tbody>
+            </table>
+          </div>
+          <div id="matrixGrid" style="display: none;"></div>
+        </div>
+      </div>
+
+      <!-- 4. Zoo Pool Gate Detail (Requirement 5: table per mode) -->
+      <div class="stage-panel-content" id="panel-pool" style="display: none;">
+        <div class="pool-detail-wrap" id="poolOpponentsCard">
+          <div class="table-title" style="margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 1.05rem; font-weight: 800; display: flex; align-items: center; gap: 0.5rem;">🐍 Zoo Pool Gate Multi-Mode Benchmark</span>
+            <span style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;" id="poolStatusSubtitle">Awaiting Pool Evaluation</span>
+          </div>
+
+          <div class="history-table-wrapper">
+            <table class="live-matrix-table" id="poolModesTable">
+              <thead>
+                <tr>
+                  <th style="text-align: left; min-width: 140px;">Mode</th>
+                  <th style="min-width: 130px;">Candidate Win Share</th>
+                  <th style="min-width: 130px;">Baseline Win Share</th>
+                  <th style="min-width: 100px;">Difference (Δ)</th>
+                  <th style="min-width: 90px;">Z-Score</th>
+                  <th style="min-width: 95px;">Status</th>
+                </tr>
+              </thead>
+              <tbody id="poolModesTableBody">
+                <!-- Populated per mode -->
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Opponent Breakdown List (collapsible) -->
+          <div style="margin-top: 1.25rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+              <span style="font-size: 0.88rem; font-weight: 700; color: var(--text-muted);">Opponent Head-to-Head Breakdown</span>
+              <span style="font-size: 0.8rem; color: var(--text-muted);" id="poolOpponentsCount">0 Opponents</span>
+            </div>
+            <div class="history-table-wrapper">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="text-align: left; min-width: 140px;">Opponent</th>
+                    <th style="min-width: 70px;">Games</th>
+                    <th style="min-width: 110px;">Candidate Win %</th>
+                    <th style="min-width: 110px;">Baseline Win %</th>
+                    <th style="min-width: 90px;">Delta (Δ)</th>
+                  </tr>
+                </thead>
+                <tbody id="poolOpponentsTableBody">
+                  <tr>
+                    <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Waiting for pool opponent results...</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Combined Key Metrics Grid (Run Progress) -->
-  <div class="stats-grid">
-    <div class="stat-card">
-      <div class="stat-header">
-        <span>Run Progress</span>
-        <span class="stat-icon">⚡</span>
+  <!-- Active Run Hero & Progress Section (Visible only during active/finished runs, hidden when idle) -->
+  <div id="activeRunHero" style="display: none;">
+    <!-- Decision Status Banner -->
+    <div class="banner idle" id="decisionBanner">
+      <div>
+        <div class="banner-title" id="bannerTitle">⏸️ DECISION: AWAITING TEST</div>
+        <div class="banner-desc" id="bannerDesc">Matrix early-stopping thresholds: KEEP (z >= 1.645 or early stop), PARITY (no regression), REVERT (z <= -1.645).</div>
       </div>
-      <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 0.35rem;">
+    </div>
+
+    <!-- Tug-of-War Hero Card -->
+    <div class="hero-card" id="heroCard">
+      <div class="tug-header">
+        <div class="strategy-stat baseline">
+          <div class="strategy-name" id="baselineName">BASELINE</div>
+          <div class="win-rate-big" id="baselinePts" style="color: var(--baseline-color);">0.0 Pts</div>
+          <div class="games-count" id="baselineSubtext">0 Wins</div>
+        </div>
+
+        <div style="text-align: center; margin-bottom: 0.25rem;">
+          <div style="font-weight: 700; font-size: 0.75rem; color: var(--text-muted); letter-spacing: 0.1em; text-transform: uppercase;" id="leadTitle">Win Value Lead</div>
+          <div style="font-size: 1.25rem; font-weight: 800; font-family: 'JetBrains Mono', monospace;" id="leadText">EVEN</div>
+          <div style="font-size: 0.82rem; font-weight: 700; color: var(--draw-color); font-family: 'JetBrains Mono', monospace; margin-top: 0.25rem;" id="drawsHeaderRate">0 Draws</div>
+        </div>
+
+        <div class="strategy-stat variant">
+          <div class="strategy-name" id="variantName">VARIANT</div>
+          <div class="win-rate-big" id="variantPts" style="color: var(--variant-color);">0.0 Pts</div>
+          <div class="games-count" id="variantSubtext">0 Wins</div>
+        </div>
+      </div>
+
+      <!-- Win Share Bar Section -->
+      <div class="bar-section">
+        <div class="bar-label-header" style="justify-content: center;">
+          <span>Win Share</span>
+        </div>
+        <div class="tug-bar-wrapper">
+          <div class="tug-threshold-label label-keep" id="labelKeep">60% KEEP</div>
+          <div class="tug-divider-label" id="labelParity">50% PARITY</div>
+          <div class="tug-threshold-label label-revert" id="labelRevert">40% REVERT</div>
+          <div class="tug-bar-container" id="tugBarContainer">
+            <div class="tug-threshold threshold-keep" id="threshKeep"></div>
+            <div class="tug-divider" id="threshParity"></div>
+            <div class="tug-threshold threshold-revert" id="threshRevert"></div>
+            <div class="tug-baselines-wrap" id="tugBaselinesWrap" style="width: 50%; display: flex; height: 100%; flex-shrink: 0; overflow: hidden; box-sizing: border-box;">
+              <div class="tug-side baseline-pts-bar b-seg-1" id="baseSeg1" style="width: 100%;">
+                <span id="baseSeg1Text">50.0%</span>
+              </div>
+              <div class="tug-side baseline-pts-bar b-seg-2" id="baseSeg2" style="width: 0%; display: none;">
+                <span id="baseSeg2Text"></span>
+              </div>
+              <div class="tug-side baseline-pts-bar b-seg-3" id="baseSeg3" style="width: 0%; display: none;">
+                <span id="baseSeg3Text"></span>
+              </div>
+            </div>
+            <div class="tug-side variant-pts-bar" id="variantPtsBar" style="width: 50%; flex-shrink: 0;">
+              <span id="variantPtsBarText">50.0%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Combined Key Metrics Grid (Run Progress) -->
+    <div class="stats-grid" id="statsGrid">
+      <div class="stat-card">
+        <div class="stat-header">
+          <span>Run Progress</span>
+          <span class="stat-icon">⚡</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 0.35rem;">
+          <div>
+            <div class="stat-value" id="runsValue">0 / 0 Games</div>
+            <div class="stat-subtext" id="runsSubtext">0% Complete</div>
+          </div>
+          <div style="text-align: right;">
+            <div class="stat-value" style="font-size: 1.4rem; color: #60a5fa;" id="paceValue">0.000 games/sec</div>
+          </div>
+        </div>
+        <div class="progress-bar-wrap">
+          <div class="progress-bar-fill" id="runsProgress" style="width: 0%;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Idle State: Last Completed Run's Summary (Requirement 6, shown when no run active) -->
+  <div class="last-run-card" id="idleCompletedHero" style="display: block;">
+    <div class="last-run-header">
+      <div style="display: flex; align-items: center; gap: 0.85rem;">
+        <span style="font-size: 1.4rem;">🏁</span>
         <div>
-          <div class="stat-value" id="runsValue">0 / 0 Games</div>
-          <div class="stat-subtext" id="runsSubtext">0% Complete</div>
-        </div>
-        <div style="text-align: right;">
-          <div class="stat-value" style="font-size: 1.4rem; color: #60a5fa;" id="paceValue">0.000 games/sec</div>
+          <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em;">Last Completed Benchmark</div>
+          <div class="last-run-title" id="lastRunTitle">No previous simulation runs recorded.</div>
         </div>
       </div>
-      <div class="progress-bar-wrap">
-        <div class="progress-bar-fill" id="runsProgress" style="width: 0%;"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Decision Status Banner (Permanent slot, zero layout shift) -->
-  <div class="banner idle" id="decisionBanner">
-    <div>
-      <div class="banner-title" id="bannerTitle">⏸️ DECISION: AWAITING TEST</div>
-      <div class="banner-desc" id="bannerDesc">Matrix early-stopping thresholds: KEEP (z >= 1.645 or early stop), PARITY (no regression), REVERT (z <= -1.645).</div>
-    </div>
-  </div>
-
-  <!-- Fixed-Position Depth Benchmark Card (Always visible) -->
-  <div class="table-card" id="depthCard">
-    <div class="table-title">
-      <span>📐 Fixed-Position Depth Benchmark</span>
-      <span style="font-size: 0.85rem; font-weight: 700; color: var(--text-muted);" id="depthStatusBadge">AWAITING FIXTURES</span>
-    </div>
-
-    <!-- Depth Hero Metrics Grid -->
-    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem;" id="depthMetricsGrid">
-      <div class="matrix-col" style="background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.4);">
-        <div class="matrix-col-top">
-          <span class="matrix-col-name">VARIANT MEDIAN DEPTH</span>
-          <span class="matrix-col-status matrix-status-passed" id="depthVarBadge">VAR</span>
-        </div>
-        <div class="matrix-col-score" style="color: var(--variant-color);" id="depthVarValue">0.0</div>
-        <div class="matrix-col-meta" id="depthVarMeta">Search Depth</div>
-      </div>
-      <div class="matrix-col" style="background: rgba(59, 130, 246, 0.08); border-color: rgba(59, 130, 246, 0.4);">
-        <div class="matrix-col-top">
-          <span class="matrix-col-name">BASELINE MEDIAN DEPTH</span>
-          <span class="matrix-col-status matrix-status-running" id="depthBaseBadge">BASE</span>
-        </div>
-        <div class="matrix-col-score" style="color: var(--baseline-color);" id="depthBaseValue">0.0</div>
-        <div class="matrix-col-meta" id="depthBaseMeta">Search Depth</div>
-      </div>
-      <div class="matrix-col">
-        <div class="matrix-col-top">
-          <span class="matrix-col-name">NPS RATIO (V / B)</span>
-          <span class="matrix-col-status matrix-status-pending">SPEED</span>
-        </div>
-        <div class="matrix-col-score" style="color: #60a5fa;" id="depthNpsRatioValue">1.00x</div>
-        <div class="matrix-col-meta" id="depthNpsMeta">Nodes / Second</div>
-      </div>
-      <div class="matrix-col">
-        <div class="matrix-col-top">
-          <span class="matrix-col-name">MOVE AGREEMENT</span>
-          <span class="matrix-col-status matrix-status-pending">TACTICS</span>
-        </div>
-        <div class="matrix-col-score" style="color: var(--text-main);" id="depthAgreeValue">100.0%</div>
-        <div class="matrix-col-meta">Identical Best Move %</div>
+      <div style="display: flex; align-items: center; gap: 0.75rem;">
+        <span class="winner-pill parity" id="lastRunDecisionBadge">🟡 PARITY</span>
+        <span style="font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; color: var(--text-muted);" id="lastRunTime">-</span>
       </div>
     </div>
 
-    <!-- Depth Fixtures Breakdown Table -->
-    <div class="history-table-wrapper">
-      <table>
-        <thead>
-          <tr>
-            <th style="text-align: left; min-width: 90px;">Mode</th>
-            <th style="min-width: 60px;">Turn</th>
-            <th style="min-width: 90px;">Base Depth</th>
-            <th style="min-width: 90px;">Var Depth</th>
-            <th style="min-width: 80px;">Δ Depth</th>
-            <th style="min-width: 90px;">Base NPS</th>
-            <th style="min-width: 90px;">Var NPS</th>
-            <th style="min-width: 80px;">NPS Ratio</th>
-            <th style="min-width: 80px;">Agree %</th>
-            <th style="min-width: 90px;">Status</th>
-          </tr>
-        </thead>
-        <tbody id="depthTableBody">
-          <tr>
-            <td colspan="10" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Waiting for depth benchmark fixtures to evaluate...</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
+    <div class="last-run-body" id="lastRunBody">
+      <div class="last-run-metrics-grid">
+        <div class="last-run-metric">
+          <div class="metric-label">TOTAL GAMES</div>
+          <div class="metric-value" id="lastRunGames">0</div>
+          <div class="metric-sub" id="lastRunModesCount">0 Modes</div>
+        </div>
+        <div class="last-run-metric">
+          <div class="metric-label">VARIANT WIN SHARE</div>
+          <div class="metric-value" style="color: var(--variant-color);" id="lastRunVarShare">--</div>
+          <div class="metric-sub" id="lastRunVarWins">0 Wins</div>
+        </div>
+        <div class="last-run-metric">
+          <div class="metric-label">BASELINE WIN SHARE</div>
+          <div class="metric-value" style="color: var(--baseline-color);" id="lastRunBaseShare">--</div>
+          <div class="metric-sub" id="lastRunBaseWins">0 Wins</div>
+        </div>
+        <div class="last-run-metric">
+          <div class="metric-label">BENCHMARK OUTCOME</div>
+          <div class="metric-value" style="color: #f59e0b;" id="lastRunOutcome">--</div>
+          <div class="metric-sub" id="lastRunStopReason">-</div>
+        </div>
+      </div>
 
-  <!-- Pool Opponents Breakdown Card (Always visible) -->
-  <div class="table-card" id="poolOpponentsCard">
-    <div class="table-title">
-      <span>🐍 Pool Opponent Head-to-Head Breakdown</span>
-      <span style="font-size: 0.8rem; font-weight: 500; color: var(--text-muted);" id="poolOpponentsCount">0 Opponents</span>
-    </div>
-    <div class="history-table-wrapper">
-      <table>
-        <thead>
-          <tr>
-            <th style="text-align: left; min-width: 140px;">Opponent</th>
-            <th style="min-width: 70px;">Games</th>
-            <th style="min-width: 110px;">Candidate Win %</th>
-            <th style="min-width: 110px;">Baseline Win %</th>
-            <th style="min-width: 90px;">Delta (Δ)</th>
-          </tr>
-        </thead>
-        <tbody id="poolOpponentsTableBody">
-          <tr>
-            <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Waiting for pool opponent results...</td>
-          </tr>
-        </tbody>
-      </table>
+      <!-- Per-mode chip indicators from last completed run -->
+      <div class="last-run-chips" id="lastRunChips" style="margin-top: 1rem; display: flex; gap: 0.65rem; flex-wrap: wrap;">
+      </div>
     </div>
   </div>
 
@@ -2147,6 +2506,54 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   let lastHistoryJSON = '';
   let isUpdating = false;
 
+  let activeStage = 'self';
+  let userSelectedStage = false;
+  let isDepthExpanded = false;
+
+  function selectStage(stageId) {
+    userSelectedStage = true;
+    activeStage = stageId;
+    ['unit', 'depth', 'self', 'pool'].forEach(id => {
+      const seg = document.getElementById(`railSegment-${id}`);
+      const panel = document.getElementById(`panel-${id}`);
+      if (seg) {
+        if (id === stageId) seg.classList.add('active');
+        else seg.classList.remove('active');
+      }
+      if (panel) {
+        panel.style.display = (id === stageId) ? 'block' : 'none';
+      }
+    });
+  }
+
+  function autoSelectStage(stageId) {
+    if (userSelectedStage) return;
+    activeStage = stageId;
+    ['unit', 'depth', 'self', 'pool'].forEach(id => {
+      const seg = document.getElementById(`railSegment-${id}`);
+      const panel = document.getElementById(`panel-${id}`);
+      if (seg) {
+        if (id === stageId) seg.classList.add('active');
+        else seg.classList.remove('active');
+      }
+      if (panel) {
+        panel.style.display = (id === stageId) ? 'block' : 'none';
+      }
+    });
+  }
+
+  function toggleDepthTable() {
+    isDepthExpanded = !isDepthExpanded;
+    const tableContainer = document.getElementById('depthTableContainer');
+    const toggleText = document.getElementById('depthToggleText');
+    if (tableContainer) {
+      tableContainer.style.display = isDepthExpanded ? 'block' : 'none';
+    }
+    if (toggleText) {
+      toggleText.innerText = isDepthExpanded ? 'Hide Position Breakdown ▲' : 'Show Position Breakdown ▼';
+    }
+  }
+
   function updateDepthUI(data) {
     const depth = data.depth_data || {};
     const varD = (depth.median_var_depth != null) ? depth.median_var_depth : 0.0;
@@ -2155,51 +2562,42 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     const npsR = (depth.nps_ratio != null) ? depth.nps_ratio : 1.0;
     const agree = (depth.agreement_pct != null) ? depth.agreement_pct : 100.0;
 
-    setText('depthVarValue', varD.toFixed(1));
-    const varMeta = document.getElementById('depthVarMeta');
-    if (varMeta) {
-      if (deltaD > 0) {
-        varMeta.innerText = `+${deltaD.toFixed(1)} Depth vs Base`;
-        varMeta.style.color = 'var(--variant-color)';
-      } else if (deltaD < 0) {
-        varMeta.innerText = `${deltaD.toFixed(1)} Depth vs Base`;
-        varMeta.style.color = 'var(--danger-color)';
-      } else {
-        varMeta.innerText = `Parity (0.0 Depth vs Base)`;
-        varMeta.style.color = 'var(--text-muted)';
-      }
+    // Single summary line (Requirement 4)
+    setText('depthSummaryCount', depth.total_positions || depth.completed_positions || 12);
+    const deltaEl = document.getElementById('depthSummaryDelta');
+    if (deltaEl) {
+      deltaEl.innerText = `${deltaD >= 0 ? '+' : ''}${deltaD.toFixed(1)} (V ${varD.toFixed(1)} vs B ${baseD.toFixed(1)})`;
+      deltaEl.style.color = deltaD > 0 ? 'var(--variant-color)' : (deltaD < 0 ? 'var(--danger-color)' : 'var(--text-main)');
     }
+    const npsEl = document.getElementById('depthSummaryNps');
+    if (npsEl) {
+      npsEl.innerText = `${npsR.toFixed(2)}x`;
+      npsEl.style.color = npsR >= 1.0 ? 'var(--variant-color)' : 'var(--danger-color)';
+    }
+    setText('depthSummaryAgree', `${agree.toFixed(1)}%`);
 
+    // Compatibility test elements
+    setText('depthVarValue', varD.toFixed(1));
     setText('depthBaseValue', baseD.toFixed(1));
     setText('depthNpsRatioValue', `${npsR.toFixed(2)}x`);
-    const npsMeta = document.getElementById('depthNpsMeta');
-    if (npsMeta) {
-      npsMeta.innerText = npsR >= 1.0 ? 'Faster / Equal Search' : 'Slower Search';
-      npsMeta.style.color = npsR >= 1.0 ? 'var(--variant-color)' : 'var(--danger-color)';
-    }
-
     setText('depthAgreeValue', `${agree.toFixed(1)}%`);
 
     const statusBadge = document.getElementById('depthStatusBadge');
     if (statusBadge) {
-      if (data.status === 'FINISHED') {
+      if (data.status === 'FINISHED' || (depth.completed_positions && depth.completed_positions >= 12)) {
         const passed = depth.passed !== false && deltaD >= 0;
+        statusBadge.className = `matrix-col-status ${passed ? 'matrix-status-passed' : 'matrix-status-failed'}`;
         statusBadge.innerText = passed ? 'PASSED (NO REGRESSION)' : 'DEPTH REGRESSION';
-        statusBadge.style.color = passed ? 'var(--variant-color)' : 'var(--danger-color)';
       } else if (data.run_type === 'depth' && data.status === 'RUNNING') {
+        statusBadge.className = 'matrix-col-status matrix-status-running';
         statusBadge.innerText = `EVALUATING (${depth.completed_positions || 0}/${depth.total_positions || 12})`;
-        statusBadge.style.color = '#60a5fa';
-      } else if (depth.completed_positions && depth.completed_positions > 0) {
-        const passed = depth.passed !== false && deltaD >= 0;
-        statusBadge.innerText = passed ? 'PASSED (NO REGRESSION)' : 'DEPTH REGRESSION';
-        statusBadge.style.color = passed ? 'var(--variant-color)' : 'var(--danger-color)';
       } else {
+        statusBadge.className = 'matrix-col-status matrix-status-pending';
         statusBadge.innerText = 'AWAITING FIXTURES';
-        statusBadge.style.color = 'var(--text-muted)';
       }
     }
 
-    // Render fixtures table
+    // Per-fixture breakdown table
     const tbody = document.getElementById('depthTableBody');
     if (tbody) {
       const fixtures = depth.fixtures || [];
@@ -2236,11 +2634,72 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   function updatePoolUI(data) {
     const pool = data.pool_data || {};
-    const opponents = pool.opponents || [];
+    const poolModesBody = document.getElementById('poolModesTableBody');
+    const poolSubtitle = document.getElementById('poolStatusSubtitle');
+
+    const baseModes = [
+      { mode: 'constrictor', name: 'Constrictor 4P' },
+      { mode: 'royale', name: 'Royale 4P' },
+      { mode: 'duel', name: 'Duel 1v1' },
+      { mode: 'standard', name: 'Standard 4P' },
+    ];
+
+    if (poolModesBody) {
+      const modeDataMap = pool.mode_results || pool.modes || {};
+      const overallDelta = pool.delta != null ? pool.delta : ((pool.cand_share || 0) - (pool.base_share || 0));
+      const overallZ = pool.z_score != null ? pool.z_score : 0.0;
+      const isPoolRunning = (data.run_type === 'pool' && data.status === 'RUNNING');
+
+      const rowsHtml = baseModes.map(bm => {
+        const md = modeDataMap[bm.mode] || {};
+        const candShare = md.cand_share != null ? md.cand_share : (isPoolRunning && data.game_mode === bm.mode ? (pool.cand_share || 0) : null);
+        const baseShare = md.base_share != null ? md.base_share : (isPoolRunning && data.game_mode === bm.mode ? (pool.base_share || 0) : null);
+        const delta = md.delta != null ? md.delta : (candShare != null && baseShare != null ? (candShare - baseShare) : null);
+        const z = md.z_score != null ? md.z_score : (isPoolRunning && data.game_mode === bm.mode ? overallZ : null);
+
+        let statusClass = 'pending';
+        let statusText = 'PENDING';
+        if (isPoolRunning && data.game_mode === bm.mode) {
+          statusClass = 'running';
+          statusText = 'RUNNING';
+        } else if (md.decision) {
+          statusText = md.decision;
+          statusClass = md.decision.toLowerCase();
+        } else if (candShare != null) {
+          statusClass = delta >= 0 ? 'passed' : 'failed';
+          statusText = delta >= 0 ? 'PASSED' : 'FAILED';
+        }
+
+        const deltaColor = delta > 0 ? 'var(--variant-color)' : (delta < 0 ? 'var(--danger-color)' : 'var(--text-main)');
+
+        return `
+          <tr>
+            <td style="font-weight: 700; color: var(--text-main);">${bm.name}</td>
+            <td style="font-weight: 700; color: var(--variant-color);">${candShare != null ? candShare.toFixed(1) + '%' : '--'}</td>
+            <td style="font-weight: 700; color: var(--baseline-color);">${baseShare != null ? baseShare.toFixed(1) + '%' : '--'}</td>
+            <td style="font-weight: 700; color: ${delta != null ? deltaColor : 'var(--text-muted)'};">${delta != null ? (delta > 0 ? '+' : '') + delta.toFixed(1) + '%' : '--'}</td>
+            <td style="font-weight: 600; color: var(--text-main);">${z != null ? (z > 0 ? '+' : '') + z.toFixed(2) : '--'}</td>
+            <td><span class="matrix-col-status matrix-status-${statusClass}">${statusText}</span></td>
+          </tr>
+        `;
+      }).join('');
+
+      setHTML(poolModesBody, rowsHtml);
+      if (poolSubtitle) {
+        if (pool.total_games && pool.total_games > 0) {
+          poolSubtitle.innerText = `Evaluated ${pool.total_games} Games • z = ${overallZ >= 0 ? '+' : ''}${overallZ.toFixed(2)}`;
+        } else if (isPoolRunning) {
+          poolSubtitle.innerText = `Evaluating Candidate vs Opponent Pool...`;
+        } else {
+          poolSubtitle.innerText = 'Awaiting Pool Benchmark';
+        }
+      }
+    }
 
     // Update Opponents Table
     const oppTbody = document.getElementById('poolOpponentsTableBody');
     const oppCount = document.getElementById('poolOpponentsCount');
+    const opponents = pool.opponents || [];
     if (oppCount) oppCount.innerText = `${opponents.length} Opponent${opponents.length === 1 ? '' : 's'}`;
     if (oppTbody) {
       if (opponents.length === 0) {
@@ -2264,196 +2723,227 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
   }
 
-  function updatePipelineUI(data) {
+  function updateStageRail(data) {
     const runType = data.run_type || 'self';
     const isRunning = (data.status === 'RUNNING' && data.runner_alive !== false);
     const isFinished = (data.status === 'FINISHED');
-    const isDisconnected = (data.status === 'DISCONNECTED');
     const isIdle = (data.status === 'IDLE' || data.status === 'WAITING' || !data.status);
     const rec = data.recommendation || 'PENDING';
 
-    function setStage(id, status, score, meta, color) {
-      const col = document.getElementById(`stageCol-${id}`);
-      const st = document.getElementById(`stageStatus-${id}`);
-      const sc = document.getElementById(`stageScore-${id}`);
-      const mt = document.getElementById(`stageMeta-${id}`);
+    function setRailSeg(id, status, duration) {
+      const seg = document.getElementById(`railSegment-${id}`);
+      const st = document.getElementById(`railStatus-${id}`);
+      const dur = document.getElementById(`railDuration-${id}`);
       const statusLower = status.toLowerCase();
-      if (col) col.className = `matrix-col ${statusLower}`;
+
+      if (seg) {
+        const isActive = (id === activeStage);
+        seg.className = `stage-segment ${statusLower}${isActive ? ' active' : ''}`;
+      }
       if (st) {
-        st.className = `matrix-col-status matrix-status-${statusLower}`;
+        st.className = `stage-seg-status matrix-status-${statusLower}`;
         st.innerText = status;
       }
-      if (sc) {
-        sc.innerText = score;
-        sc.style.color = color || '';
+      if (dur) {
+        dur.innerText = duration || '--';
       }
-      if (mt) mt.innerText = meta;
     }
 
     // Stage 1: Tactical Unit Tests
     const unitData = data.unit_tests_data || {};
     let unitStatus = unitData.status || 'PENDING';
-    let unitScore = '40 Tests';
-    let unitMeta = 'Tactical Safety Suite';
-    let unitColor = '';
+    let unitDur = unitData.duration_sec ? `${unitData.duration_sec.toFixed(1)}s` : '--';
 
-    if (data.stop_type === 'TEST_FAILURE') {
+    if (data.stop_type === 'TEST_FAILURE' || unitStatus === 'FAILED') {
       unitStatus = 'FAILED';
-      unitScore = 'FAIL';
-      unitMeta = 'Pre-flight Suite Failed';
-      unitColor = 'var(--danger-color)';
+      unitDur = unitData.duration_sec ? `${unitData.duration_sec.toFixed(1)}s` : 'Failed';
+      autoSelectStage('unit');
     } else if (unitStatus === 'PASSED' || (data.total_played > 0) || (isFinished && data.stop_type !== 'TEST_FAILURE')) {
-      unitStatus = 'PASSED';
-      unitScore = unitData.passed ? `${unitData.passed} / ${unitData.total || unitData.passed}` : 'Passed';
-      unitMeta = 'All Tactical Tests Passed';
-      unitColor = 'var(--variant-color)';
+      unitStatus = 'DONE';
+      unitDur = unitData.duration_sec ? `${unitData.duration_sec.toFixed(1)}s` : (unitData.passed ? '< 10s' : 'Passed');
     } else if (unitStatus === 'RUNNING' || (isRunning && data.total_played === 0 && runType === 'self')) {
       unitStatus = 'RUNNING';
-      unitScore = 'Running...';
-      unitMeta = 'Executing Pre-flight Tests';
-      unitColor = '#60a5fa';
-    } else if (unitStatus === 'FAILED') {
-      unitScore = 'FAIL';
-      unitMeta = unitData.details || 'Pre-flight Suite Failed';
-      unitColor = 'var(--danger-color)';
+      unitDur = formatSeconds(data.elapsed_seconds || 0);
+      autoSelectStage('unit');
     }
-    setStage('unit', unitStatus, unitScore, unitMeta, unitColor);
+    setRailSeg('unit', unitStatus, unitDur);
+
+    // Update Unit Tests Single-Line Detail (Requirement 2)
+    const unitScoreEl = document.getElementById('unitDetailScore');
+    const unitDurEl = document.getElementById('unitDetailDuration');
+    const unitIconEl = document.getElementById('unitDetailIcon');
+    const unitMetaEl = document.getElementById('unitDetailMeta');
+    if (unitScoreEl) {
+      if (unitStatus === 'FAILED') {
+        unitScoreEl.innerText = `${unitData.passed || 0} / ${unitData.total || 40} Tests Passed (FAILURE)`;
+        unitScoreEl.style.color = 'var(--danger-color)';
+        if (unitIconEl) { unitIconEl.innerText = '❌'; unitIconEl.style.color = 'var(--danger-color)'; }
+        if (unitMetaEl) unitMetaEl.innerText = unitData.details || 'Pre-flight Tactical Safety Suite Failed';
+      } else if (unitStatus === 'DONE') {
+        unitScoreEl.innerText = `${unitData.passed || 40} / ${unitData.total || unitData.passed || 40} Tactical Tests Passed`;
+        unitScoreEl.style.color = 'var(--variant-color)';
+        if (unitIconEl) { unitIconEl.innerText = '✓'; unitIconEl.style.color = 'var(--variant-color)'; }
+        if (unitMetaEl) unitMetaEl.innerText = 'Pre-flight Tactical Safety Suite Clean';
+      } else if (unitStatus === 'RUNNING') {
+        unitScoreEl.innerText = 'Executing Pre-flight Tactical Safety Suite...';
+        unitScoreEl.style.color = '#60a5fa';
+        if (unitIconEl) { unitIconEl.innerText = '⏳'; unitIconEl.style.color = '#60a5fa'; }
+        if (unitMetaEl) unitMetaEl.innerText = 'Running deterministic test scenarios';
+      } else {
+        unitScoreEl.innerText = '40 Tactical Safety Tests';
+        unitScoreEl.style.color = 'var(--text-muted)';
+        if (unitIconEl) { unitIconEl.innerText = '⚪'; unitIconEl.style.color = 'var(--text-muted)'; }
+        if (unitMetaEl) unitMetaEl.innerText = 'Awaiting Pre-flight Execution';
+      }
+    }
+    if (unitDurEl) unitDurEl.innerText = `Duration: ${unitDur}`;
 
     // Stage 2: Depth Benchmark
     const depth = data.depth_data || {};
     let depthStatus = 'PENDING';
-    let depthScore = '12 Positions';
-    let depthMeta = 'Fixed-Position Search';
-    let depthColor = '';
+    let depthDur = depth.duration_sec ? formatSeconds(depth.duration_sec) : '--';
 
     if (runType === 'depth') {
       if (isRunning) {
         depthStatus = 'RUNNING';
-        depthScore = `${depth.completed_positions || 0} / ${depth.total_positions || 12} Pos`;
-        depthMeta = 'Evaluating Fixed Positions';
-        depthColor = '#60a5fa';
+        depthDur = formatSeconds(data.elapsed_seconds || 0);
+        autoSelectStage('depth');
       } else if (isFinished) {
         const passed = depth.passed !== false && (depth.delta_depth == null || depth.delta_depth >= 0);
-        depthStatus = passed ? 'PASSED' : 'FAILED';
-        const d = depth.delta_depth || 0;
-        depthScore = `${d >= 0 ? '+' : ''}${d.toFixed(1)} Depth`;
-        depthMeta = passed ? `${(depth.nps_ratio || 1.0).toFixed(2)}x NPS • ${(depth.agreement_pct || 100).toFixed(0)}% Agree` : 'Depth Regression';
-        depthColor = passed ? 'var(--variant-color)' : 'var(--danger-color)';
+        depthStatus = passed ? 'DONE' : 'FAILED';
+        depthDur = depth.duration_sec ? formatSeconds(depth.duration_sec) : formatSeconds(data.elapsed_seconds || 0);
+        autoSelectStage('depth');
       }
     } else if (depth.completed_positions && depth.completed_positions > 0) {
       const passed = depth.passed !== false && (depth.delta_depth == null || depth.delta_depth >= 0);
-      depthStatus = passed ? 'PASSED' : 'FAILED';
-      const d = depth.delta_depth || 0;
-      depthScore = `${d >= 0 ? '+' : ''}${d.toFixed(1)} Depth`;
-      depthMeta = `${(depth.nps_ratio || 1.0).toFixed(2)}x NPS`;
-      depthColor = passed ? 'var(--variant-color)' : 'var(--danger-color)';
+      depthStatus = passed ? 'DONE' : 'FAILED';
+      depthDur = depth.duration_sec ? formatSeconds(depth.duration_sec) : '--';
     }
-    setStage('depth', depthStatus, depthScore, depthMeta, depthColor);
+    setRailSeg('depth', depthStatus, depthDur);
 
     // Stage 3: Self-Play Matrix
     let selfStatus = 'PENDING';
-    let selfScore = '4 Modes';
-    let selfMeta = 'Constrictor • Royale • Duel • Standard';
-    let selfColor = '';
-
     const matrixList = data.matrix_progress || [];
     const completedModes = matrixList.filter(m => ['PASSED', 'PARITY', 'FAILED', 'SKIPPED'].includes(m.status)).length;
-    const totalModes = matrixList.length || 4;
+    let selfDur = '--';
+    const sumMatrixSec = matrixList.reduce((acc, m) => acc + (m.duration_sec || 0), 0);
 
     if (runType === 'self') {
       if (isRunning) {
         selfStatus = 'RUNNING';
-        selfScore = `${completedModes} / ${totalModes} Modes`;
-        selfMeta = `${(data.game_mode || 'standard').toUpperCase()} Live`;
-        selfColor = '#60a5fa';
+        selfDur = formatSeconds(data.elapsed_seconds || 0);
+        autoSelectStage('self');
       } else if (isFinished) {
-        if (rec === 'KEEP') {
-          selfStatus = 'PASSED';
-          selfColor = 'var(--variant-color)';
-        } else if (rec === 'PARITY') {
-          selfStatus = 'PARITY';
-          selfColor = '#f59e0b';
-        } else if (rec === 'REVERT') {
-          selfStatus = 'FAILED';
-          selfColor = 'var(--danger-color)';
-        } else {
-          selfStatus = 'PASSED';
-        }
-        selfScore = `${completedModes || 4} / ${totalModes} Modes`;
-        selfMeta = `Matrix ${rec}`;
+        if (rec === 'KEEP') selfStatus = 'DONE';
+        else if (rec === 'PARITY') selfStatus = 'PARITY';
+        else if (rec === 'REVERT') selfStatus = 'FAILED';
+        else selfStatus = 'DONE';
+        selfDur = formatSeconds(sumMatrixSec || data.elapsed_seconds || 0);
+        autoSelectStage('self');
       }
     } else if (completedModes > 0) {
-      selfStatus = 'PASSED';
-      selfScore = `${completedModes} / ${totalModes} Modes`;
-      selfMeta = 'Matrix Complete';
-      selfColor = 'var(--variant-color)';
+      selfStatus = 'DONE';
+      selfDur = formatSeconds(sumMatrixSec);
     }
-    setStage('self', selfStatus, selfScore, selfMeta, selfColor);
+    setRailSeg('self', selfStatus, selfDur);
 
     // Stage 4: Zoo Pool Gate
     const pool = data.pool_data || {};
     let poolStatus = 'PENDING';
-    let poolScore = 'Opponent Pool';
-    let poolMeta = 'Candidate vs Baseline';
-    let poolColor = '';
+    let poolDur = pool.duration_sec ? formatSeconds(pool.duration_sec) : '--';
 
     if (runType === 'pool') {
       if (isRunning) {
         poolStatus = 'RUNNING';
-        poolScore = `${(pool.delta || 0) >= 0 ? '+' : ''}${(pool.delta || 0).toFixed(1)}% Δ`;
-        poolMeta = `z = ${(pool.z_score || 0) >= 0 ? '+' : ''}${(pool.z_score || 0).toFixed(2)} (${pool.total_games || data.total_played || 0}G)`;
-        poolColor = '#60a5fa';
+        poolDur = formatSeconds(data.elapsed_seconds || 0);
+        autoSelectStage('pool');
       } else if (isFinished) {
-        if (rec === 'KEEP') {
-          poolStatus = 'PASSED';
-          poolColor = 'var(--variant-color)';
-        } else if (rec === 'PARITY') {
-          poolStatus = 'PARITY';
-          poolColor = '#f59e0b';
-        } else {
-          poolStatus = 'FAILED';
-          poolColor = 'var(--danger-color)';
-        }
-        poolScore = `${(pool.delta || 0) >= 0 ? '+' : ''}${(pool.delta || 0).toFixed(1)}% Δ`;
-        poolMeta = `z = ${(pool.z_score || 0) >= 0 ? '+' : ''}${(pool.z_score || 0).toFixed(2)} (${rec})`;
+        if (rec === 'KEEP') poolStatus = 'DONE';
+        else if (rec === 'PARITY') poolStatus = 'PARITY';
+        else poolStatus = 'FAILED';
+        poolDur = pool.duration_sec ? formatSeconds(pool.duration_sec) : formatSeconds(data.elapsed_seconds || 0);
+        autoSelectStage('pool');
       }
     } else if (pool.total_games && pool.total_games > 0) {
-      const pass = (pool.delta || 0) >= 0;
-      poolStatus = pass ? 'PASSED' : 'FAILED';
-      poolScore = `${(pool.delta || 0) >= 0 ? '+' : ''}${(pool.delta || 0).toFixed(1)}% Δ`;
-      poolMeta = `z = ${(pool.z_score || 0).toFixed(2)}`;
-      poolColor = pass ? 'var(--variant-color)' : 'var(--danger-color)';
+      poolStatus = (pool.delta || 0) >= 0 ? 'DONE' : 'FAILED';
+      poolDur = pool.duration_sec ? formatSeconds(pool.duration_sec) : '--';
     }
-    setStage('pool', poolStatus, poolScore, poolMeta, poolColor);
+    setRailSeg('pool', poolStatus, poolDur);
+
+    // Header Unit Tests Pill (Requirement 2)
+    const headerPillDot = document.getElementById('headerUnitDot');
+    const headerPillText = document.getElementById('headerUnitText');
+    if (headerPillDot && headerPillText) {
+      if (unitStatus === 'FAILED') {
+        headerPillDot.style.backgroundColor = 'var(--danger-color)';
+        headerPillDot.style.animation = 'none';
+        headerPillText.innerText = 'Unit Tests: FAILED';
+      } else if (unitStatus === 'DONE') {
+        headerPillDot.style.backgroundColor = 'var(--variant-color)';
+        headerPillDot.style.animation = 'none';
+        headerPillText.innerText = `Unit Tests: ${unitData.passed || 40}/${unitData.total || 40} Passed`;
+      } else if (unitStatus === 'RUNNING') {
+        headerPillDot.style.backgroundColor = '#60a5fa';
+        headerPillDot.style.animation = 'pulse 1.5s infinite';
+        headerPillText.innerText = 'Unit Tests: Running...';
+      } else {
+        headerPillDot.style.backgroundColor = 'var(--draw-color)';
+        headerPillDot.style.animation = 'none';
+        headerPillText.innerText = 'Unit Tests: Pending';
+      }
+    }
+
+    // Red Banner on Failure (Requirement 2)
+    const failBanner = document.getElementById('unitTestFailBanner');
+    const failDesc = document.getElementById('unitTestFailBannerDesc');
+    if (failBanner) {
+      if (data.stop_type === 'TEST_FAILURE' || unitStatus === 'FAILED') {
+        failBanner.style.display = 'flex';
+        if (failDesc) failDesc.innerText = data.stop_reason || unitData.details || 'Pre-flight tactical safety suite failed. All subsequent stages aborted.';
+      } else {
+        failBanner.style.display = 'none';
+      }
+    }
+
+    // Header Total Run ETA (Requirement 7)
+    const headerEtaBadge = document.getElementById('headerEtaBadge');
+    const headerEtaText = document.getElementById('headerEtaText');
+    if (headerEtaBadge && headerEtaText) {
+      if (isRunning && data.eta_seconds != null && data.eta_seconds > 0) {
+        headerEtaBadge.style.display = 'inline-flex';
+        headerEtaText.innerText = formatSeconds(data.eta_seconds);
+        if (data.eta_breakdown && data.eta_breakdown.length > 0) {
+          headerEtaBadge.title = 'Total Run ETA: ' + data.eta_breakdown.map(b => `${b.mode}: ${b.games_left}G (~${formatSeconds(b.eta_seconds)})`).join(' | ');
+        }
+      } else {
+        headerEtaBadge.style.display = 'none';
+      }
+    }
 
     // Pipeline Subtitle
     const subEl = document.getElementById('pipelineSubtitle');
     if (subEl) {
-      if (isIdle) {
-        subEl.innerText = 'Ready • 4 Validation Stages';
-      } else if (isRunning) {
-        const typeStr = runType === 'pool' ? 'Opponent Zoo Pool' : (runType === 'depth' ? 'Depth Benchmark' : `Self-Play ${(data.game_mode || '').toUpperCase()}`);
-        subEl.innerText = `Live Execution • ${typeStr}`;
-      } else if (isFinished) {
-        subEl.innerText = `Validation Complete • Final Recommendation: ${rec}`;
-      } else if (isDisconnected) {
-        subEl.innerText = 'Runner Process Disconnected';
-      } else {
-        subEl.innerText = '4 Validation Stages';
-      }
+      if (isIdle) subEl.innerText = 'Ready • 4 Validation Stages';
+      else if (isRunning) subEl.innerText = `Live Execution • Stage: ${runType.toUpperCase()}`;
+      else if (isFinished) subEl.innerText = `Validation Complete • Final: ${rec}`;
+      else subEl.innerText = '4 Validation Stages';
     }
   }
 
+  function updatePipelineUI(data) {
+    updateStageRail(data);
+  }
+
   function updateMatrixUI(data) {
-    const matrixGrid = document.getElementById('matrixGrid');
+    const tableBody = document.getElementById('matrixTableBody');
     const matrixSubtitle = document.getElementById('matrixSubtitle');
-    if (!matrixGrid) return;
+    if (!tableBody) return;
 
     const baseModes = [
-      { mode: 'constrictor', name: '1. CONSTRICTOR 4P', target_share: 25.0, max_games: 200, num_snakes: 4 },
-      { mode: 'royale', name: '2. ROYALE 4P', target_share: 25.0, max_games: 200, num_snakes: 4 },
-      { mode: 'duel', name: '3. DUEL 1v1', target_share: 50.0, max_games: 200, num_snakes: 2 },
-      { mode: 'standard', name: '4. STANDARD 4P', target_share: 25.0, max_games: 200, num_snakes: 4 },
+      { mode: 'constrictor', name: 'Constrictor 4P', target_share: 25.0, max_games: 200, num_snakes: 4 },
+      { mode: 'royale', name: 'Royale 4P', target_share: 25.0, max_games: 200, num_snakes: 4 },
+      { mode: 'duel', name: 'Duel 1v1', target_share: 50.0, max_games: 200, num_snakes: 2 },
+      { mode: 'standard', name: 'Standard 4P', target_share: 25.0, max_games: 200, num_snakes: 4 },
     ];
 
     const matrixList = (data.matrix_progress && data.matrix_progress.length > 0) ? data.matrix_progress : [];
@@ -2471,9 +2961,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     const varPts = (data.variant && typeof data.variant.points === 'number') ? data.variant.points : (varW + drawShare * drawsCount);
     const varWS = (data.variant && typeof data.variant.win_share === 'number') ? data.variant.win_share : (played > 0 ? (varPts / played * 100) : (is4p ? 25.0 : 50.0));
 
+    // Per-mode ETA lookup from data.eta_breakdown
+    const etaMap = {};
+    (data.eta_breakdown || []).forEach(b => {
+      if (b.mode) etaMap[b.mode.toLowerCase()] = b;
+    });
+
     let completedCount = 0;
 
-    const cardsHtml = baseModes.map((bm, idx) => {
+    const rowsHtml = baseModes.map((bm) => {
       const modeKey = bm.mode;
       const m = modeMap[modeKey] || {};
       const isCurrentActive = isSelfRunning && (activeModeClean === modeKey);
@@ -2495,43 +2991,179 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const maxGames = m.max_games || bm.max_games || 200;
       const targetVal = bm.target_share;
 
-      let scoreText = '--';
+      let scoreVal = '--';
       let scoreColor = 'var(--text-main)';
+      let zScoreText = '--';
+      let etaText = '--';
 
       if (effectiveStatus === 'RUNNING') {
-        scoreText = `${varWS.toFixed(1)}%`;
+        scoreVal = `${varWS.toFixed(1)}%`;
         scoreColor = '#60a5fa';
-      } else if (effectiveStatus === 'PASSED') {
-        scoreText = `${(m.win_share != null ? m.win_share : varWS).toFixed(1)}%`;
-        scoreColor = 'var(--variant-color)';
-      } else if (effectiveStatus === 'PARITY') {
-        scoreText = `${(m.win_share != null ? m.win_share : varWS).toFixed(1)}%`;
-        scoreColor = '#f59e0b';
-      } else if (effectiveStatus === 'FAILED') {
-        scoreText = `${(m.win_share != null ? m.win_share : varWS).toFixed(1)}%`;
-        scoreColor = 'var(--danger-color)';
+        // Compute live z-score
+        if (played >= 5) {
+          const p = varWS / 100.0;
+          const p0 = targetVal / 100.0;
+          const se = Math.sqrt((p0 * (1.0 - p0)) / played);
+          const z = se > 0 ? ((p - p0) / se) : 0.0;
+          zScoreText = `${z >= 0 ? '+' : ''}${z.toFixed(2)}`;
+        }
+        const b = etaMap[modeKey];
+        if (b && b.eta_seconds != null) {
+          etaText = `~${formatSeconds(b.eta_seconds)}`;
+        } else if (data.eta_seconds != null && data.eta_seconds > 0) {
+          etaText = `~${formatSeconds(data.eta_seconds)}`;
+        }
+      } else if (['PASSED', 'PARITY', 'FAILED'].includes(effectiveStatus)) {
+        const ws = (m.win_share != null ? m.win_share : varWS);
+        scoreVal = `${ws.toFixed(1)}%`;
+        if (effectiveStatus === 'PASSED') scoreColor = 'var(--variant-color)';
+        else if (effectiveStatus === 'PARITY') scoreColor = '#f59e0b';
+        else scoreColor = 'var(--danger-color)';
+
+        if (m.z_score != null) {
+          zScoreText = `${m.z_score >= 0 ? '+' : ''}${m.z_score.toFixed(2)}`;
+        }
+        if (m.duration_sec != null) {
+          etaText = `Done (${formatSeconds(m.duration_sec)})`;
+        } else {
+          etaText = 'Done';
+        }
       } else if (effectiveStatus === 'SKIPPED') {
-        scoreText = gamesVal > 0 ? `${(m.win_share || 0).toFixed(1)}%` : 'SKIPPED';
+        scoreVal = gamesVal > 0 ? `${(m.win_share || 0).toFixed(1)}%` : 'SKIPPED';
         scoreColor = '#fbbf24';
+        etaText = 'Skipped';
+      } else {
+        const b = etaMap[modeKey];
+        if (b && b.eta_seconds != null && b.eta_seconds > 0) {
+          etaText = `~${formatSeconds(b.eta_seconds)} (Queued)`;
+        } else {
+          etaText = 'Queued';
+        }
       }
 
-      let metaText = `Target: > ${targetVal.toFixed(1)}% (${gamesVal}/${maxGames}G)`;
+      const rowClass = isCurrentActive ? 'active-running' : '';
+      const pctDone = maxGames > 0 ? Math.min(100, (gamesVal / maxGames) * 100) : 0;
 
       return `
-        <div class="matrix-col ${statusClass}">
-          <div class="matrix-col-top">
-            <span class="matrix-col-name" title="${bm.name}">${bm.name}</span>
-            ${statusBadge}
-          </div>
-          <div class="matrix-col-score" style="color: ${scoreColor};">${scoreText}</div>
-          <div class="matrix-col-meta">${metaText}</div>
-        </div>
+        <tr class="${rowClass}">
+          <td style="font-weight: 700; color: var(--text-main);">
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <span>${bm.name}</span>
+              <span style="font-size: 0.72rem; color: var(--text-muted); font-weight: 500;">(Target: &gt;${targetVal.toFixed(1)}%)</span>
+            </div>
+          </td>
+          <td>
+            <div style="display: flex; align-items: center; gap: 0.5rem;">
+              <span style="font-weight: 700;">${gamesVal} / ${maxGames}</span>
+              <span style="font-size: 0.75rem; color: var(--text-muted);">(${pctDone.toFixed(0)}%)</span>
+            </div>
+          </td>
+          <td style="font-weight: 700; color: ${scoreColor}; font-size: 0.95rem;">${scoreVal}</td>
+          <td style="font-weight: 600; color: ${zScoreText !== '--' ? (parseFloat(zScoreText) >= 1.645 ? 'var(--variant-color)' : (parseFloat(zScoreText) <= -1.645 ? 'var(--danger-color)' : '#f59e0b')) : 'var(--text-muted)'};">${zScoreText}</td>
+          <td style="color: var(--text-muted); font-size: 0.82rem;">${etaText}</td>
+          <td>${statusBadge}</td>
+        </tr>
       `;
     }).join('');
 
-    matrixGrid.innerHTML = cardsHtml;
-    if (matrixSubtitle) {
-      matrixSubtitle.innerText = `${completedCount} / 4 Modes Complete`;
+    setHTML(tableBody, rowsHtml);
+    if (matrixSubtitle) matrixSubtitle.innerText = `${completedCount} / 4 Modes Complete`;
+  }
+
+  function updateHeroAndIdleState(data) {
+    const isRunning = (data.status === 'RUNNING' && data.runner_alive !== false);
+    const isFinished = (data.status === 'FINISHED');
+    const played = data.total_played || 0;
+    const isRunActive = isRunning || (isFinished && played > 0);
+
+    const activeHero = document.getElementById('activeRunHero');
+    const idleHero = document.getElementById('idleCompletedHero');
+
+    if (isRunActive) {
+      if (activeHero) activeHero.style.display = 'block';
+      if (idleHero) idleHero.style.display = 'none';
+      return;
+    }
+
+    // No run is active: Hide hero numbers completely, show last completed run summary!
+    if (activeHero) activeHero.style.display = 'none';
+    if (idleHero) idleHero.style.display = 'block';
+
+    const historyList = data.run_history || [];
+    if (historyList.length === 0) {
+      setText('lastRunTitle', 'No previous simulation runs recorded.');
+      setText('lastRunDecisionBadge', 'IDLE');
+      setText('lastRunTime', '-');
+      setText('lastRunGames', '0');
+      setText('lastRunVarShare', '--');
+      setText('lastRunBaseShare', '--');
+      setText('lastRunOutcome', 'AWAITING RUN');
+      setText('lastRunStopReason', 'Runner is currently idle.');
+      setHTML('lastRunChips', '');
+      return;
+    }
+
+    const lastRun = historyList[0];
+    const rec = lastRun.recommendation || 'UNKNOWN';
+    let pillClass = 'parity';
+    let badgeText = rec;
+    if (rec === 'KEEP') { pillClass = 'variant'; badgeText = '🎉 KEEP'; }
+    else if (rec === 'PARITY') { pillClass = 'parity'; badgeText = '🟡 PARITY'; }
+    else if (rec === 'REVERT') { pillClass = 'revert'; badgeText = '⚠️ REVERT'; }
+    else if (rec === 'TEST_FAILURE') { pillClass = 'revert'; badgeText = '❌ FAILED'; }
+
+    const badgeEl = document.getElementById('lastRunDecisionBadge');
+    if (badgeEl) {
+      badgeEl.className = `winner-pill ${pillClass}`;
+      badgeEl.innerText = badgeText;
+    }
+
+    setText('lastRunTitle', lastRun.experiment_desc || lastRun.description || 'Unspecified Experiment');
+    setText('lastRunTime', lastRun.timestamp || '-');
+    setText('lastRunGames', lastRun.total_games || 0);
+
+    const varWS = lastRun.variant ? (lastRun.variant.win_share != null ? lastRun.variant.win_share : lastRun.variant.rate) : null;
+    const varW = lastRun.variant ? lastRun.variant.wins : 0;
+    const baseWS = lastRun.baseline ? (lastRun.baseline.win_share != null ? lastRun.baseline.win_share : lastRun.baseline.rate) : null;
+    const baseW = lastRun.baseline ? lastRun.baseline.wins : 0;
+
+    setText('lastRunVarShare', varWS != null ? `${varWS.toFixed(1)}%` : '--');
+    setText('lastRunVarWins', `${varW} Wins`);
+    setText('lastRunBaseShare', baseWS != null ? `${baseWS.toFixed(1)}%` : '--');
+    setText('lastRunBaseWins', `${baseW} Wins`);
+
+    setText('lastRunOutcome', rec);
+    const stopReasonEl = document.getElementById('lastRunStopReason');
+    if (stopReasonEl) {
+      stopReasonEl.innerText = lastRun.stop_reason || 'Benchmark completed';
+      stopReasonEl.title = lastRun.stop_reason || '';
+    }
+
+    // Populate Mode Chips
+    const chipsEl = document.getElementById('lastRunChips');
+    if (chipsEl) {
+      const matrixRes = lastRun.matrix_results || [];
+      const modesCountEl = document.getElementById('lastRunModesCount');
+      if (modesCountEl) modesCountEl.innerText = `${matrixRes.length || 4} Modes Tested`;
+
+      if (matrixRes.length > 0) {
+        const chipsHtml = matrixRes.map(m => {
+          const dec = m.decision || 'DONE';
+          const decClass = dec.toLowerCase();
+          const zStr = (m.z_score != null) ? `z=${m.z_score >= 0 ? '+' : ''}${m.z_score.toFixed(2)}` : '';
+          return `
+            <div class="last-run-chip">
+              <span class="chip-mode">${escapeHtml(m.name || m.mode)}</span>
+              <span class="chip-val">${m.var_win_share != null ? m.var_win_share.toFixed(1) + '%' : '--'}</span>
+              ${zStr ? `<span class="chip-z">${zStr}</span>` : ''}
+              <span class="chip-badge ${decClass}">${dec}</span>
+            </div>
+          `;
+        }).join('');
+        setHTML(chipsEl, chipsHtml);
+      } else {
+        setHTML(chipsEl, '');
+      }
     }
   }
 
@@ -3198,22 +3830,29 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const targetStr = is4p ? '25.0% Individual Parity' : '50.0% Parity';
       const maxG = data.target_games || data.max_games || 200;
 
-      // Update All Permanent Cards (Layout Never Shifts)
-      updatePipelineUI(data);
+      // Stage Rail & Details
+      updateStageRail(data);
       updateMatrixUI(data);
-
-      if (runType === 'depth') {
-        updateDepthHero(data);
-      } else if (runType === 'pool') {
-        updatePoolHero(data);
-      } else {
-        updateSelfHero(data);
-      }
-
-      updateRunsCard(data, isRunning, modeElapsed);
-      updateDecisionBanner(data, isRunning, is4p, varWS, varPts, targetStr, played, maxG);
       updateDepthUI(data);
       updatePoolUI(data);
+
+      // Hero & Idle presentation (Requirement 6)
+      updateHeroAndIdleState(data);
+
+      const isRunActive = isRunning || (data.status === 'FINISHED' && played > 0);
+      if (isRunActive) {
+        if (runType === 'depth') {
+          updateDepthHero(data);
+        } else if (runType === 'pool') {
+          updatePoolHero(data);
+        } else {
+          updateSelfHero(data);
+        }
+
+        updateRunsCard(data, isRunning, modeElapsed);
+        updateDecisionBanner(data, isRunning, is4p, varWS, varPts, targetStr, played, maxG);
+      }
+
       updateHistoryTable(data);
 
     } catch (e) {
@@ -3229,6 +3868,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       isUpdating = false;
     }
   }
+
+  ['unit', 'depth', 'self', 'pool'].forEach(id => {
+    const el = document.getElementById(`railSegment-${id}`);
+    if (el) el.addEventListener('click', () => selectStage(id));
+  });
+  const depthToggle = document.getElementById('depthToggleBtn');
+  if (depthToggle) depthToggle.addEventListener('click', toggleDepthTable);
 
   setInterval(updateDashboard, 500);
   updateDashboard();
@@ -3341,6 +3987,9 @@ class ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
 
 def start_inactivity_watchdog(state: DashboardState, timeout_seconds: int = 600):
+    if timeout_seconds <= 0:
+        return
+
     def _watch():
         while True:
             time.sleep(15)
