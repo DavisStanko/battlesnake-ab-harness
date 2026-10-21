@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+
+# Local A/B Test Artifacts & Runtime Configs
+results_ledger.csv
+mode_timings.json
+pool_snakes.json
+pool.json
+ab_results/
+.active_checkpoint.json
+*.tmp
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/

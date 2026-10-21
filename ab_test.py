@@ -2535,6 +2535,16 @@ def run_ab_test_engine(
 
             matrix_results.append(res)
             total_games_all += res["total_played"]
+            try:
+                from ab_dashboard import append_mode_timing
+                append_mode_timing(
+                    mode=res["mode"],
+                    run_type="self",
+                    games=res["total_played"],
+                    elapsed_seconds=res["duration_sec"],
+                )
+            except Exception:
+                pass
             for k in ("wins", "losses", "draws"):
                 agg_results[STRATEGY_BASELINE][k] += res["results"][STRATEGY_BASELINE][k]
                 agg_results[STRATEGY_VARIANT][k] += res["results"][STRATEGY_VARIANT][k]
@@ -2843,6 +2853,16 @@ def run_pool_benchmark(
             decision_desc = "Parity (within confidence band)"
 
         t_mode_elapsed = time.perf_counter() - t_mode_start
+        try:
+            from ab_dashboard import append_mode_timing
+            append_mode_timing(
+                mode=m_mode,
+                run_type="pool",
+                games=N,
+                elapsed_seconds=t_mode_elapsed,
+            )
+        except Exception:
+            pass
 
         print("-" * 80)
         print(f"Mode Results: {m_name}")

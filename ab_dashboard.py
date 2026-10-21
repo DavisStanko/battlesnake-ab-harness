@@ -2271,7 +2271,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"skip": skipped}).encode("utf-8"))
             return
 
-        if parsed_path == "/api/data":
+        if parsed_path in ("/api/data", "/api/state"):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -2474,10 +2474,12 @@ class DashboardClient:
         matrix_progress: Optional[list] = None,
         pid: Optional[int] = None,
         suite_start_time: Optional[float] = None,
+        run_type: str = "self",
     ):
         payload = {
             "action": "init",
             "pid": pid if pid is not None else os.getpid(),
+            "run_type": run_type,
             "strategy_baseline": strategy_baseline,
             "strategy_variant": strategy_variant,
             "min_games": min_games,
