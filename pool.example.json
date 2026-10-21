@@ -1,0 +1,30 @@
+[
+  {
+    "slug": "nessegrev-expert",
+    "url": "http://localhost:8001"
+  },
+  {
+    "slug": "devious-devin",
+    "url": "http://localhost:8002/devious-devin"
+  },
+  {
+    "slug": "hovering-hobbs",
+    "url": "http://localhost:8003/hovering-hobbs"
+  },
+  {
+    "slug": "improbable-irene",
+    "url": "http://localhost:8004/improbable-irene"
+  },
+  {
+    "slug": "snork",
+    "url": "http://localhost:8005"
+  },
+  {
+    "slug": "amphibious-arthur",
+    "url": "http://localhost:8006/amphibious-arthur"
+  },
+  {
+    "slug": "constant-carter",
+    "url": "http://localhost:8007/constant-carter"
+  }
+]
