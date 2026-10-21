@@ -1140,6 +1140,7 @@ def save_run_history(
     matrix_results: Optional[List[dict]] = None,
     game_mode: str = "standard",
     results_dir: Optional[Path] = None,
+    depth_results: Optional[dict] = None,
 ) -> Path:
     out_dir = Path(results_dir) if results_dir is not None else (PROJECT_ROOT / "ab_results")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1194,6 +1195,8 @@ def save_run_history(
                 }
             sanitized_matrix.append(mr_copy)
         run_entry["matrix_results"] = sanitized_matrix
+    if depth_results is not None:
+        run_entry["depth_results"] = depth_results
 
     history.append(run_entry)
     history = history[-100:]
@@ -1402,6 +1405,7 @@ def print_matrix_summary(
     total_wall_sec: float,
     experiment_desc: str,
     history_path: Path,
+    depth_results: Optional[dict] = None,
 ) -> None:
     sep = "=" * 76
     sub_sep = "-" * 76
@@ -1448,6 +1452,14 @@ def print_matrix_summary(
         matrix_status_note = "Regression confirmed in one or more modes"
     print(f"Final Matrix Decision:  {overall_recommendation} ({matrix_status_note})")
     print(f"History File:           {history_path}")
+    if depth_results:
+        try:
+            from harness.depth_test import format_depth_markdown_table
+            print()
+            print("Depth Benchmark Scorecard (Stage 2 - Table for PR body):")
+            print(format_depth_markdown_table(depth_results))
+        except Exception:
+            pass
     print(sep)
     print()
 
@@ -2343,7 +2355,7 @@ def run_ab_test_engine(
     t_suite_start = time.time()
 
     # ── Step 1: Tactical Unit Tests ──
-    print("[1/2] Running strategy safety unit tests on variant...")
+    print("[1/3] Running strategy safety unit tests on variant...")
     test_strategy = None
     try:
         from tests import test_strategy
@@ -2450,7 +2462,40 @@ def run_ab_test_engine(
         save_checkpoint(results_dir, checkpoint_data)
 
     matrix_title = f"Selected Modes Matrix ({mode_names})" if is_partial_matrix else "Full 4-Mode Ranked Regression Matrix Suite"
-    print(f"[2/2] Executing {matrix_title}...")
+
+    # ── Step 2: Stage 2 Fixed-Position Depth Benchmark Suite (Unconditional) ──
+    depth_results = checkpoint_data.get("depth_results")
+    if depth_results:
+        print("[2/3] Stage 2 Depth Benchmark Suite (Loaded from checkpoint)...")
+    else:
+        print("[2/3] Executing Stage 2 Fixed-Position Depth Benchmark Suite...")
+        print("      Testing 12 standard position fixtures (450ms, 5 interleaved repeats per side)...")
+        try:
+            from harness.depth_test import run_depth_test, format_depth_markdown_table, DEFAULT_FIXTURES_DIR
+            depth_time_ms = int(TIME_BUDGET_SEC * 1000)
+            depth_ok, depth_results = run_depth_test(
+                baseline_strat=_baseline_module_name,
+                variant_strat=_variant_module_name,
+                time_ms=depth_time_ms,
+                repeats=5,
+                fixtures_dir=DEFAULT_FIXTURES_DIR,
+                modes=["standard", "constrictor", "royale", "duel"],
+                turns=[25, 50, 75],
+                dashboard_port=dashboard_port,
+                enable_dashboard=(dash_client is not None),
+                dash_client=dash_client,
+                is_stage=True,
+            )
+            checkpoint_data["depth_results"] = depth_results
+            save_checkpoint(results_dir, checkpoint_data)
+            if depth_results:
+                print("\n  [✓] Depth benchmark table formatted for PR body:")
+                print(format_depth_markdown_table(depth_results))
+                print()
+        except Exception as e:
+            print(f"  [⚠️] Warning: Depth benchmark suite encountered an issue: {e}\n")
+
+    print(f"[3/3] Executing {matrix_title}...")
     matrix_progress = [
         {
             "mode": m["mode"],
@@ -2652,6 +2697,7 @@ def run_ab_test_engine(
         experiment_desc=desc,
         matrix_results=matrix_results,
         game_mode=modes,
+        depth_results=depth_results,
     )
 
     dash_client.set_finished(overall_stop_type, overall_stop_reason, overall_recommendation, str(history_path))
@@ -2665,6 +2711,7 @@ def run_ab_test_engine(
         total_wall_sec=total_wall_sec,
         experiment_desc=desc,
         history_path=history_path,
+        depth_results=depth_results,
     )
 
     # Automated post-benchmark blunder extraction on worst variant losses

@@ -719,6 +719,10 @@ class DashboardState:
                 self.depth_data["nps_ratio"] = round(float(payload.get("overall_nps_r", 1.0)), 2)
                 self.depth_data["agreement_pct"] = round(float(payload.get("overall_agree", 100.0)), 1)
                 self.depth_data["passed"] = bool(payload.get("overall_pass", True))
+                if "duration_sec" in payload:
+                    self.depth_data["duration_sec"] = round(float(payload["duration_sec"]), 1)
+                if "mode_summaries" in payload:
+                    self.depth_data["mode_summaries"] = payload["mode_summaries"]
             elif action == "update_unit_tests":
                 self.unit_tests_data = {
                     "status": payload.get("status", "PASSED"),
@@ -3727,11 +3731,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const duelCell = renderModeCell(getModeData('duel'), 50.0);
       const standardCell = renderModeCell(getModeData('standard'), 25.0);
 
+      let depthSummaryHtml = '';
+      if (run.depth_results && run.depth_results.overall) {
+        const ov = run.depth_results.overall;
+        const dSign = ov.delta_depth >= 0 ? `+${ov.delta_depth.toFixed(1)}` : `${ov.delta_depth.toFixed(1)}`;
+        depthSummaryHtml = `<div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 0.2rem; font-family: 'JetBrains Mono', monospace;">Δ Depth: ${dSign} • ${ov.nps_ratio.toFixed(2)}x NPS • ${ov.agreement_pct.toFixed(0)}% Agree</div>`;
+      }
+
       return `
         <tr>
           <td style="white-space: nowrap; min-width: 85px; text-align: left;">${timeCell}</td>
           <td class="col-desc" style="font-weight: 600; color: var(--text-main); font-size: 0.85rem; text-align: left;">
             ${expDesc}
+            ${depthSummaryHtml}
             <span class="tooltip-text">${expDesc}</span>
           </td>
           <td style="white-space: nowrap; min-width: 80px; text-align: center;">${constCell}</td>

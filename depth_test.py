@@ -360,6 +360,8 @@ def run_depth_test(
     turns: Sequence[int] = DEFAULT_TURNS,
     dashboard_port: int = 8888,
     enable_dashboard: bool = True,
+    dash_client: Optional[Any] = None,
+    is_stage: bool = False,
 ) -> Tuple[bool, Dict[str, Any]]:
     """
     Executes fixed-position depth test suite across all requested modes.
@@ -390,11 +392,10 @@ def run_depth_test(
             print(f"  Missing: {mf}")
         return False, {}
 
-    dash_client = None
-    if enable_dashboard and ensure_dashboard_running is not None:
+    if dash_client is None and enable_dashboard and ensure_dashboard_running is not None:
         try:
             dash_client = ensure_dashboard_running(port=dashboard_port)
-        except Exception as e:
+        except Exception:
             dash_client = None
 
     total_positions = len(modes) * len(turns)
@@ -417,23 +418,24 @@ def run_depth_test(
     ]
 
     if dash_client is not None:
-        dash_client.init_test(
-            strategy_baseline=baseline_strat,
-            strategy_variant=variant_strat,
-            min_games=total_positions,
-            max_games=total_positions,
-            check_interval=total_positions,
-            early_stop_high=100.0,
-            early_stop_low=0.0,
-            threads=1,
-            experiment_desc=f"Depth Benchmark: {variant_strat} vs {baseline_strat} ({time_ms}ms, {repeats} reps)",
-            game_mode=modes[0] if modes else "standard",
-            num_snakes=4,
-            target_win_share=50.0,
-            matrix_progress=matrix_progress,
-            suite_start_time=t_suite_start,
-            run_type="depth",
-        )
+        if not is_stage:
+            dash_client.init_test(
+                strategy_baseline=baseline_strat,
+                strategy_variant=variant_strat,
+                min_games=total_positions,
+                max_games=total_positions,
+                check_interval=total_positions,
+                early_stop_high=100.0,
+                early_stop_low=0.0,
+                threads=1,
+                experiment_desc=f"Depth Benchmark: {variant_strat} vs {baseline_strat} ({time_ms}ms, {repeats} reps)",
+                game_mode=modes[0] if modes else "standard",
+                num_snakes=4,
+                target_win_share=50.0,
+                matrix_progress=matrix_progress,
+                suite_start_time=t_suite_start,
+                run_type="depth",
+            )
         dash_client.init_depth(
             total_positions=total_positions,
             time_ms=time_ms,
@@ -446,7 +448,7 @@ def run_depth_test(
 
     for idx, mode in enumerate(modes):
         matrix_progress[idx]["status"] = "running"
-        if dash_client is not None:
+        if dash_client is not None and not is_stage:
             dash_client.init_test(
                 strategy_baseline=baseline_strat,
                 strategy_variant=variant_strat,
@@ -622,6 +624,7 @@ def run_depth_test(
         print("\n[SUCCESS] No depth regressions detected across any mode.")
 
     if dash_client is not None:
+        t_depth_duration = time.time() - t_suite_start
         dash_client.finish_depth(
             overall_base_d=overall_base_d,
             overall_var_d=overall_var_d,
@@ -629,13 +632,16 @@ def run_depth_test(
             overall_nps_r=overall_nps_r,
             overall_agree=overall_agree,
             overall_pass=overall_pass,
+            duration_sec=t_depth_duration,
+            mode_summaries=mode_summaries,
         )
-        dash_client.set_finished(
-            stop_type="KEEP" if overall_pass else "REVERT",
-            stop_reason="All modes depth-passed" if overall_pass else f"Depth regression in {', '.join(flagged_regressions)}",
-            recommendation="KEEP" if overall_pass else "REVERT",
-            csv_path="",
-        )
+        if not is_stage:
+            dash_client.set_finished(
+                stop_type="KEEP" if overall_pass else "REVERT",
+                stop_reason="All modes depth-passed" if overall_pass else f"Depth regression in {', '.join(flagged_regressions)}",
+                recommendation="KEEP" if overall_pass else "REVERT",
+                csv_path="",
+            )
 
     return overall_pass, {
         "modes": mode_results,
@@ -649,6 +655,30 @@ def run_depth_test(
             "passed": overall_pass,
         },
     }
+
+
+def format_depth_markdown_table(depth_results: Dict[str, Any]) -> str:
+    """Formats depth benchmark results into a clean GitHub Flavored Markdown table for PR bodies."""
+    summaries = depth_results.get("summaries", {})
+    overall = depth_results.get("overall", {})
+
+    lines = [
+        "| Mode | Base Depth | Var Depth | Δ Depth | NPS Ratio | Move Agree % |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: |",
+    ]
+    for mode in ["standard", "constrictor", "royale", "duel"]:
+        if mode in summaries:
+            s = summaries[mode]
+            lines.append(
+                f"| {mode.capitalize()} | {s['base_med_depth']:.1f} | {s['var_med_depth']:.1f} | "
+                f"{s['delta_depth']:+.1f} | {s['nps_ratio']:.2f}x | {s['agreement_pct']:.1f}% |"
+            )
+    if overall:
+        lines.append(
+            f"| **Overall** | **{overall.get('base_depth', 0.0):.1f}** | **{overall.get('var_depth', 0.0):.1f}** | "
+            f"**{overall.get('delta_depth', 0.0):+.1f}** | **{overall.get('nps_ratio', 1.0):.2f}x** | **{overall.get('agreement_pct', 100.0):.1f}%** |"
+        )
+    return "\n".join(lines)
 
 
 # ── Command Line Interface ───────────────────────────────────────────────────
