@@ -408,6 +408,12 @@ class DashboardState:
         self.draws_variant = 0
 
         self.snakes_stats = self._init_snakes_stats(num_snakes, strategy_variant, strategy_baseline)
+        self.unit_tests_data: Dict[str, Any] = {
+            "status": "PENDING",
+            "passed": 0,
+            "total": 40,
+            "details": "",
+        }
 
         self.suite_start_time: Optional[float] = None
         self._last_desc: str = experiment_desc
@@ -713,6 +719,13 @@ class DashboardState:
                 self.depth_data["nps_ratio"] = round(float(payload.get("overall_nps_r", 1.0)), 2)
                 self.depth_data["agreement_pct"] = round(float(payload.get("overall_agree", 100.0)), 1)
                 self.depth_data["passed"] = bool(payload.get("overall_pass", True))
+            elif action == "update_unit_tests":
+                self.unit_tests_data = {
+                    "status": payload.get("status", "PASSED"),
+                    "passed": payload.get("passed", 40),
+                    "total": payload.get("total", 40),
+                    "details": payload.get("details", ""),
+                }
             elif action == "restore":
                 d = payload.get("data", {})
                 for attr in [
@@ -1033,6 +1046,7 @@ class DashboardState:
                 "run_type": getattr(self, "run_type", "self"),
                 "pool_data": getattr(self, "pool_data", None),
                 "depth_data": getattr(self, "depth_data", None),
+                "unit_tests_data": getattr(self, "unit_tests_data", {"status": "PENDING", "passed": 0, "total": 40, "details": ""}),
                 "snakes_stats": self.snakes_stats,
                 "run_history": load_run_history(),
                 "experiment_desc": self.experiment_desc
@@ -1333,16 +1347,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       margin-top: 1rem;
     }
 
-    /* Recommendation Banner */
+    /* Recommendation Banner (Permanent slot, zero layout shift) */
     .banner {
       border-radius: 1rem;
       padding: 1.25rem 1.75rem;
       margin-bottom: 1.5rem;
-      display: none;
+      display: flex;
+      min-height: 82px;
+      box-sizing: border-box;
       align-items: center;
       justify-content: space-between;
-      border: 1px solid transparent;
+      border: 1px solid rgba(255, 255, 255, 0.08);
       backdrop-filter: blur(12px);
+      transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, color 0.3s ease;
+    }
+
+    .banner.idle {
+      background: rgba(255, 255, 255, 0.03);
+      border-color: rgba(255, 255, 255, 0.08);
+      color: var(--text-muted);
     }
 
     .banner.info {
@@ -1586,6 +1609,49 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border: 1px solid rgba(245, 158, 11, 0.4);
     }
 
+    /* Unified Multi-Stage Pipeline Bar */
+    .pipeline-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 1rem;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1.5rem;
+      backdrop-filter: blur(14px);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+
+    .pipeline-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+    }
+
+    .pipeline-title {
+      font-size: 1.05rem;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .pipeline-subtitle {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .pipeline-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.85rem;
+    }
+
+    @media (max-width: 900px) {
+      .pipeline-grid { grid-template-columns: repeat(2, 1fr); }
+    }
 
     /* Multi-Mode Matrix Pipeline Ribbon */
     .matrix-card {
@@ -1746,9 +1812,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="header-badges">
-      <div class="badge" id="runTypeBadge">
-        <span id="runTypeIcon">🏎️</span> <span id="runTypeText">SELF-PLAY A/B</span>
-      </div>
       <div class="badge">
         ⏱️ <span id="elapsedTime">0s</span>
       </div>
@@ -1757,15 +1820,57 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
       <div class="badge" id="statusBadge">
         <span class="status-dot" id="statusDot"></span>
-        <span id="statusText">CONNECTING...</span>
+        <span id="statusText">IDLE</span>
       </div>
     </div>
   </header>
 
-  <!-- Multi-Mode Regression Matrix (shown when matrix_progress has entries) -->
-  <div class="matrix-card" id="matrixCard" style="display: none;">
+  <!-- Unified Multi-Stage Pipeline Bar (Always visible) -->
+  <div class="pipeline-card" id="pipelineCard">
+    <div class="pipeline-header">
+      <span class="pipeline-title">⚡ Validation Pipeline</span>
+      <span class="pipeline-subtitle" id="pipelineSubtitle">Ready • 4 Validation Stages</span>
+    </div>
+    <div class="pipeline-grid" id="pipelineGrid">
+      <div class="matrix-col pending" id="stageCol-unit">
+        <div class="matrix-col-top">
+          <span class="matrix-col-name">1. UNIT TESTS</span>
+          <span class="matrix-col-status matrix-status-pending" id="stageStatus-unit">PENDING</span>
+        </div>
+        <div class="matrix-col-score" id="stageScore-unit">40 Tests</div>
+        <div class="matrix-col-meta" id="stageMeta-unit">Tactical Safety Suite</div>
+      </div>
+      <div class="matrix-col pending" id="stageCol-depth">
+        <div class="matrix-col-top">
+          <span class="matrix-col-name">2. DEPTH BENCHMARK</span>
+          <span class="matrix-col-status matrix-status-pending" id="stageStatus-depth">PENDING</span>
+        </div>
+        <div class="matrix-col-score" id="stageScore-depth">12 Positions</div>
+        <div class="matrix-col-meta" id="stageMeta-depth">Fixed-Position Search</div>
+      </div>
+      <div class="matrix-col pending" id="stageCol-self">
+        <div class="matrix-col-top">
+          <span class="matrix-col-name">3. SELF-PLAY MATRIX</span>
+          <span class="matrix-col-status matrix-status-pending" id="stageStatus-self">PENDING</span>
+        </div>
+        <div class="matrix-col-score" id="stageScore-self">4 Modes</div>
+        <div class="matrix-col-meta" id="stageMeta-self">Constrictor • Royale • Duel • Standard</div>
+      </div>
+      <div class="matrix-col pending" id="stageCol-pool">
+        <div class="matrix-col-top">
+          <span class="matrix-col-name">4. ZOO POOL GATE</span>
+          <span class="matrix-col-status matrix-status-pending" id="stageStatus-pool">PENDING</span>
+        </div>
+        <div class="matrix-col-score" id="stageScore-pool">Opponent Pool</div>
+        <div class="matrix-col-meta" id="stageMeta-pool">Candidate vs Baseline</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Multi-Mode Regression Matrix (Always visible) -->
+  <div class="matrix-card" id="matrixCard">
     <div class="matrix-header">
-      <span class="matrix-title">🏁 Multi-Mode Regression Matrix</span>
+      <span class="matrix-title">🏁 Self-Play Multi-Mode Matrix</span>
       <span class="matrix-subtitle" id="matrixSubtitle">0 / 4 Modes Complete</span>
     </div>
     <div class="matrix-grid" id="matrixGrid">
@@ -1773,11 +1878,96 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- Fixed-Position Depth Benchmark Card (shown when run_type == 'depth') -->
-  <div class="table-card" id="depthCard" style="display: none;">
+  <!-- Tug-of-War Hero Card (Always visible) -->
+  <div class="hero-card" id="heroCard">
+    <div class="tug-header">
+      <div class="strategy-stat baseline">
+        <div class="strategy-name" id="baselineName">BASELINE</div>
+        <div class="win-rate-big" id="baselinePts" style="color: var(--baseline-color);">0.0 Pts</div>
+        <div class="games-count" id="baselineSubtext">0 Wins</div>
+      </div>
+
+      <div style="text-align: center; margin-bottom: 0.25rem;">
+        <div style="font-weight: 700; font-size: 0.75rem; color: var(--text-muted); letter-spacing: 0.1em; text-transform: uppercase;" id="leadTitle">Win Value Lead</div>
+        <div style="font-size: 1.25rem; font-weight: 800; font-family: 'JetBrains Mono', monospace;" id="leadText">EVEN</div>
+        <div style="font-size: 0.82rem; font-weight: 700; color: var(--draw-color); font-family: 'JetBrains Mono', monospace; margin-top: 0.25rem;" id="drawsHeaderRate">0 Draws</div>
+      </div>
+
+      <div class="strategy-stat variant">
+        <div class="strategy-name" id="variantName">VARIANT</div>
+        <div class="win-rate-big" id="variantPts" style="color: var(--variant-color);">0.0 Pts</div>
+        <div class="games-count" id="variantSubtext">0 Wins</div>
+      </div>
+    </div>
+
+    <!-- Win Share Bar Section -->
+    <div class="bar-section">
+      <!-- Bar 1: Win Share Tug-of-War Bar -->
+      <div class="bar-label-header" style="justify-content: center;">
+        <span>Win Share</span>
+      </div>
+      <div class="tug-bar-wrapper">
+        <div class="tug-threshold-label label-keep" id="labelKeep">60% KEEP</div>
+        <div class="tug-divider-label" id="labelParity">50% PARITY</div>
+        <div class="tug-threshold-label label-revert" id="labelRevert">40% REVERT</div>
+        <div class="tug-bar-container" id="tugBarContainer">
+          <div class="tug-threshold threshold-keep" id="threshKeep"></div>
+          <div class="tug-divider" id="threshParity"></div>
+          <div class="tug-threshold threshold-revert" id="threshRevert"></div>
+          <div class="tug-baselines-wrap" id="tugBaselinesWrap" style="width: 50%; display: flex; height: 100%; flex-shrink: 0; overflow: hidden; box-sizing: border-box;">
+            <div class="tug-side baseline-pts-bar b-seg-1" id="baseSeg1" style="width: 100%;">
+              <span id="baseSeg1Text">50.0%</span>
+            </div>
+            <div class="tug-side baseline-pts-bar b-seg-2" id="baseSeg2" style="width: 0%; display: none;">
+              <span id="baseSeg2Text"></span>
+            </div>
+            <div class="tug-side baseline-pts-bar b-seg-3" id="baseSeg3" style="width: 0%; display: none;">
+              <span id="baseSeg3Text"></span>
+            </div>
+          </div>
+          <div class="tug-side variant-pts-bar" id="variantPtsBar" style="width: 50%; flex-shrink: 0;">
+            <span id="variantPtsBarText">50.0%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Combined Key Metrics Grid (Run Progress) -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-header">
+        <span>Run Progress</span>
+        <span class="stat-icon">⚡</span>
+      </div>
+      <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 0.35rem;">
+        <div>
+          <div class="stat-value" id="runsValue">0 / 0 Games</div>
+          <div class="stat-subtext" id="runsSubtext">0% Complete</div>
+        </div>
+        <div style="text-align: right;">
+          <div class="stat-value" style="font-size: 1.4rem; color: #60a5fa;" id="paceValue">0.000 games/sec</div>
+        </div>
+      </div>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="runsProgress" style="width: 0%;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Decision Status Banner (Permanent slot, zero layout shift) -->
+  <div class="banner idle" id="decisionBanner">
+    <div>
+      <div class="banner-title" id="bannerTitle">⏸️ DECISION: AWAITING TEST</div>
+      <div class="banner-desc" id="bannerDesc">Matrix early-stopping thresholds: KEEP (z >= 1.645 or early stop), PARITY (no regression), REVERT (z <= -1.645).</div>
+    </div>
+  </div>
+
+  <!-- Fixed-Position Depth Benchmark Card (Always visible) -->
+  <div class="table-card" id="depthCard">
     <div class="table-title">
       <span>📐 Fixed-Position Depth Benchmark</span>
-      <span style="font-size: 0.85rem; font-weight: 700; color: var(--variant-color);" id="depthStatusBadge">EVALUATING</span>
+      <span style="font-size: 0.85rem; font-weight: 700; color: var(--text-muted);" id="depthStatusBadge">AWAITING FIXTURES</span>
     </div>
 
     <!-- Depth Hero Metrics Grid -->
@@ -1835,101 +2025,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </thead>
         <tbody id="depthTableBody">
           <tr>
-            <td colspan="10" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Evaluating fixed positions...</td>
+            <td colspan="10" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Waiting for depth benchmark fixtures to evaluate...</td>
           </tr>
         </tbody>
       </table>
     </div>
   </div>
 
-  <!-- Tug-of-War Hero Card -->
-  <div class="hero-card" id="heroCard">
-    <div class="tug-header">
-      <div class="strategy-stat baseline">
-        <div class="strategy-name" id="baselineName">BASELINE</div>
-        <div class="win-rate-big" id="baselinePts" style="color: var(--baseline-color);">0.0 Pts</div>
-        <div class="games-count" id="baselineSubtext">0 Wins</div>
-      </div>
-
-      <div style="text-align: center; margin-bottom: 0.25rem;">
-        <div style="font-weight: 700; font-size: 0.75rem; color: var(--text-muted); letter-spacing: 0.1em; text-transform: uppercase;" id="leadTitle">Win Value Lead</div>
-        <div style="font-size: 1.25rem; font-weight: 800; font-family: 'JetBrains Mono', monospace;" id="leadText">EVEN</div>
-        <div style="font-size: 0.82rem; font-weight: 700; color: var(--draw-color); font-family: 'JetBrains Mono', monospace; margin-top: 0.25rem;" id="drawsHeaderRate">0 Draws</div>
-      </div>
-
-      <div class="strategy-stat variant">
-        <div class="strategy-name" id="variantName">VARIANT</div>
-        <div class="win-rate-big" id="variantPts" style="color: var(--variant-color);">0.0 Pts</div>
-        <div class="games-count" id="variantSubtext">0 Wins</div>
-      </div>
-    </div>
-
-    <!-- Win Share Bar Section -->
-    <div class="bar-section">
-      <!-- Bar 1: Win Share Tug-of-War Bar -->
-      <div class="bar-label-header" style="justify-content: center;">
-        <span>Win Share</span>
-      </div>
-      <div class="tug-bar-wrapper">
-        <div class="tug-threshold-label label-keep" id="labelKeep">60% KEEP</div>
-        <div class="tug-divider-label" id="labelParity">50% PARITY</div>
-        <div class="tug-threshold-label label-revert" id="labelRevert">40% REVERT</div>
-        <div class="tug-bar-container" id="tugBarContainer">
-          <div class="tug-threshold threshold-keep" id="threshKeep"></div>
-          <div class="tug-divider" id="threshParity"></div>
-          <div class="tug-threshold threshold-revert" id="threshRevert"></div>
-          <div class="tug-baselines-wrap" id="tugBaselinesWrap" style="width: 50%; display: flex; height: 100%; flex-shrink: 0; overflow: hidden; box-sizing: border-box;">
-            <div class="tug-side baseline-pts-bar b-seg-1" id="baseSeg1" style="width: 100%;">
-              <span id="baseSeg1Text">50.0%</span>
-            </div>
-            <div class="tug-side baseline-pts-bar b-seg-2" id="baseSeg2" style="width: 0%; display: none;">
-              <span id="baseSeg2Text"></span>
-            </div>
-            <div class="tug-side baseline-pts-bar b-seg-3" id="baseSeg3" style="width: 0%; display: none;">
-              <span id="baseSeg3Text"></span>
-            </div>
-          </div>
-          <div class="tug-side variant-pts-bar" id="variantPtsBar" style="width: 50%; flex-shrink: 0;">
-            <span id="variantPtsBarText">50.0%</span>
-          </div>
-      </div>
-    </div>
-  </div>
-</div>
-
-  <!-- Combined Key Metrics Grid (Run Progress) -->
-  <div class="stats-grid">
-    <div class="stat-card">
-      <div class="stat-header">
-        <span>Run Progress</span>
-        <span class="stat-icon">⚡</span>
-      </div>
-      <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 0.35rem;">
-        <div>
-          <div class="stat-value" id="runsValue">0 / 0</div>
-          <div class="stat-subtext" id="runsSubtext">0% Complete</div>
-        </div>
-        <div style="text-align: right;">
-          <div class="stat-value" style="font-size: 1.4rem; color: #60a5fa;" id="paceValue">0.000 games/sec</div>
-        </div>
-      </div>
-      <div class="progress-bar-wrap">
-        <div class="progress-bar-fill" id="runsProgress" style="width: 0%;"></div>
-      </div>
-    </div>
-  </div>
-
-
-  <!-- Dynamic Decision Status Banner -->
-  <div class="banner info" id="decisionBanner">
-    <div>
-      <div class="banner-title" id="bannerTitle">ℹ️ Test In Progress</div>
-      <div class="banner-desc" id="bannerDesc">Accumulating game results to evaluate early stop thresholds...</div>
-    </div>
-  </div>
-
-  <!-- Pool Opponents Breakdown Card (shown when run_type == 'pool') -->
-  <div class="table-card" id="poolOpponentsCard" style="display: none;">
+  <!-- Pool Opponents Breakdown Card (Always visible) -->
+  <div class="table-card" id="poolOpponentsCard">
     <div class="table-title">
       <span>🐍 Pool Opponent Head-to-Head Breakdown</span>
       <span style="font-size: 0.8rem; font-weight: 500; color: var(--text-muted);" id="poolOpponentsCount">0 Opponents</span>
@@ -2082,9 +2186,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const passed = depth.passed !== false && deltaD >= 0;
         statusBadge.innerText = passed ? 'PASSED (NO REGRESSION)' : 'DEPTH REGRESSION';
         statusBadge.style.color = passed ? 'var(--variant-color)' : 'var(--danger-color)';
-      } else {
+      } else if (data.run_type === 'depth' && data.status === 'RUNNING') {
         statusBadge.innerText = `EVALUATING (${depth.completed_positions || 0}/${depth.total_positions || 12})`;
         statusBadge.style.color = '#60a5fa';
+      } else if (depth.completed_positions && depth.completed_positions > 0) {
+        const passed = depth.passed !== false && deltaD >= 0;
+        statusBadge.innerText = passed ? 'PASSED (NO REGRESSION)' : 'DEPTH REGRESSION';
+        statusBadge.style.color = passed ? 'var(--variant-color)' : 'var(--danger-color)';
+      } else {
+        statusBadge.innerText = 'AWAITING FIXTURES';
+        statusBadge.style.color = 'var(--text-muted)';
       }
     }
 
@@ -2093,7 +2204,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     if (tbody) {
       const fixtures = depth.fixtures || [];
       if (fixtures.length === 0) {
-        setHTML(tbody, '<tr><td colspan="10" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Evaluating fixed positions...</td></tr>');
+        setHTML(tbody, '<tr><td colspan="10" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Waiting for depth benchmark fixtures to evaluate...</td></tr>');
       } else {
         const rowsHtml = fixtures.map(f => {
           const delta = (f.delta_depth != null) ? f.delta_depth : (f.var_med_depth - f.base_med_depth);
@@ -2121,16 +2232,512 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         setHTML(tbody, rowsHtml);
       }
     }
-
-    // Update Runs Card for depth
-    const completed = depth.completed_positions || data.total_played || 0;
-    const total = depth.total_positions || data.target_games || 12;
-    setText('runsValue', `${completed} / ${total} Positions`);
-    const pct = total > 0 ? ((completed / total) * 100).toFixed(1) : 0;
-    setWidth('runsProgress', pct);
   }
 
   function updatePoolUI(data) {
+    const pool = data.pool_data || {};
+    const opponents = pool.opponents || [];
+
+    // Update Opponents Table
+    const oppTbody = document.getElementById('poolOpponentsTableBody');
+    const oppCount = document.getElementById('poolOpponentsCount');
+    if (oppCount) oppCount.innerText = `${opponents.length} Opponent${opponents.length === 1 ? '' : 's'}`;
+    if (oppTbody) {
+      if (opponents.length === 0) {
+        setHTML(oppTbody, '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Waiting for pool opponent results...</td></tr>');
+      } else {
+        const oppRows = opponents.map(o => {
+          const d = (o.delta != null) ? o.delta : (o.cand_win_pct - o.base_win_pct);
+          const dColor = d > 0 ? 'var(--variant-color)' : (d < 0 ? 'var(--danger-color)' : 'var(--text-muted)');
+          return `
+            <tr>
+              <td style="text-align: left; font-weight: 700; color: var(--text-main);">${escapeHtml(o.opponent)}</td>
+              <td>${o.games}</td>
+              <td style="color: var(--variant-color); font-weight: 700;">${o.cand_win_pct.toFixed(1)}%</td>
+              <td style="color: var(--baseline-color); font-weight: 700;">${o.base_win_pct.toFixed(1)}%</td>
+              <td style="color: ${dColor}; font-weight: 700;">${d > 0 ? '+' : ''}${d.toFixed(1)}%</td>
+            </tr>
+          `;
+        }).join('');
+        setHTML(oppTbody, oppRows);
+      }
+    }
+  }
+
+  function updatePipelineUI(data) {
+    const runType = data.run_type || 'self';
+    const isRunning = (data.status === 'RUNNING' && data.runner_alive !== false);
+    const isFinished = (data.status === 'FINISHED');
+    const isDisconnected = (data.status === 'DISCONNECTED');
+    const isIdle = (data.status === 'IDLE' || data.status === 'WAITING' || !data.status);
+    const rec = data.recommendation || 'PENDING';
+
+    function setStage(id, status, score, meta, color) {
+      const col = document.getElementById(`stageCol-${id}`);
+      const st = document.getElementById(`stageStatus-${id}`);
+      const sc = document.getElementById(`stageScore-${id}`);
+      const mt = document.getElementById(`stageMeta-${id}`);
+      const statusLower = status.toLowerCase();
+      if (col) col.className = `matrix-col ${statusLower}`;
+      if (st) {
+        st.className = `matrix-col-status matrix-status-${statusLower}`;
+        st.innerText = status;
+      }
+      if (sc) {
+        sc.innerText = score;
+        sc.style.color = color || '';
+      }
+      if (mt) mt.innerText = meta;
+    }
+
+    // Stage 1: Tactical Unit Tests
+    const unitData = data.unit_tests_data || {};
+    let unitStatus = unitData.status || 'PENDING';
+    let unitScore = '40 Tests';
+    let unitMeta = 'Tactical Safety Suite';
+    let unitColor = '';
+
+    if (data.stop_type === 'TEST_FAILURE') {
+      unitStatus = 'FAILED';
+      unitScore = 'FAIL';
+      unitMeta = 'Pre-flight Suite Failed';
+      unitColor = 'var(--danger-color)';
+    } else if (unitStatus === 'PASSED' || (data.total_played > 0) || (isFinished && data.stop_type !== 'TEST_FAILURE')) {
+      unitStatus = 'PASSED';
+      unitScore = unitData.passed ? `${unitData.passed} / ${unitData.total || unitData.passed}` : 'Passed';
+      unitMeta = 'All Tactical Tests Passed';
+      unitColor = 'var(--variant-color)';
+    } else if (unitStatus === 'RUNNING' || (isRunning && data.total_played === 0 && runType === 'self')) {
+      unitStatus = 'RUNNING';
+      unitScore = 'Running...';
+      unitMeta = 'Executing Pre-flight Tests';
+      unitColor = '#60a5fa';
+    } else if (unitStatus === 'FAILED') {
+      unitScore = 'FAIL';
+      unitMeta = unitData.details || 'Pre-flight Suite Failed';
+      unitColor = 'var(--danger-color)';
+    }
+    setStage('unit', unitStatus, unitScore, unitMeta, unitColor);
+
+    // Stage 2: Depth Benchmark
+    const depth = data.depth_data || {};
+    let depthStatus = 'PENDING';
+    let depthScore = '12 Positions';
+    let depthMeta = 'Fixed-Position Search';
+    let depthColor = '';
+
+    if (runType === 'depth') {
+      if (isRunning) {
+        depthStatus = 'RUNNING';
+        depthScore = `${depth.completed_positions || 0} / ${depth.total_positions || 12} Pos`;
+        depthMeta = 'Evaluating Fixed Positions';
+        depthColor = '#60a5fa';
+      } else if (isFinished) {
+        const passed = depth.passed !== false && (depth.delta_depth == null || depth.delta_depth >= 0);
+        depthStatus = passed ? 'PASSED' : 'FAILED';
+        const d = depth.delta_depth || 0;
+        depthScore = `${d >= 0 ? '+' : ''}${d.toFixed(1)} Depth`;
+        depthMeta = passed ? `${(depth.nps_ratio || 1.0).toFixed(2)}x NPS • ${(depth.agreement_pct || 100).toFixed(0)}% Agree` : 'Depth Regression';
+        depthColor = passed ? 'var(--variant-color)' : 'var(--danger-color)';
+      }
+    } else if (depth.completed_positions && depth.completed_positions > 0) {
+      const passed = depth.passed !== false && (depth.delta_depth == null || depth.delta_depth >= 0);
+      depthStatus = passed ? 'PASSED' : 'FAILED';
+      const d = depth.delta_depth || 0;
+      depthScore = `${d >= 0 ? '+' : ''}${d.toFixed(1)} Depth`;
+      depthMeta = `${(depth.nps_ratio || 1.0).toFixed(2)}x NPS`;
+      depthColor = passed ? 'var(--variant-color)' : 'var(--danger-color)';
+    }
+    setStage('depth', depthStatus, depthScore, depthMeta, depthColor);
+
+    // Stage 3: Self-Play Matrix
+    let selfStatus = 'PENDING';
+    let selfScore = '4 Modes';
+    let selfMeta = 'Constrictor • Royale • Duel • Standard';
+    let selfColor = '';
+
+    const matrixList = data.matrix_progress || [];
+    const completedModes = matrixList.filter(m => ['PASSED', 'PARITY', 'FAILED', 'SKIPPED'].includes(m.status)).length;
+    const totalModes = matrixList.length || 4;
+
+    if (runType === 'self') {
+      if (isRunning) {
+        selfStatus = 'RUNNING';
+        selfScore = `${completedModes} / ${totalModes} Modes`;
+        selfMeta = `${(data.game_mode || 'standard').toUpperCase()} Live`;
+        selfColor = '#60a5fa';
+      } else if (isFinished) {
+        if (rec === 'KEEP') {
+          selfStatus = 'PASSED';
+          selfColor = 'var(--variant-color)';
+        } else if (rec === 'PARITY') {
+          selfStatus = 'PARITY';
+          selfColor = '#f59e0b';
+        } else if (rec === 'REVERT') {
+          selfStatus = 'FAILED';
+          selfColor = 'var(--danger-color)';
+        } else {
+          selfStatus = 'PASSED';
+        }
+        selfScore = `${completedModes || 4} / ${totalModes} Modes`;
+        selfMeta = `Matrix ${rec}`;
+      }
+    } else if (completedModes > 0) {
+      selfStatus = 'PASSED';
+      selfScore = `${completedModes} / ${totalModes} Modes`;
+      selfMeta = 'Matrix Complete';
+      selfColor = 'var(--variant-color)';
+    }
+    setStage('self', selfStatus, selfScore, selfMeta, selfColor);
+
+    // Stage 4: Zoo Pool Gate
+    const pool = data.pool_data || {};
+    let poolStatus = 'PENDING';
+    let poolScore = 'Opponent Pool';
+    let poolMeta = 'Candidate vs Baseline';
+    let poolColor = '';
+
+    if (runType === 'pool') {
+      if (isRunning) {
+        poolStatus = 'RUNNING';
+        poolScore = `${(pool.delta || 0) >= 0 ? '+' : ''}${(pool.delta || 0).toFixed(1)}% Δ`;
+        poolMeta = `z = ${(pool.z_score || 0) >= 0 ? '+' : ''}${(pool.z_score || 0).toFixed(2)} (${pool.total_games || data.total_played || 0}G)`;
+        poolColor = '#60a5fa';
+      } else if (isFinished) {
+        if (rec === 'KEEP') {
+          poolStatus = 'PASSED';
+          poolColor = 'var(--variant-color)';
+        } else if (rec === 'PARITY') {
+          poolStatus = 'PARITY';
+          poolColor = '#f59e0b';
+        } else {
+          poolStatus = 'FAILED';
+          poolColor = 'var(--danger-color)';
+        }
+        poolScore = `${(pool.delta || 0) >= 0 ? '+' : ''}${(pool.delta || 0).toFixed(1)}% Δ`;
+        poolMeta = `z = ${(pool.z_score || 0) >= 0 ? '+' : ''}${(pool.z_score || 0).toFixed(2)} (${rec})`;
+      }
+    } else if (pool.total_games && pool.total_games > 0) {
+      const pass = (pool.delta || 0) >= 0;
+      poolStatus = pass ? 'PASSED' : 'FAILED';
+      poolScore = `${(pool.delta || 0) >= 0 ? '+' : ''}${(pool.delta || 0).toFixed(1)}% Δ`;
+      poolMeta = `z = ${(pool.z_score || 0).toFixed(2)}`;
+      poolColor = pass ? 'var(--variant-color)' : 'var(--danger-color)';
+    }
+    setStage('pool', poolStatus, poolScore, poolMeta, poolColor);
+
+    // Pipeline Subtitle
+    const subEl = document.getElementById('pipelineSubtitle');
+    if (subEl) {
+      if (isIdle) {
+        subEl.innerText = 'Ready • 4 Validation Stages';
+      } else if (isRunning) {
+        const typeStr = runType === 'pool' ? 'Opponent Zoo Pool' : (runType === 'depth' ? 'Depth Benchmark' : `Self-Play ${(data.game_mode || '').toUpperCase()}`);
+        subEl.innerText = `Live Execution • ${typeStr}`;
+      } else if (isFinished) {
+        subEl.innerText = `Validation Complete • Final Recommendation: ${rec}`;
+      } else if (isDisconnected) {
+        subEl.innerText = 'Runner Process Disconnected';
+      } else {
+        subEl.innerText = '4 Validation Stages';
+      }
+    }
+  }
+
+  function updateMatrixUI(data) {
+    const matrixGrid = document.getElementById('matrixGrid');
+    const matrixSubtitle = document.getElementById('matrixSubtitle');
+    if (!matrixGrid) return;
+
+    const baseModes = [
+      { mode: 'constrictor', name: '1. CONSTRICTOR 4P', target_share: 25.0, max_games: 200, num_snakes: 4 },
+      { mode: 'royale', name: '2. ROYALE 4P', target_share: 25.0, max_games: 200, num_snakes: 4 },
+      { mode: 'duel', name: '3. DUEL 1v1', target_share: 50.0, max_games: 200, num_snakes: 2 },
+      { mode: 'standard', name: '4. STANDARD 4P', target_share: 25.0, max_games: 200, num_snakes: 4 },
+    ];
+
+    const matrixList = (data.matrix_progress && data.matrix_progress.length > 0) ? data.matrix_progress : [];
+    const modeMap = {};
+    matrixList.forEach(m => { if (m.mode) modeMap[m.mode.toLowerCase()] = m; });
+
+    const isSelfRunning = (data.run_type === 'self' && data.status === 'RUNNING' && data.runner_alive !== false);
+    const activeModeClean = (data.game_mode || '').toLowerCase();
+
+    const played = data.total_played || 0;
+    const is4p = data.num_snakes === 4;
+    const drawShare = is4p ? 0.25 : 0.5;
+    const varW = (data.variant && data.variant.wins != null) ? data.variant.wins : 0;
+    const drawsCount = data.draws ? data.draws.count : ((data.baseline && data.baseline.draws != null) ? data.baseline.draws : 0);
+    const varPts = (data.variant && typeof data.variant.points === 'number') ? data.variant.points : (varW + drawShare * drawsCount);
+    const varWS = (data.variant && typeof data.variant.win_share === 'number') ? data.variant.win_share : (played > 0 ? (varPts / played * 100) : (is4p ? 25.0 : 50.0));
+
+    let completedCount = 0;
+
+    const cardsHtml = baseModes.map((bm, idx) => {
+      const modeKey = bm.mode;
+      const m = modeMap[modeKey] || {};
+      const isCurrentActive = isSelfRunning && (activeModeClean === modeKey);
+
+      let effectiveStatus = 'PENDING';
+      if (m.status && ['PASSED', 'PARITY', 'FAILED', 'SKIPPED'].includes(m.status)) {
+        effectiveStatus = m.status;
+        completedCount++;
+      } else if (isCurrentActive) {
+        effectiveStatus = 'RUNNING';
+      } else if (m.status === 'RUNNING') {
+        effectiveStatus = 'RUNNING';
+      }
+
+      const statusClass = effectiveStatus.toLowerCase();
+      const statusBadge = `<span class="matrix-col-status matrix-status-${statusClass}">${effectiveStatus}</span>`;
+
+      const gamesVal = isCurrentActive ? played : (m.games || 0);
+      const maxGames = m.max_games || bm.max_games || 200;
+      const targetVal = bm.target_share;
+
+      let scoreText = '--';
+      let scoreColor = 'var(--text-main)';
+
+      if (effectiveStatus === 'RUNNING') {
+        scoreText = `${varWS.toFixed(1)}%`;
+        scoreColor = '#60a5fa';
+      } else if (effectiveStatus === 'PASSED') {
+        scoreText = `${(m.win_share != null ? m.win_share : varWS).toFixed(1)}%`;
+        scoreColor = 'var(--variant-color)';
+      } else if (effectiveStatus === 'PARITY') {
+        scoreText = `${(m.win_share != null ? m.win_share : varWS).toFixed(1)}%`;
+        scoreColor = '#f59e0b';
+      } else if (effectiveStatus === 'FAILED') {
+        scoreText = `${(m.win_share != null ? m.win_share : varWS).toFixed(1)}%`;
+        scoreColor = 'var(--danger-color)';
+      } else if (effectiveStatus === 'SKIPPED') {
+        scoreText = gamesVal > 0 ? `${(m.win_share || 0).toFixed(1)}%` : 'SKIPPED';
+        scoreColor = '#fbbf24';
+      }
+
+      let metaText = `Target: > ${targetVal.toFixed(1)}% (${gamesVal}/${maxGames}G)`;
+
+      return `
+        <div class="matrix-col ${statusClass}">
+          <div class="matrix-col-top">
+            <span class="matrix-col-name" title="${bm.name}">${bm.name}</span>
+            ${statusBadge}
+          </div>
+          <div class="matrix-col-score" style="color: ${scoreColor};">${scoreText}</div>
+          <div class="matrix-col-meta">${metaText}</div>
+        </div>
+      `;
+    }).join('');
+
+    matrixGrid.innerHTML = cardsHtml;
+    if (matrixSubtitle) {
+      matrixSubtitle.innerText = `${completedCount} / 4 Modes Complete`;
+    }
+  }
+
+  function updateSelfHero(data) {
+    const is4p = data.num_snakes === 4;
+    if (is4p) {
+      setText('baselineName', 'OPPONENTS (3x BASELINE)');
+    } else {
+      setText('baselineName', (data.strategy_baseline || 'baseline').toUpperCase());
+    }
+    setText('variantName', (data.strategy_variant || 'variant').toUpperCase());
+
+    const played = data.total_played || 0;
+    const baseW = (data.baseline && data.baseline.wins != null) ? data.baseline.wins : 0;
+    const varW = (data.variant && data.variant.wins != null) ? data.variant.wins : 0;
+    const drawsCount = data.draws ? data.draws.count : ((data.baseline && data.baseline.draws != null) ? data.baseline.draws : 0);
+
+    const drawShare = is4p ? 0.25 : 0.5;
+    const basePts = (data.baseline && typeof data.baseline.points === 'number') ? data.baseline.points : (baseW + (1.0 - drawShare) * drawsCount);
+    const varPts = (data.variant && typeof data.variant.points === 'number') ? data.variant.points : (varW + drawShare * drawsCount);
+    const targetWS = data.target_win_share || (is4p ? 25.0 : 50.0);
+    const baseWS = (data.baseline && typeof data.baseline.win_share === 'number') ? data.baseline.win_share : (played > 0 ? (basePts / played * 100) : (100.0 - targetWS));
+    const varWS = (data.variant && typeof data.variant.win_share === 'number') ? data.variant.win_share : (played > 0 ? (varPts / played * 100) : targetWS);
+
+    setText('baselinePts', `${basePts.toFixed(1)} Pts`);
+    setText('variantPts', `${varPts.toFixed(1)} Pts`);
+    setText('baselineSubtext', `${baseW} Wins`);
+    setText('variantSubtext', `${varW} Wins`);
+    setText('drawsHeaderRate', `${drawsCount} Draws`);
+
+    // Threshold Markers & Labels
+    const labelParity = document.getElementById('labelParity');
+    const threshParity = document.getElementById('threshParity');
+    const labelKeep = document.getElementById('labelKeep');
+    const threshKeep = document.getElementById('threshKeep');
+    const labelRevert = document.getElementById('labelRevert');
+    const threshRevert = document.getElementById('threshRevert');
+
+    const highStop = data.current_early_stop_high || data.early_stop_high || (is4p ? 35.0 : 60.0);
+    const lowStop = data.current_early_stop_low || data.early_stop_low || (is4p ? 18.0 : 40.0);
+
+    if (is4p) {
+      if (labelParity) { labelParity.innerText = '25% PARITY'; labelParity.style.left = '75%'; }
+      if (threshParity) threshParity.style.left = '75%';
+      const keepPos = 100 - highStop;
+      if (labelKeep) {
+        labelKeep.innerText = `${highStop.toFixed(1)}% KEEP`;
+        labelKeep.style.left = `${keepPos}%`;
+        labelKeep.style.transform = keepPos < 10 ? 'translateX(-15%)' : 'translateX(-50%)';
+      }
+      if (threshKeep) threshKeep.style.left = `${keepPos}%`;
+      const revertPos = 100 - lowStop;
+      if (labelRevert) {
+        labelRevert.innerText = `${lowStop.toFixed(1)}% REVERT`;
+        labelRevert.style.left = `${revertPos}%`;
+        labelRevert.style.transform = revertPos > 88 ? 'translateX(-85%)' : 'translateX(-50%)';
+      }
+      if (threshRevert) threshRevert.style.left = `${revertPos}%`;
+    } else {
+      if (labelParity) { labelParity.innerText = '50% PARITY'; labelParity.style.left = '50%'; }
+      if (threshParity) threshParity.style.left = '50%';
+      const keepPos = 100 - highStop;
+      if (labelKeep) {
+        labelKeep.innerText = `${highStop.toFixed(1)}% KEEP`;
+        labelKeep.style.left = `${keepPos}%`;
+        labelKeep.style.transform = keepPos < 10 ? 'translateX(-15%)' : 'translateX(-50%)';
+      }
+      if (threshKeep) threshKeep.style.left = `${keepPos}%`;
+      const revertPos = 100 - lowStop;
+      if (labelRevert) {
+        labelRevert.innerText = `${lowStop.toFixed(1)}% REVERT`;
+        labelRevert.style.left = `${revertPos}%`;
+        labelRevert.style.transform = revertPos > 88 ? 'translateX(-85%)' : 'translateX(-50%)';
+      }
+      if (threshRevert) threshRevert.style.left = `${revertPos}%`;
+    }
+
+    // Lead Text
+    const leadEl = document.getElementById('leadText');
+    const leadTitle = document.getElementById('leadTitle');
+    if (leadEl) {
+      if (is4p) {
+        if (leadTitle) leadTitle.innerText = 'VARIANT vs 25% PARITY';
+        const deltaParity = varWS - 25.0;
+        if (Math.abs(deltaParity) < 0.05) {
+          setText(leadEl, 'PARITY');
+          leadEl.style.color = 'var(--text-main)';
+        } else if (deltaParity > 0) {
+          setText(leadEl, `+${deltaParity.toFixed(1)}%`);
+          leadEl.style.color = 'var(--variant-color)';
+        } else {
+          setText(leadEl, `${deltaParity.toFixed(1)}%`);
+          leadEl.style.color = 'var(--danger-color)';
+        }
+      } else {
+        if (leadTitle) leadTitle.innerText = 'WIN VALUE LEAD';
+        const netPts = varPts - basePts;
+        if (Math.abs(netPts) < 0.01) {
+          setText(leadEl, 'EVEN');
+          leadEl.style.color = 'var(--text-main)';
+        } else if (netPts > 0) {
+          setText(leadEl, `+${netPts.toFixed(1)}`);
+          leadEl.style.color = 'var(--variant-color)';
+        } else {
+          setText(leadEl, `-${Math.abs(netPts).toFixed(1)}`);
+          leadEl.style.color = 'var(--baseline-color)';
+        }
+      }
+    }
+
+    // Tug-of-War Bar
+    const tugBaselinesWrap = document.getElementById('tugBaselinesWrap');
+    const varPtsBar = document.getElementById('variantPtsBar');
+    const baseSeg1 = document.getElementById('baseSeg1');
+    const baseSeg2 = document.getElementById('baseSeg2');
+    const baseSeg3 = document.getElementById('baseSeg3');
+    const baseSegs = [baseSeg1, baseSeg2, baseSeg3];
+
+    if (is4p) {
+      if (played === 0) {
+        if (tugBaselinesWrap) tugBaselinesWrap.style.width = '75%';
+        if (varPtsBar) {
+          varPtsBar.style.display = 'flex';
+          varPtsBar.style.width = '25%';
+          setText('variantPtsBarText', '25.0%');
+        }
+        if (baseSeg1) {
+          baseSeg1.style.display = 'flex';
+          baseSeg1.style.width = '100%';
+          setText('baseSeg1Text', 'BASELINES 75.0%');
+        }
+        if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
+        if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
+      } else {
+        if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${baseWS}%`;
+        if (varPtsBar) {
+          if (varWS <= 0) {
+            varPtsBar.style.display = 'none';
+            varPtsBar.style.width = '0%';
+          } else {
+            varPtsBar.style.display = 'flex';
+            varPtsBar.style.width = `${varWS}%`;
+            setText('variantPtsBarText', varWS > 6 ? `${varWS.toFixed(1)}%` : '');
+          }
+        }
+        if (data.snakes_list && data.snakes_list.length > 0) {
+          const baseSnakes = data.snakes_list.filter(s => !s.is_variant);
+          const totalBasePts = baseSnakes.reduce((acc, s) => acc + (s.points || 0), 0);
+          if (totalBasePts <= 0) {
+            baseSegs.forEach(seg => {
+              if (seg) { seg.style.display = 'none'; seg.style.width = '0%'; }
+            });
+          } else if (baseSnakes.length === 1) {
+            if (baseSeg1) {
+              baseSeg1.style.display = 'flex';
+              baseSeg1.style.width = '100%';
+              setText('baseSeg1Text', baseWS > 6 ? `Base ${baseWS.toFixed(1)}%` : '');
+            }
+            if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
+            if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
+          } else {
+            baseSegs.forEach((seg, i) => {
+              if (seg && baseSnakes[i]) {
+                const pts = baseSnakes[i].points || 0;
+                if (pts <= 0) {
+                  seg.style.display = 'none';
+                  seg.style.width = '0%';
+                } else {
+                  const wPct = (pts / totalBasePts) * 100;
+                  seg.style.display = 'flex';
+                  seg.style.width = `${wPct}%`;
+                  setText(`baseSeg${i + 1}Text`, (baseWS * (wPct / 100)) > 7 ? `B${i + 1} ${(baseSnakes[i].win_share).toFixed(1)}%` : '');
+                }
+              }
+            });
+          }
+        }
+      }
+    } else {
+      if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${baseWS}%`;
+      if (varPtsBar) {
+        if (played > 0 && varWS <= 0) {
+          varPtsBar.style.display = 'none';
+          varPtsBar.style.width = '0%';
+        } else {
+          varPtsBar.style.display = 'flex';
+          varPtsBar.style.width = `${varWS}%`;
+          setText('variantPtsBarText', varWS > 6 ? `${varWS.toFixed(1)}%` : '');
+        }
+      }
+      if (baseSeg1) {
+        if (played > 0 && baseWS <= 0) {
+          baseSeg1.style.display = 'none';
+          baseSeg1.style.width = '0%';
+        } else {
+          baseSeg1.style.display = 'flex';
+          baseSeg1.style.width = '100%';
+          setText('baseSeg1Text', baseWS > 6 ? `${baseWS.toFixed(1)}%` : '');
+        }
+      }
+      if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
+      if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
+    }
+  }
+
+  function updatePoolHero(data) {
     const pool = data.pool_data || {};
     const candWS = (pool.cand_share != null) ? pool.cand_share : 0.0;
     const baseWS = (pool.base_share != null) ? pool.base_share : 0.0;
@@ -2159,7 +2766,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       zEl.style.color = zScore >= 1.645 ? 'var(--variant-color)' : (zScore <= -1.645 ? 'var(--danger-color)' : '#f59e0b');
     }
 
-    // Update Tug of War Bar for Pool
     const sumWS = candWS + baseWS;
     const relVarPct = sumWS > 0 ? (candWS / sumWS * 100) : 50.0;
     const relBasePct = 100.0 - relVarPct;
@@ -2167,6 +2773,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     const tugBaselinesWrap = document.getElementById('tugBaselinesWrap');
     const varPtsBar = document.getElementById('variantPtsBar');
     const baseSeg1 = document.getElementById('baseSeg1');
+    const baseSeg2 = document.getElementById('baseSeg2');
+    const baseSeg3 = document.getElementById('baseSeg3');
     if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${relBasePct}%`;
     if (varPtsBar) {
       varPtsBar.style.display = 'flex';
@@ -2178,42 +2786,341 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       baseSeg1.style.width = '100%';
       setText('baseSeg1Text', `${baseWS.toFixed(1)}%`);
     }
+    if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
+    if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
+
     const labelParity = document.getElementById('labelParity');
     const threshParity = document.getElementById('threshParity');
+    const labelKeep = document.getElementById('labelKeep');
+    const threshKeep = document.getElementById('threshKeep');
+    const labelRevert = document.getElementById('labelRevert');
+    const threshRevert = document.getElementById('threshRevert');
+
     if (labelParity) { labelParity.innerText = 'PARITY'; labelParity.style.left = '50%'; }
     if (threshParity) threshParity.style.left = '50%';
+    if (labelKeep) { labelKeep.innerText = '+1.65 KEEP'; labelKeep.style.left = '40%'; }
+    if (threshKeep) threshKeep.style.left = '40%';
+    if (labelRevert) { labelRevert.innerText = '-1.65 REVERT'; labelRevert.style.left = '60%'; }
+    if (threshRevert) threshRevert.style.left = '60%';
+  }
 
-    // Update Opponents Table
-    const oppTbody = document.getElementById('poolOpponentsTableBody');
-    const oppCount = document.getElementById('poolOpponentsCount');
-    const opponents = pool.opponents || [];
-    if (oppCount) oppCount.innerText = `${opponents.length} Opponent${opponents.length === 1 ? '' : 's'}`;
-    if (oppTbody) {
-      if (opponents.length === 0) {
-        setHTML(oppTbody, '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Waiting for pool opponent results...</td></tr>');
+  function updateDepthHero(data) {
+    const depth = data.depth_data || {};
+    const varD = (depth.median_var_depth != null) ? depth.median_var_depth : 0.0;
+    const baseD = (depth.median_base_depth != null) ? depth.median_base_depth : 0.0;
+    const deltaD = (depth.delta_depth != null) ? depth.delta_depth : (varD - baseD);
+    const npsR = (depth.nps_ratio != null) ? depth.nps_ratio : 1.0;
+    const agree = (depth.agreement_pct != null) ? depth.agreement_pct : 100.0;
+
+    setText('baselineName', 'BASELINE SEARCH');
+    setText('variantName', 'VARIANT SEARCH');
+    setText('baselinePts', `${baseD.toFixed(1)}`);
+    setText('variantPts', `${varD.toFixed(1)}`);
+    setText('baselineSubtext', `Median Depth`);
+    setText('variantSubtext', `Median Depth`);
+
+    setText('leadTitle', 'DEPTH DELTA (Δ)');
+    const leadEl = document.getElementById('leadText');
+    if (leadEl) {
+      leadEl.innerText = `${deltaD > 0 ? '+' : ''}${deltaD.toFixed(1)} Depth`;
+      leadEl.style.color = deltaD > 0 ? 'var(--variant-color)' : (deltaD < 0 ? 'var(--danger-color)' : 'var(--text-main)');
+    }
+    const zEl = document.getElementById('drawsHeaderRate');
+    if (zEl) {
+      zEl.innerText = `${agree.toFixed(0)}% Move Agreement`;
+      zEl.style.color = '#60a5fa';
+    }
+
+    const sumD = varD + baseD;
+    const relVarPct = sumD > 0 ? (varD / sumD * 100) : 50.0;
+    const relBasePct = 100.0 - relVarPct;
+
+    const tugBaselinesWrap = document.getElementById('tugBaselinesWrap');
+    const varPtsBar = document.getElementById('variantPtsBar');
+    const baseSeg1 = document.getElementById('baseSeg1');
+    const baseSeg2 = document.getElementById('baseSeg2');
+    const baseSeg3 = document.getElementById('baseSeg3');
+    if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${relBasePct}%`;
+    if (varPtsBar) {
+      varPtsBar.style.display = 'flex';
+      varPtsBar.style.width = `${relVarPct}%`;
+      setText('variantPtsBarText', `${varD.toFixed(1)}`);
+    }
+    if (baseSeg1) {
+      baseSeg1.style.display = 'flex';
+      baseSeg1.style.width = '100%';
+      setText('baseSeg1Text', `${baseD.toFixed(1)}`);
+    }
+    if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
+    if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
+
+    const labelParity = document.getElementById('labelParity');
+    const threshParity = document.getElementById('threshParity');
+    const labelKeep = document.getElementById('labelKeep');
+    const threshKeep = document.getElementById('threshKeep');
+    const labelRevert = document.getElementById('labelRevert');
+    const threshRevert = document.getElementById('threshRevert');
+
+    if (labelParity) { labelParity.innerText = 'PARITY'; labelParity.style.left = '50%'; }
+    if (threshParity) threshParity.style.left = '50%';
+    if (labelKeep) { labelKeep.innerText = '+0.5 KEEP'; labelKeep.style.left = '40%'; }
+    if (threshKeep) threshKeep.style.left = '40%';
+    if (labelRevert) { labelRevert.innerText = '-0.5 REVERT'; labelRevert.style.left = '60%'; }
+    if (threshRevert) threshRevert.style.left = '60%';
+  }
+
+  function updateRunsCard(data, isRunning, modeElapsed) {
+    const runType = data.run_type || 'self';
+    const depth = data.depth_data || {};
+    const pool = data.pool_data || {};
+
+    let played = 0;
+    let maxG = 200;
+
+    if (runType === 'depth') {
+      played = depth.completed_positions || data.total_played || 0;
+      maxG = depth.total_positions || data.target_games || 12;
+      setText('runsValue', `${played} / ${maxG} Positions`);
+    } else if (runType === 'pool') {
+      played = pool.total_games || data.total_played || 0;
+      maxG = data.target_games || data.max_games || 100;
+      setText('runsValue', `${played} / ${maxG} Paired Games`);
+    } else {
+      played = data.total_played || 0;
+      maxG = data.target_games || data.max_games || 200;
+      if (data.status === 'IDLE' && played === 0) {
+        setText('runsValue', `0 / ${maxG} Games`);
       } else {
-        const oppRows = opponents.map(o => {
-          const d = (o.delta != null) ? o.delta : (o.cand_win_pct - o.base_win_pct);
-          const dColor = d > 0 ? 'var(--variant-color)' : (d < 0 ? 'var(--danger-color)' : 'var(--text-muted)');
-          return `
-            <tr>
-              <td style="text-align: left; font-weight: 700; color: var(--text-main);">${escapeHtml(o.opponent)}</td>
-              <td>${o.games}</td>
-              <td style="color: var(--variant-color); font-weight: 700;">${o.cand_win_pct.toFixed(1)}%</td>
-              <td style="color: var(--baseline-color); font-weight: 700;">${o.base_win_pct.toFixed(1)}%</td>
-              <td style="color: ${dColor}; font-weight: 700;">${d > 0 ? '+' : ''}${d.toFixed(1)}%</td>
-            </tr>
-          `;
-        }).join('');
-        setHTML(oppTbody, oppRows);
+        setText('runsValue', `${played} / ${maxG} Games`);
       }
     }
 
-    // Update Runs Card for Pool
-    const maxG = data.target_games || data.max_games || 100;
-    setText('runsValue', `${totalG} / ${maxG} Paired Games`);
-    const pctComplete = maxG > 0 ? ((totalG / maxG) * 100).toFixed(1) : 0;
+    const pctComplete = maxG > 0 ? Math.min(100, (played / maxG) * 100).toFixed(1) : 0;
     setWidth('runsProgress', pctComplete);
+
+    const pace = (isRunning && modeElapsed > 0) ? (played / modeElapsed) : 0;
+    if (isRunning) {
+      const unit = runType === 'depth' ? 'pos/sec' : 'games/sec';
+      setText('paceValue', `${pace.toFixed(3)} ${unit}`);
+    } else {
+      setText('paceValue', `0.000 games/sec`);
+    }
+
+    const remainingGames = Math.max(0, maxG - played);
+
+    if (data.status === 'FINISHED' || data.status === 'STOPPED' || remainingGames === 0) {
+      setText('runsSubtext', `${pctComplete}% Complete (${data.status === 'STOPPED' ? 'Stopped' : 'Done'})`);
+    } else if (data.status === 'DISCONNECTED') {
+      setText('runsSubtext', `${pctComplete}% Complete (Disconnected)`);
+    } else if (data.status === 'IDLE' || data.status === 'WAITING' || !isRunning) {
+      setText('runsSubtext', `0% Complete`);
+    } else if (data.eta_seconds != null && data.eta_seconds > 0 && isRunning) {
+      const etaText = formatSeconds(data.eta_seconds);
+      setText('runsSubtext', `${pctComplete}% Complete (~${etaText} left)`);
+      const subEl = document.getElementById('runsSubtext');
+      if (subEl && data.eta_breakdown && data.eta_breakdown.length > 0) {
+        subEl.title = 'Total Run ETA: ' + data.eta_breakdown.map(b => `${b.mode}: ${b.games_left}G (~${formatSeconds(b.eta_seconds)})`).join(' | ');
+      }
+    } else if (pace > 0 && isRunning) {
+      const etaSec = remainingGames / pace;
+      setText('runsSubtext', `${pctComplete}% Complete (~${formatSeconds(etaSec)} left)`);
+    } else {
+      setText('runsSubtext', `${pctComplete}% Complete`);
+    }
+  }
+
+  function updateDecisionBanner(data, isRunning, is4p, varWS, varPts, targetStr, played, maxG) {
+    const banner = document.getElementById('decisionBanner');
+    const bannerTitle = document.getElementById('bannerTitle');
+    const bannerDesc = document.getElementById('bannerDesc');
+    const runType = data.run_type || 'self';
+
+    if (!banner || !bannerTitle || !bannerDesc) return;
+
+    if (data.status === 'IDLE' || data.status === 'WAITING' || (!isRunning && data.status !== 'FINISHED' && data.status !== 'STOPPED' && data.status !== 'DISCONNECTED')) {
+      banner.className = 'banner idle';
+      setHTML(bannerTitle, '⏸️ DECISION: AWAITING TEST');
+      setText(bannerDesc, 'Matrix early-stopping thresholds: KEEP (z >= 1.645 or early stop), PARITY (no regression), REVERT (z <= -1.645).');
+    } else if (data.status === 'DISCONNECTED') {
+      banner.className = 'banner revert';
+      setHTML(bannerTitle, '⚠️ DISCONNECTED');
+      setText(bannerDesc, `${data.stop_reason || 'The simulation runner is not active.'} Paused at ${played}/${maxG} games.`);
+    } else if (data.status === 'FINISHED' || data.status === 'STOPPED') {
+      if (data.stop_type === 'MANUAL_ABORT' || data.status === 'STOPPED') {
+        banner.className = 'banner info';
+        setHTML(bannerTitle, '⏹️ TEST STOPPED / CANCELLED');
+        setText(bannerDesc, `${data.stop_reason || 'Simulation run stopped by user.'} Progress: ${played}/${maxG} games played.`);
+      } else if (data.stop_type === 'USER_SKIPPED' || data.recommendation === 'SKIPPED') {
+        banner.className = 'banner info';
+        setHTML(bannerTitle, '⏭️ TEST SKIPPED BY USER');
+        setText(bannerDesc, `${data.stop_reason || 'Simulation mode skipped by user.'} Progress: ${played}/${maxG} games played.`);
+      } else if (data.stop_type === 'TEST_FAILURE') {
+        banner.className = 'banner revert';
+        setHTML(bannerTitle, '❌ RECOMMENDATION: TEST FAILURE');
+        setText(bannerDesc, `${data.stop_reason || 'Unit test suite failed for strategy variant.'}`);
+      } else if (runType === 'pool') {
+        const pDelta = (data.pool_data && data.pool_data.delta != null) ? data.pool_data.delta : 0.0;
+        const pZ = (data.pool_data && data.pool_data.z_score != null) ? data.pool_data.z_score : 0.0;
+        if (data.recommendation === 'KEEP') {
+          banner.className = 'banner keep';
+          setHTML(bannerTitle, '🎉 RECOMMENDATION: KEEP VARIANT (POOL GATE PASSED)');
+          setText(bannerDesc, `${data.stop_reason || ''} Candidate out-performed baseline vs pool (Δ: ${pDelta >= 0 ? '+' : ''}${pDelta.toFixed(1)}%, z = ${pZ >= 0 ? '+' : ''}${pZ.toFixed(2)} >= +1.645).`);
+        } else if (data.recommendation === 'PARITY') {
+          banner.className = 'banner parity';
+          setHTML(bannerTitle, '🟡 RECOMMENDATION: PARITY (POOL GATE CONFIRMED)');
+          setText(bannerDesc, `${data.stop_reason || ''} Candidate performed within statistical parity of baseline vs pool (Δ: ${pDelta >= 0 ? '+' : ''}${pDelta.toFixed(1)}%, z = ${pZ >= 0 ? '+' : ''}${pZ.toFixed(2)}).`);
+        } else {
+          banner.className = 'banner revert';
+          setHTML(bannerTitle, '⚠️ RECOMMENDATION: REVERT VARIANT (POOL GATE FAILED)');
+          setText(bannerDesc, `${data.stop_reason || ''} Candidate underperformed baseline vs pool (Δ: ${pDelta >= 0 ? '+' : ''}${pDelta.toFixed(1)}%, z = ${pZ >= 0 ? '+' : ''}${pZ.toFixed(2)} <= -1.645).`);
+        }
+      } else if (runType === 'depth') {
+        const dDelta = (data.depth_data && data.depth_data.delta_depth != null) ? data.depth_data.delta_depth : 0.0;
+        const dNps = (data.depth_data && data.depth_data.nps_ratio != null) ? data.depth_data.nps_ratio : 1.0;
+        if (data.recommendation === 'KEEP' || (data.depth_data && data.depth_data.passed)) {
+          banner.className = 'banner keep';
+          setHTML(bannerTitle, '🎉 RECOMMENDATION: DEPTH BENCHMARK PASSED');
+          setText(bannerDesc, `${data.stop_reason || ''} Variant depth met or exceeded baseline (Δ: ${dDelta >= 0 ? '+' : ''}${dDelta.toFixed(1)} depth, NPS ratio: ${dNps.toFixed(2)}x).`);
+        } else {
+          banner.className = 'banner revert';
+          setHTML(bannerTitle, '⚠️ RECOMMENDATION: DEPTH REGRESSION DETECTED');
+          setText(bannerDesc, `${data.stop_reason || ''} Variant median depth fell below baseline in tested fixtures.`);
+        }
+      } else if (data.recommendation === 'KEEP') {
+        banner.className = 'banner keep';
+        setHTML(bannerTitle, '🎉 RECOMMENDATION: KEEP VARIANT');
+        setText(bannerDesc, `${data.stop_reason || ''} Final Win Share: ${varWS.toFixed(1)}% (${varPts.toFixed(1)} Pts) vs Target: ${targetStr}`);
+      } else if (data.recommendation === 'PARITY') {
+        banner.className = 'banner parity';
+        setHTML(bannerTitle, '🟡 RECOMMENDATION: PARITY (NO REGRESSION)');
+        setText(bannerDesc, `${data.stop_reason || ''} Final Win Share: ${varWS.toFixed(1)}% (${varPts.toFixed(1)} Pts) vs Target: ${targetStr}. Confirmed no regression; suitable for bug fixes and neutral refactors.`);
+      } else {
+        banner.className = 'banner revert';
+        setHTML(bannerTitle, '⚠️ RECOMMENDATION: REVERT VARIANT');
+        setText(bannerDesc, `${data.stop_reason || ''} Final Win Share: ${varWS.toFixed(1)}% (${varPts.toFixed(1)} Pts) vs Target: ${targetStr}`);
+      }
+    } else if (isRunning) {
+      banner.className = 'banner info';
+      setHTML(bannerTitle, '⚡ EVALUATION IN PROGRESS');
+      setText(bannerDesc, 'Accumulating simulation results. Decision will finalize when early stopping threshold is reached or all games complete.');
+    }
+  }
+
+  function updateHistoryTable(data) {
+    const historyBody = document.getElementById('historyTableBody');
+    const historyCount = document.getElementById('historyCount');
+    if (!historyBody) return;
+
+    const historyList = data.run_history || [];
+    const currentHistoryJSON = JSON.stringify(historyList);
+    if (currentHistoryJSON === lastHistoryJSON) return;
+    lastHistoryJSON = currentHistoryJSON;
+
+    if (historyList.length === 0) {
+      setText(historyCount, '0 runs');
+      setHTML(historyBody, `<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 2rem;">No previous simulation runs recorded.</td></tr>`);
+      return;
+    }
+
+    const recentHistory = [...historyList].slice(-10).reverse();
+    setText(historyCount, historyList.length < 10 ? `Last ${historyList.length}` : 'Last 10');
+    const rowsHtml = recentHistory.map((run) => {
+      const rec = run.recommendation || 'PENDING';
+      let pillClass = 'draw';
+      let badgeText = rec;
+      if (rec === 'KEEP') {
+        pillClass = 'variant';
+        badgeText = '🎉 KEEP';
+      } else if (rec === 'PARITY') {
+        pillClass = 'parity';
+        badgeText = '🟡 PARITY';
+      } else if (rec === 'REVERT') {
+        pillClass = 'revert';
+        badgeText = '⚠️ REVERT';
+      } else if (rec === 'SKIPPED') {
+        pillClass = 'draw';
+        badgeText = '⏭️ SKIPPED';
+      } else if (rec === 'TEST_FAILURE') {
+        pillClass = 'revert';
+        badgeText = '❌ TEST FAILED';
+      }
+      const rawDesc = run.experiment_desc || run.description || 'Unspecified Experiment';
+      const expDesc = escapeHtml(rawDesc);
+
+      const timeParts = String(run.timestamp || '').split(/[ T]/);
+      const dateStr = timeParts[0] || '-';
+      const timeStr = timeParts[1] || '';
+      const timeCell = timeStr 
+        ? `<div style="line-height: 1.25;"><div>${dateStr}</div><div style="color: var(--text-muted); font-size: 0.76rem;">${timeStr}</div></div>`
+        : dateStr;
+
+      const getModeData = (modeKey) => {
+        if (run.matrix_results && Array.isArray(run.matrix_results)) {
+          const m = run.matrix_results.find(item => item.mode === modeKey);
+          if (m) {
+            const ws = (typeof m.var_win_share === 'number') ? m.var_win_share : null;
+            const games = m.total_played || m.games || 0;
+            const dec = m.decision || (m.passed ? 'KEEP' : 'FAILED');
+            return { winShare: ws, games: games, decision: dec };
+          }
+        }
+        if (run.game_mode === modeKey || (modeKey === 'duel' && run.num_snakes === 2) || (modeKey === 'standard' && (!run.game_mode || run.game_mode === 'standard'))) {
+          if (run.variant) {
+            const ws = (typeof run.variant.win_share === 'number') ? run.variant.win_share : (typeof run.variant.rate === 'number' ? run.variant.rate : null);
+            const games = run.total_games || 0;
+            const dec = run.recommendation || '';
+            return { winShare: ws, games: games, decision: dec };
+          }
+        }
+        return null;
+      };
+
+      const renderModeCell = (modeData, target) => {
+        if (!modeData || modeData.winShare == null) {
+          return `<div style="color: var(--text-muted); font-size: 0.85rem;">—</div>`;
+        }
+        const ws = modeData.winShare;
+        const dec = modeData.decision;
+        let color = 'var(--text-main)';
+        if (dec === 'KEEP' || ws >= target + 0.5) {
+          color = 'var(--variant-color)';
+        } else if (dec === 'PARITY' || (ws >= target - 3.0 && ws <= target + 3.0)) {
+          color = '#f59e0b';
+        } else if (dec === 'REVERT' || dec === 'FAILED' || ws < target - 3.0) {
+          color = 'var(--danger-color)';
+        } else if (dec === 'SKIPPED') {
+          color = '#fbbf24';
+        }
+        const gStr = modeData.games > 0 ? `${modeData.games}G` : '';
+        return `
+          <div style="line-height: 1.25;">
+            <div style="font-weight: 700; color: ${color}; font-size: 0.92rem;">${ws.toFixed(1)}%</div>
+            <div style="color: var(--text-muted); font-size: 0.72rem;">${gStr}${gStr && dec ? ' • ' : ''}${dec ? dec : ''}</div>
+          </div>
+        `;
+      };
+
+      const constCell = renderModeCell(getModeData('constrictor'), 25.0);
+      const royaleCell = renderModeCell(getModeData('royale'), 25.0);
+      const duelCell = renderModeCell(getModeData('duel'), 50.0);
+      const standardCell = renderModeCell(getModeData('standard'), 25.0);
+
+      return `
+        <tr>
+          <td style="white-space: nowrap; min-width: 85px; text-align: left;">${timeCell}</td>
+          <td class="col-desc" style="font-weight: 600; color: var(--text-main); font-size: 0.85rem; text-align: left;">
+            ${expDesc}
+            <span class="tooltip-text">${expDesc}</span>
+          </td>
+          <td style="white-space: nowrap; min-width: 80px; text-align: center;">${constCell}</td>
+          <td style="white-space: nowrap; min-width: 80px; text-align: center;">${royaleCell}</td>
+          <td style="white-space: nowrap; min-width: 80px; text-align: center;">${duelCell}</td>
+          <td style="white-space: nowrap; min-width: 80px; text-align: center;">${standardCell}</td>
+          <td style="white-space: nowrap; min-width: 85px; text-align: center;"><span class="winner-pill ${pillClass}">${badgeText}</span></td>
+        </tr>
+      `;
+    }).join('');
+    setHTML(historyBody, rowsHtml);
   }
 
   async function updateDashboard() {
@@ -2224,40 +3131,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (!res.ok) return;
       const data = await res.json();
 
-      // Run Type Badge
       const runType = data.run_type || 'self';
-      const runTypeIcon = document.getElementById('runTypeIcon');
-      const runTypeText = document.getElementById('runTypeText');
-      if (runType === 'pool') {
-        if (runTypeIcon) runTypeIcon.innerText = '🏊';
-        if (runTypeText) runTypeText.innerText = 'POOL EVALUATION';
-      } else if (runType === 'depth') {
-        if (runTypeIcon) runTypeIcon.innerText = '📐';
-        if (runTypeText) runTypeText.innerText = 'DEPTH BENCHMARK';
-      } else {
-        if (runTypeIcon) runTypeIcon.innerText = '🏎️';
-        if (runTypeText) runTypeText.innerText = 'SELF-PLAY A/B';
-      }
-
-      const heroCard = document.getElementById('heroCard');
-      const poolOpponentsCard = document.getElementById('poolOpponentsCard');
-      const depthCard = document.getElementById('depthCard');
-
-      if (runType === 'depth') {
-        if (heroCard) heroCard.style.display = 'none';
-        if (poolOpponentsCard) poolOpponentsCard.style.display = 'none';
-        if (depthCard) depthCard.style.display = 'block';
-        updateDepthUI(data);
-      } else if (runType === 'pool') {
-        if (heroCard) heroCard.style.display = 'block';
-        if (poolOpponentsCard) poolOpponentsCard.style.display = 'block';
-        if (depthCard) depthCard.style.display = 'none';
-        updatePoolUI(data);
-      } else {
-        if (heroCard) heroCard.style.display = 'block';
-        if (poolOpponentsCard) poolOpponentsCard.style.display = 'none';
-        if (depthCard) depthCard.style.display = 'none';
-      }
+      const isRunning = (data.status === 'RUNNING' && data.runner_alive !== false);
 
       // Header Status & Experiment Info
       const statusDot = document.getElementById('statusDot');
@@ -2278,7 +3153,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           if (statusDot.style.animation !== 'none') statusDot.style.animation = 'none';
           statusDot.style.backgroundColor = 'var(--draw-color)';
           setText(statusText, 'STOPPED');
-        } else if (data.status === 'RUNNING' && data.runner_alive !== false) {
+        } else if (isRunning) {
           const targetColor = 'var(--variant-color)';
           if (statusDot.style.backgroundColor !== targetColor) statusDot.style.backgroundColor = targetColor;
           if (statusDot.style.animation !== 'pulse 2s infinite') statusDot.style.animation = 'pulse 2s infinite';
@@ -2290,7 +3165,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         } else {
           if (statusDot.style.animation !== 'none') statusDot.style.animation = 'none';
           statusDot.style.backgroundColor = 'var(--draw-color)';
-          setText(statusText, String(data.status || 'STOPPED').toUpperCase());
+          setText(statusText, String(data.status || 'IDLE').toUpperCase());
         }
       }
 
@@ -2302,29 +3177,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if (subtext.title !== newSub) subtext.title = newSub;
       }
 
-      // Mode Badge
-      const modeNames = {
-        'duel': 'DUEL 1v1',
-        'standard': 'STANDARD 4P',
-        'ffa': 'STANDARD 4P',
-        'royale': 'ROYALE 4P',
-        'constrictor': 'CONSTRICTOR 4P',
-        'wrapped': 'WRAPPED 1v1'
-      };
-      const activeMode = data.game_mode || 'duel';
-      const modeDisplay = modeNames[activeMode] || activeMode.toUpperCase();
-      setText('modeName', modeDisplay);
-
-      const modeIcons = {
-        'duel': '⚔️',
-        'standard': '👑',
-        'ffa': '👑',
-        'royale': '🔥',
-        'constrictor': '🐍',
-        'wrapped': '🔄'
-      };
-      setText('modeIcon', modeIcons[activeMode] || '🎮');
-
       setText('threadsCount', (data.threads != null && data.threads > 0) ? data.threads : '-');
       setText('elapsedTime', formatSeconds(data.elapsed_seconds || 0));
       const elapsedEl = document.getElementById('elapsedTime');
@@ -2333,479 +3185,38 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         elapsedEl.parentElement.title = `Total Suite: ${formatSeconds(data.elapsed_seconds || 0)} | Current Mode: ${formatSeconds(modeElapsed)}`;
       }
 
-      const isRunning = (data.status === 'RUNNING' && data.runner_alive !== false);
-      const pace = (isRunning && modeElapsed > 0) ? (data.total_played / modeElapsed) : 0;
-      if (isRunning) {
-        setText('paceValue', `${pace.toFixed(3)} games/sec`);
-      } else {
-        setText('paceValue', `0.000 games/sec`);
-      }
-
-      // Strategy Names & Lead
-      const is4p = data.num_snakes === 4;
-      if (is4p) {
-        setText('baselineName', 'OPPONENTS (3x BASELINE)');
-      } else {
-        setText('baselineName', (data.strategy_baseline || 'baseline').toUpperCase());
-      }
-      setText('variantName', (data.strategy_variant || 'variant').toUpperCase());
-
-      // Points & Rates Calculation
+      // Shared metrics calculation
       const played = data.total_played || 0;
+      const is4p = data.num_snakes === 4;
+      const drawShare = is4p ? 0.25 : 0.5;
       const baseW = (data.baseline && data.baseline.wins != null) ? data.baseline.wins : 0;
       const varW = (data.variant && data.variant.wins != null) ? data.variant.wins : 0;
       const drawsCount = data.draws ? data.draws.count : ((data.baseline && data.baseline.draws != null) ? data.baseline.draws : 0);
-
-      const drawShare = is4p ? 0.25 : 0.5;
       const basePts = (data.baseline && typeof data.baseline.points === 'number') ? data.baseline.points : (baseW + (1.0 - drawShare) * drawsCount);
       const varPts = (data.variant && typeof data.variant.points === 'number') ? data.variant.points : (varW + drawShare * drawsCount);
       const targetWS = data.target_win_share || (is4p ? 25.0 : 50.0);
-      const baseWS = (data.baseline && typeof data.baseline.win_share === 'number') ? data.baseline.win_share : (played > 0 ? (basePts / played * 100) : (100.0 - targetWS));
       const varWS = (data.variant && typeof data.variant.win_share === 'number') ? data.variant.win_share : (played > 0 ? (varPts / played * 100) : targetWS);
+      const targetStr = is4p ? '25.0% Individual Parity' : '50.0% Parity';
+      const maxG = data.target_games || data.max_games || 200;
 
-      // Matrix Pipeline Display — must be after played/varWS are computed so RUNNING mode shows live %
-      const matrixCard = document.getElementById('matrixCard');
-      const matrixGrid = document.getElementById('matrixGrid');
-      const matrixSubtitle = document.getElementById('matrixSubtitle');
-      if (matrixCard && matrixGrid) {
-        const matrixList = data.matrix_progress || [];
-        if (matrixList.length > 0) {
-          matrixCard.style.display = 'block';
-          const completedCount = matrixList.filter(m => m.status === 'PASSED' || m.status === 'PARITY' || m.status === 'FAILED' || m.status === 'SKIPPED').length;
-          if (matrixSubtitle) matrixSubtitle.innerText = `${completedCount} / ${matrixList.length} Modes Complete`;
+      // Update All Permanent Cards (Layout Never Shifts)
+      updatePipelineUI(data);
+      updateMatrixUI(data);
 
-          matrixGrid.innerHTML = matrixList.map((m, idx) => {
-            const isCurrentRunning = m.status === 'RUNNING' || (data.game_mode === m.mode && data.status === 'RUNNING' && m.status !== 'PASSED' && m.status !== 'PARITY' && m.status !== 'FAILED' && m.status !== 'SKIPPED');
-            const effectiveStatus = isCurrentRunning ? 'RUNNING' : (m.status || 'PENDING');
-            const statusClass = effectiveStatus.toLowerCase();
-            let statusBadge = `<span class="matrix-col-status matrix-status-${statusClass}">${effectiveStatus}</span>`;
-            const winShareVal = isCurrentRunning ? varWS : (m.win_share || 0);
-            const gamesVal = isCurrentRunning ? played : (m.games || 0);
-
-            let scoreText = effectiveStatus === 'PENDING' ? '--' : (effectiveStatus === 'SKIPPED' && !gamesVal ? 'SKIPPED' : `${winShareVal.toFixed(1)}%`);
-            let metaText = `Target: > ${(m.target_share || (m.num_snakes === 4 ? 25.0 : 50.0)).toFixed(1)}% (${gamesVal}/${m.max_games || 200}G)`;
-            if (runType === 'pool') {
-              const deltaVal = (m.delta != null) ? m.delta : 0.0;
-              const zVal = (m.z_score != null) ? m.z_score : 0.0;
-              scoreText = effectiveStatus === 'PENDING' ? '--' : `${deltaVal >= 0 ? '+' : ''}${deltaVal.toFixed(1)}%`;
-              metaText = effectiveStatus === 'PENDING' ? `Target: z >= +1.645 (${m.max_games || 20}G)` : `z = ${zVal >= 0 ? '+' : ''}${zVal.toFixed(2)} (${gamesVal}/${m.max_games || 20}G)`;
-            }
-            let scoreColor = effectiveStatus === 'PASSED' ? 'var(--variant-color)' : (effectiveStatus === 'PARITY' ? '#f59e0b' : (effectiveStatus === 'FAILED' ? 'var(--danger-color)' : (effectiveStatus === 'SKIPPED' ? '#fbbf24' : (effectiveStatus === 'RUNNING' ? '#60a5fa' : 'var(--text-main)'))));
-            return `
-              <div class="matrix-col ${statusClass}">
-                <div class="matrix-col-top">
-                  <span class="matrix-col-name" title="${m.name || m.mode}">${idx + 1}. ${m.name || m.mode.toUpperCase()}</span>
-                  ${statusBadge}
-                </div>
-                <div class="matrix-col-score" style="color: ${scoreColor};">${scoreText}</div>
-                <div class="matrix-col-meta">${metaText}</div>
-              </div>
-            `;
-          }).join('');
-        } else {
-          matrixCard.style.display = 'none';
-        }
-      }
-
-      if (runType === 'self') {
-        setText('baselinePts', `${basePts.toFixed(1)} Pts`);
-        setText('variantPts', `${varPts.toFixed(1)} Pts`);
-        setText('baselineSubtext', `${baseW} Wins`);
-        setText('variantSubtext', `${varW} Wins`);
-        setText('drawsHeaderRate', `${drawsCount} Draws`);
-
-        // Dynamic Threshold Markers & Labels
-        const labelParity = document.getElementById('labelParity');
-        const threshParity = document.getElementById('threshParity');
-        const labelKeep = document.getElementById('labelKeep');
-        const threshKeep = document.getElementById('threshKeep');
-        const labelRevert = document.getElementById('labelRevert');
-        const threshRevert = document.getElementById('threshRevert');
-
-        const highStop = data.current_early_stop_high || data.early_stop_high || (is4p ? 35.0 : 60.0);
-        const lowStop = data.current_early_stop_low || data.early_stop_low || (is4p ? 18.0 : 40.0);
-
-        if (is4p) {
-          // 4-Player Parity = 25% for variant (75% for baselines)
-          if (labelParity) { labelParity.innerText = '25% PARITY'; labelParity.style.left = '75%'; }
-          if (threshParity) { threshParity.style.left = '75%'; }
-          const keepPos = 100 - highStop;
-          if (labelKeep) {
-            labelKeep.innerText = `${highStop.toFixed(1)}% KEEP`;
-            labelKeep.style.left = `${keepPos}%`;
-            labelKeep.style.transform = keepPos < 10 ? 'translateX(-15%)' : 'translateX(-50%)';
-          }
-          if (threshKeep) { threshKeep.style.left = `${keepPos}%`; }
-          const revertPos = 100 - lowStop;
-          if (labelRevert) {
-            labelRevert.innerText = `${lowStop.toFixed(1)}% REVERT`;
-            labelRevert.style.left = `${revertPos}%`;
-            labelRevert.style.transform = revertPos > 88 ? 'translateX(-85%)' : 'translateX(-50%)';
-          }
-          if (threshRevert) { threshRevert.style.left = `${revertPos}%`; }
-        } else {
-          // 1v1 Parity = 50%
-          if (labelParity) { labelParity.innerText = '50% PARITY'; labelParity.style.left = '50%'; }
-          if (threshParity) { threshParity.style.left = '50%'; }
-          const keepPos = 100 - highStop;
-          if (labelKeep) {
-            labelKeep.innerText = `${highStop.toFixed(1)}% KEEP`;
-            labelKeep.style.left = `${keepPos}%`;
-            labelKeep.style.transform = keepPos < 10 ? 'translateX(-15%)' : 'translateX(-50%)';
-          }
-          if (threshKeep) { threshKeep.style.left = `${keepPos}%`; }
-          const revertPos = 100 - lowStop;
-          if (labelRevert) {
-            labelRevert.innerText = `${lowStop.toFixed(1)}% REVERT`;
-            labelRevert.style.left = `${revertPos}%`;
-            labelRevert.style.transform = revertPos > 88 ? 'translateX(-85%)' : 'translateX(-50%)';
-          }
-          if (threshRevert) { threshRevert.style.left = `${revertPos}%`; }
-        }
-
-        // Lead Text
-        const leadEl = document.getElementById('leadText');
-        const leadTitle = document.getElementById('leadTitle');
-        if (leadEl) {
-          if (is4p) {
-            if (leadTitle) leadTitle.innerText = 'VARIANT vs 25% PARITY';
-            const deltaParity = varWS - 25.0;
-            if (Math.abs(deltaParity) < 0.05) {
-              setText(leadEl, 'PARITY');
-              leadEl.style.color = 'var(--text-main)';
-            } else if (deltaParity > 0) {
-              setText(leadEl, `+${deltaParity.toFixed(1)}%`);
-              leadEl.style.color = 'var(--variant-color)';
-            } else {
-              setText(leadEl, `${deltaParity.toFixed(1)}%`);
-              leadEl.style.color = 'var(--danger-color)';
-            }
-          } else {
-            if (leadTitle) leadTitle.innerText = 'WIN VALUE LEAD';
-            const netPts = varPts - basePts;
-            if (Math.abs(netPts) < 0.01) {
-              setText(leadEl, 'EVEN');
-              leadEl.style.color = 'var(--text-main)';
-            } else if (netPts > 0) {
-              setText(leadEl, `+${netPts.toFixed(1)}`);
-              leadEl.style.color = 'var(--variant-color)';
-            } else {
-              setText(leadEl, `-${Math.abs(netPts).toFixed(1)}`);
-              leadEl.style.color = 'var(--baseline-color)';
-            }
-          }
-        }
-
-        // Bar 1: Win Share (Points) Tug-of-War Bar
-        const tugBaselinesWrap = document.getElementById('tugBaselinesWrap');
-        const varPtsBar = document.getElementById('variantPtsBar');
-        const baseSeg1 = document.getElementById('baseSeg1');
-        const baseSeg2 = document.getElementById('baseSeg2');
-        const baseSeg3 = document.getElementById('baseSeg3');
-        const baseSegs = [baseSeg1, baseSeg2, baseSeg3];
-
-        if (is4p) {
-          if (played === 0) {
-            if (tugBaselinesWrap) tugBaselinesWrap.style.width = '75%';
-            if (varPtsBar) {
-              varPtsBar.style.display = 'flex';
-              varPtsBar.style.width = '25%';
-              setText('variantPtsBarText', '25.0%');
-            }
-            if (baseSeg1) {
-              baseSeg1.style.display = 'flex';
-              baseSeg1.style.width = '100%';
-              setText('baseSeg1Text', 'BASELINES 75.0%');
-            }
-            if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
-            if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
-          } else {
-            if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${baseWS}%`;
-            if (varPtsBar) {
-              if (varWS <= 0) {
-                varPtsBar.style.display = 'none';
-                varPtsBar.style.width = '0%';
-              } else {
-                varPtsBar.style.display = 'flex';
-                varPtsBar.style.width = `${varWS}%`;
-                setText('variantPtsBarText', varWS > 6 ? `${varWS.toFixed(1)}%` : '');
-              }
-            }
-            if (data.snakes_list && data.snakes_list.length > 0) {
-              const baseSnakes = data.snakes_list.filter(s => !s.is_variant);
-              const totalBasePts = baseSnakes.reduce((acc, s) => acc + (s.points || 0), 0);
-              if (totalBasePts <= 0) {
-                baseSegs.forEach(seg => {
-                  if (seg) {
-                    seg.style.display = 'none';
-                    seg.style.width = '0%';
-                  }
-                });
-              } else if (baseSnakes.length === 1) {
-                if (baseSeg1) {
-                  baseSeg1.style.display = 'flex';
-                  baseSeg1.style.width = '100%';
-                  setText('baseSeg1Text', baseWS > 6 ? `Base ${baseWS.toFixed(1)}%` : '');
-                }
-                if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
-                if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
-              } else {
-                baseSegs.forEach((seg, i) => {
-                  if (seg && baseSnakes[i]) {
-                    const pts = baseSnakes[i].points || 0;
-                    if (pts <= 0) {
-                      seg.style.display = 'none';
-                      seg.style.width = '0%';
-                    } else {
-                      const wPct = (pts / totalBasePts) * 100;
-                      seg.style.display = 'flex';
-                      seg.style.width = `${wPct}%`;
-                      setText(`baseSeg${i + 1}Text`, (baseWS * (wPct / 100)) > 7 ? `B${i + 1} ${(baseSnakes[i].win_share).toFixed(1)}%` : '');
-                    }
-                  }
-                });
-              }
-            }
-          }
-        } else {
-          if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${baseWS}%`;
-          if (varPtsBar) {
-            if (played > 0 && varWS <= 0) {
-              varPtsBar.style.display = 'none';
-              varPtsBar.style.width = '0%';
-            } else {
-              varPtsBar.style.display = 'flex';
-              varPtsBar.style.width = `${varWS}%`;
-              setText('variantPtsBarText', varWS > 6 ? `${varWS.toFixed(1)}%` : '');
-            }
-          }
-          if (baseSeg1) {
-            if (played > 0 && baseWS <= 0) {
-              baseSeg1.style.display = 'none';
-              baseSeg1.style.width = '0%';
-            } else {
-              baseSeg1.style.display = 'flex';
-              baseSeg1.style.width = '100%';
-              setText('baseSeg1Text', baseWS > 6 ? `${baseWS.toFixed(1)}%` : '');
-            }
-          }
-          if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
-          if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
-        }
-        const maxG = data.target_games || data.max_games || 300;
-        setText('runsValue', `${played} / ${maxG} Games`);
-        const pctComplete = maxG > 0 ? ((played / maxG) * 100).toFixed(1) : 0;
-        setWidth('runsProgress', pctComplete);
-      }
-      // Runs Card & ETA Calculation
-      const maxG = data.target_games || data.max_games || 300;
-      const pctComplete = maxG > 0 ? ((played / maxG) * 100).toFixed(1) : 0;
-      const remainingGames = Math.max(0, maxG - played);
-
-      if (data.status === 'FINISHED' || data.status === 'STOPPED' || remainingGames === 0) {
-        setText('runsSubtext', `${pctComplete}% Complete (${data.status === 'STOPPED' ? 'Stopped' : 'Done'})`);
-      } else if (data.status === 'DISCONNECTED') {
-        setText('runsSubtext', `${pctComplete}% Complete (Disconnected)`);
-      } else if (data.eta_seconds != null && data.eta_seconds > 0 && isRunning) {
-        const etaText = formatSeconds(data.eta_seconds);
-        setText('runsSubtext', `${pctComplete}% Complete (~${etaText} left)`);
-        const subEl = document.getElementById('runsSubtext');
-        if (subEl && data.eta_breakdown && data.eta_breakdown.length > 0) {
-          subEl.title = 'Total Run ETA: ' + data.eta_breakdown.map(b => `${b.mode}: ${b.games_left}G (~${formatSeconds(b.eta_seconds)})`).join(' | ');
-        }
-      } else if (pace > 0 && isRunning) {
-        const etaSec = remainingGames / pace;
-        setText('runsSubtext', `${pctComplete}% Complete (~${formatSeconds(etaSec)} left)`);
+      if (runType === 'depth') {
+        updateDepthHero(data);
+      } else if (runType === 'pool') {
+        updatePoolHero(data);
       } else {
-        setText('runsSubtext', `${pctComplete}% Complete`);
+        updateSelfHero(data);
       }
 
-      // Banner (only show when test is finished with final recommendation, stopped, or disconnected)
-      const banner = document.getElementById('decisionBanner');
-      const bannerTitle = document.getElementById('bannerTitle');
-      const bannerDesc = document.getElementById('bannerDesc');
+      updateRunsCard(data, isRunning, modeElapsed);
+      updateDecisionBanner(data, isRunning, is4p, varWS, varPts, targetStr, played, maxG);
+      updateDepthUI(data);
+      updatePoolUI(data);
+      updateHistoryTable(data);
 
-      if (banner) {
-        if (data.status === 'IDLE' || data.status === 'WAITING') {
-          banner.style.display = 'none';
-        } else if (data.status === 'DISCONNECTED') {
-          if (banner.style.display !== 'flex') banner.style.display = 'flex';
-          if (banner.className !== 'banner revert') banner.className = 'banner revert';
-          setHTML(bannerTitle, '⚠️ DISCONNECTED');
-          setText(bannerDesc, `${data.stop_reason || 'The simulation runner is not active.'} Paused at ${played}/${maxG} games.`);
-        } else if (data.status === 'FINISHED' || data.status === 'STOPPED') {
-          if (banner.style.display !== 'flex') banner.style.display = 'flex';
-          const targetStr = is4p ? '25.0% Individual Parity' : '50.0% Parity';
-          if (data.stop_type === 'MANUAL_ABORT' || data.status === 'STOPPED') {
-            if (banner.className !== 'banner info') banner.className = 'banner info';
-            setHTML(bannerTitle, '⏹️ TEST STOPPED / CANCELLED');
-            setText(bannerDesc, `${data.stop_reason || 'Simulation run stopped by user.'} Progress: ${played}/${maxG} games played.`);
-          } else if (data.stop_type === 'USER_SKIPPED' || data.recommendation === 'SKIPPED') {
-            if (banner.className !== 'banner info') banner.className = 'banner info';
-            setHTML(bannerTitle, '⏭️ TEST SKIPPED BY USER');
-            setText(bannerDesc, `${data.stop_reason || 'Simulation mode skipped by user.'} Progress: ${played}/${maxG} games played.`);
-          } else if (runType === 'pool') {
-            const pDelta = (data.pool_data && data.pool_data.delta != null) ? data.pool_data.delta : 0.0;
-            const pZ = (data.pool_data && data.pool_data.z_score != null) ? data.pool_data.z_score : 0.0;
-            if (data.recommendation === 'KEEP') {
-              if (banner.className !== 'banner keep') banner.className = 'banner keep';
-              setHTML(bannerTitle, '🎉 RECOMMENDATION: KEEP VARIANT (POOL GATE PASSED)');
-              setText(bannerDesc, `${data.stop_reason || ''} Candidate out-performed baseline vs pool (Δ: ${pDelta >= 0 ? '+' : ''}${pDelta.toFixed(1)}%, z = ${pZ >= 0 ? '+' : ''}${pZ.toFixed(2)} >= +1.645).`);
-            } else if (data.recommendation === 'PARITY') {
-              if (banner.className !== 'banner parity') banner.className = 'banner parity';
-              setHTML(bannerTitle, '🟡 RECOMMENDATION: PARITY (POOL GATE CONFIRMED)');
-              setText(bannerDesc, `${data.stop_reason || ''} Candidate performed within statistical parity of baseline vs pool (Δ: ${pDelta >= 0 ? '+' : ''}${pDelta.toFixed(1)}%, z = ${pZ >= 0 ? '+' : ''}${pZ.toFixed(2)}).`);
-            } else {
-              if (banner.className !== 'banner revert') banner.className = 'banner revert';
-              setHTML(bannerTitle, '⚠️ RECOMMENDATION: REVERT VARIANT (POOL GATE FAILED)');
-              setText(bannerDesc, `${data.stop_reason || ''} Candidate underperformed baseline vs pool (Δ: ${pDelta >= 0 ? '+' : ''}${pDelta.toFixed(1)}%, z = ${pZ >= 0 ? '+' : ''}${pZ.toFixed(2)} <= -1.645).`);
-            }
-          } else if (runType === 'depth') {
-            const dDelta = (data.depth_data && data.depth_data.delta_depth != null) ? data.depth_data.delta_depth : 0.0;
-            const dNps = (data.depth_data && data.depth_data.nps_ratio != null) ? data.depth_data.nps_ratio : 1.0;
-            if (data.recommendation === 'KEEP' || (data.depth_data && data.depth_data.passed)) {
-              if (banner.className !== 'banner keep') banner.className = 'banner keep';
-              setHTML(bannerTitle, '🎉 RECOMMENDATION: DEPTH BENCHMARK PASSED');
-              setText(bannerDesc, `${data.stop_reason || ''} Variant depth met or exceeded baseline (Δ: ${dDelta >= 0 ? '+' : ''}${dDelta.toFixed(1)} depth, NPS ratio: ${dNps.toFixed(2)}x).`);
-            } else {
-              if (banner.className !== 'banner revert') banner.className = 'banner revert';
-              setHTML(bannerTitle, '⚠️ RECOMMENDATION: DEPTH REGRESSION DETECTED');
-              setText(bannerDesc, `${data.stop_reason || ''} Variant median depth fell below baseline in tested fixtures.`);
-            }
-          } else if (data.recommendation === 'KEEP') {
-            if (banner.className !== 'banner keep') banner.className = 'banner keep';
-            setHTML(bannerTitle, '🎉 RECOMMENDATION: KEEP VARIANT');
-            setText(bannerDesc, `${data.stop_reason || ''} Final Win Share: ${varWS.toFixed(1)}% (${varPts.toFixed(1)} Pts) vs Target: ${targetStr}`);
-          } else if (data.recommendation === 'PARITY') {
-            if (banner.className !== 'banner parity') banner.className = 'banner parity';
-            setHTML(bannerTitle, '🟡 RECOMMENDATION: PARITY (NO REGRESSION)');
-            setText(bannerDesc, `${data.stop_reason || ''} Final Win Share: ${varWS.toFixed(1)}% (${varPts.toFixed(1)} Pts) vs Target: ${targetStr}. Confirmed no regression; suitable for bug fixes and neutral refactors.`);
-          } else {
-            if (banner.className !== 'banner revert') banner.className = 'banner revert';
-            setHTML(bannerTitle, '⚠️ RECOMMENDATION: REVERT VARIANT');
-            setText(bannerDesc, `${data.stop_reason || ''} Final Win Share: ${varWS.toFixed(1)}% (${varPts.toFixed(1)} Pts) vs Target: ${targetStr}`);
-          }
-        } else {
-          if (banner.style.display !== 'none') banner.style.display = 'none';
-        }
-      }
-
-      // Run History Table (Only re-render DOM rows if history list content actually changed)
-      const historyBody = document.getElementById('historyTableBody');
-      const historyCount = document.getElementById('historyCount');
-      if (historyBody) {
-        const historyList = data.run_history || [];
-        const currentHistoryJSON = JSON.stringify(historyList);
-        if (currentHistoryJSON !== lastHistoryJSON) {
-          lastHistoryJSON = currentHistoryJSON;
-          if (historyList.length === 0) {
-            setText(historyCount, '0 runs');
-            setHTML(historyBody, `<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 2rem;">No previous simulation runs recorded.</td></tr>`);
-          } else {
-            const recentHistory = [...historyList].slice(-10).reverse();
-            setText(historyCount, historyList.length < 10 ? `Last ${historyList.length}` : 'Last 10');
-            const rowsHtml = recentHistory.map((run) => {
-              const rec = run.recommendation || 'PENDING';
-              let pillClass = 'draw';
-              let badgeText = rec;
-              if (rec === 'KEEP') {
-                pillClass = 'variant';
-                badgeText = '🎉 KEEP';
-              } else if (rec === 'PARITY') {
-                pillClass = 'parity';
-                badgeText = '🟡 PARITY';
-              } else if (rec === 'REVERT') {
-                pillClass = 'revert';
-                badgeText = '⚠️ REVERT';
-              } else if (rec === 'SKIPPED') {
-                pillClass = 'draw';
-                badgeText = '⏭️ SKIPPED';
-              } else if (rec === 'TEST_FAILURE') {
-                pillClass = 'revert';
-                badgeText = '❌ TEST FAILED';
-              }
-              const rawDesc = run.experiment_desc || run.description || 'Unspecified Experiment';
-              const expDesc = escapeHtml(rawDesc);
-
-              const timeParts = String(run.timestamp || '').split(/[ T]/);
-              const dateStr = timeParts[0] || '-';
-              const timeStr = timeParts[1] || '';
-              const timeCell = timeStr 
-                ? `<div style="line-height: 1.25;"><div>${dateStr}</div><div style="color: var(--text-muted); font-size: 0.76rem;">${timeStr}</div></div>`
-                : dateStr;
-
-              // Helper to resolve mode stats from matrix_results or legacy run fields
-              const getModeData = (modeKey) => {
-                if (run.matrix_results && Array.isArray(run.matrix_results)) {
-                  const m = run.matrix_results.find(item => item.mode === modeKey);
-                  if (m) {
-                    const ws = (typeof m.var_win_share === 'number') ? m.var_win_share : null;
-                    const games = m.total_played || m.games || 0;
-                    const dec = m.decision || (m.passed ? 'KEEP' : 'FAILED');
-                    return { winShare: ws, games: games, decision: dec };
-                  }
-                }
-                // Legacy fallback for single-mode runs
-                if (run.game_mode === modeKey || (modeKey === 'duel' && run.num_snakes === 2) || (modeKey === 'standard' && (!run.game_mode || run.game_mode === 'standard'))) {
-                  if (run.variant) {
-                    const ws = (typeof run.variant.win_share === 'number') ? run.variant.win_share : (typeof run.variant.rate === 'number' ? run.variant.rate : null);
-                    const games = run.total_games || 0;
-                    const dec = run.recommendation || '';
-                    return { winShare: ws, games: games, decision: dec };
-                  }
-                }
-                return null;
-              };
-
-              const renderModeCell = (modeData, target) => {
-                if (!modeData || modeData.winShare == null) {
-                  return `<div style="color: var(--text-muted); font-size: 0.85rem;">—</div>`;
-                }
-                const ws = modeData.winShare;
-                const dec = modeData.decision;
-                let color = 'var(--text-main)';
-                if (dec === 'KEEP' || ws >= target + 0.5) {
-                  color = 'var(--variant-color)';
-                } else if (dec === 'PARITY' || (ws >= target - 3.0 && ws <= target + 3.0)) {
-                  color = '#f59e0b';
-                } else if (dec === 'REVERT' || dec === 'FAILED' || ws < target - 3.0) {
-                  color = 'var(--danger-color)';
-                } else if (dec === 'SKIPPED') {
-                  color = '#fbbf24';
-                }
-                const gStr = modeData.games > 0 ? `${modeData.games}G` : '';
-                return `
-                  <div style="line-height: 1.25;">
-                    <div style="font-weight: 700; color: ${color}; font-size: 0.92rem;">${ws.toFixed(1)}%</div>
-                    <div style="color: var(--text-muted); font-size: 0.72rem;">${gStr}${gStr && dec ? ' • ' : ''}${dec ? dec : ''}</div>
-                  </div>
-                `;
-              };
-
-              const constCell = renderModeCell(getModeData('constrictor'), 25.0);
-              const royaleCell = renderModeCell(getModeData('royale'), 25.0);
-              const duelCell = renderModeCell(getModeData('duel'), 50.0);
-              const standardCell = renderModeCell(getModeData('standard'), 25.0);
-
-              return `
-                <tr>
-                  <td style="white-space: nowrap; min-width: 85px; text-align: left;">${timeCell}</td>
-                  <td class="col-desc" style="font-weight: 600; color: var(--text-main); font-size: 0.85rem; text-align: left;">
-                    ${expDesc}
-                    <span class="tooltip-text">${expDesc}</span>
-                  </td>
-                  <td style="white-space: nowrap; min-width: 80px; text-align: center;">${constCell}</td>
-                  <td style="white-space: nowrap; min-width: 80px; text-align: center;">${royaleCell}</td>
-                  <td style="white-space: nowrap; min-width: 80px; text-align: center;">${duelCell}</td>
-                  <td style="white-space: nowrap; min-width: 80px; text-align: center;">${standardCell}</td>
-                  <td style="white-space: nowrap; min-width: 85px; text-align: center;"><span class="winner-pill ${pillClass}">${badgeText}</span></td>
-                </tr>
-              `;
-            }).join('');
-            setHTML(historyBody, rowsHtml);
-          }
-        }
-      }
     } catch (e) {
       console.error('Dashboard update error:', e);
       const statusDot = document.getElementById('statusDot');
@@ -3137,6 +3548,15 @@ class DashboardClient:
         payload = {"action": "update_depth_position"}
         payload.update(kwargs)
         self.post_update(payload)
+
+    def update_unit_tests(self, status: str = "PASSED", passed: int = 40, total: int = 40, details: str = ""):
+        self.post_update({
+            "action": "update_unit_tests",
+            "status": status,
+            "passed": passed,
+            "total": total,
+            "details": details,
+        }, sync=True)
 
     def finish_depth(self, **kwargs):
         payload = {"action": "finish_depth"}

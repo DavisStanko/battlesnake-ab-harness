@@ -2351,10 +2351,14 @@ def run_ab_test_engine(
             test_strategy = None
 
     if test_strategy and hasattr(test_strategy, "run_variant_unit_tests"):
+        if dash_client is not None:
+            dash_client.update_unit_tests(status="RUNNING")
         passed, test_msg = test_strategy.run_variant_unit_tests()
         if not passed:
             print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
             print(f"     Details: {test_msg}\n")
+            if dash_client is not None:
+                dash_client.update_unit_tests(status="FAILED", details=test_msg)
             stop_type = "TEST_FAILURE"
             stop_reason = f"Unit test suite failed: {test_msg}"
             recommendation = "TEST_FAILURE"
@@ -2369,8 +2373,12 @@ def run_ab_test_engine(
             dash_client.set_finished(stop_type, stop_reason, recommendation, str(history_path))
             print_summary(0, results, stop_type, stop_reason, history_path, experiment_desc=desc, recommendation=recommendation)
             return
+        if dash_client is not None:
+            dash_client.update_unit_tests(status="PASSED", details=test_msg)
         print("  [✓] Strategy variant passed all tactical unit tests.\n")
     else:
+        if dash_client is not None:
+            dash_client.update_unit_tests(status="PASSED", details="Tactical unit tests skipped (standalone harness mode)")
         print("  [✓] No tactical unit tests registered (standalone harness mode).\n")
 
     # ── Pre-flight Binary Smoke Test (skippable via --skip-smoke) ──
@@ -2776,13 +2784,21 @@ def run_pool_benchmark(
                 test_strategy = None
 
         if test_strategy and hasattr(test_strategy, "run_variant_unit_tests"):
+            if dash_client is not None:
+                dash_client.update_unit_tests(status="RUNNING")
             passed, test_msg = test_strategy.run_variant_unit_tests()
             if not passed:
+                if dash_client is not None:
+                    dash_client.update_unit_tests(status="FAILED", details=test_msg)
                 print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
                 print(f"     Details: {test_msg}\n")
                 sys.exit(1)
+            if dash_client is not None:
+                dash_client.update_unit_tests(status="PASSED", details=test_msg)
             print("  [✓] Strategy variant passed all tactical unit tests.\n")
         else:
+            if dash_client is not None:
+                dash_client.update_unit_tests(status="PASSED", details="Tactical unit tests skipped (standalone harness mode)")
             print("  [✓] Tactical unit tests skipped (standalone harness mode).\n")
     else:
         print("  [i] Pre-flight unit tests skipped via --skip-smoke.\n")

@@ -408,7 +408,7 @@ class TestDashboardServerRendering(unittest.TestCase):
             self.assertIn("depthAgreeValue", html)
             self.assertIn("depthTableBody", html)
             self.assertIn("poolOpponentsTableBody", html)
-            self.assertIn("runTypeBadge", html)
+            self.assertIn("pipelineCard", html)
 
             # 2. Test Pool State update
             state.handle_update({
