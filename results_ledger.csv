@@ -1,3 +1,0 @@
-date,description,self-play delta if run,pool delta per mode,decision
-2026-10-20 18:41:34,20-game pool test run,,duel: -20.0% (z=-2.18),REVERT
-2026-10-20 19:08:15,Test Skip,"constrictor: +0.0%, royale: +1.0%",,PARITY
