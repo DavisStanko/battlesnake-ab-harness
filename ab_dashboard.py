@@ -2296,16 +2296,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       const subtext = document.getElementById('headerSubtext');
       if (subtext) {
-        if (data.status === 'IDLE') {
-          const newSub = 'Idle: Waiting for benchmark test to start';
-          if (subtext.innerText !== newSub) subtext.innerText = newSub;
-          if (subtext.title !== newSub) subtext.title = newSub;
-        } else {
-          const expTitle = data.experiment_desc || 'Unspecified Experiment';
-          const newSub = `Testing: ${expTitle}`;
-          if (subtext.innerText !== newSub) subtext.innerText = newSub;
-          if (subtext.title !== newSub) subtext.title = newSub;
-        }
+        const expTitle = data.experiment_desc || 'Unspecified Experiment';
+        const newSub = `Testing: ${expTitle}`;
+        if (subtext.innerText !== newSub) subtext.innerText = newSub;
+        if (subtext.title !== newSub) subtext.title = newSub;
       }
 
       // Mode Badge
@@ -2343,10 +2337,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const pace = (isRunning && modeElapsed > 0) ? (data.total_played / modeElapsed) : 0;
       if (isRunning) {
         setText('paceValue', `${pace.toFixed(3)} games/sec`);
-      } else if (data.status === 'IDLE' || data.status === 'WAITING') {
-        setText('paceValue', `0.000 games/sec (Idle)`);
       } else {
-        setText('paceValue', `0.000 games/sec (Paused)`);
+        setText('paceValue', `0.000 games/sec`);
       }
 
       // Strategy Names & Lead
@@ -2612,8 +2604,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       if (data.status === 'FINISHED' || data.status === 'STOPPED' || remainingGames === 0) {
         setText('runsSubtext', `${pctComplete}% Complete (${data.status === 'STOPPED' ? 'Stopped' : 'Done'})`);
-      } else if (data.status === 'IDLE' || data.status === 'WAITING') {
-        setText('runsSubtext', `0.0% Complete (Idle - Waiting for test to start)`);
       } else if (data.status === 'DISCONNECTED') {
         setText('runsSubtext', `${pctComplete}% Complete (Disconnected)`);
       } else if (data.eta_seconds != null && data.eta_seconds > 0 && isRunning) {
