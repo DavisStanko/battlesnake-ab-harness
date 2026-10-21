@@ -253,32 +253,36 @@ class TestDashboardSkip(unittest.TestCase):
     def test_draw_rounding_and_formatting(self):
         from ab_test import save_run_history
         import json
+        import tempfile
+        from pathlib import Path
 
         # Fractional draws in 4-player game (e.g. 1 draw shared amongst 3 baselines = 0.3333333333333333)
         results = {
             "baseline": {"wins": 1, "losses": 2, "draws": 0.3333333333333333},
             "variant": {"wins": 2, "losses": 1, "draws": 0.25},
         }
-        hist_path = save_run_history(
-            "baseline", "variant", 3, results,
-            "TEST_COMPLETE", "Completed test", "KEEP",
-            experiment_desc="Test Draw Rounding",
-            matrix_results=[
-                {
-                    "mode": "royale",
-                    "results": {
-                        "baseline": {"wins": 1, "losses": 2, "draws": 1.6666666666666667},
-                        "variant": {"wins": 2, "losses": 1, "draws": 0.25},
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hist_path = save_run_history(
+                "baseline", "variant", 3, results,
+                "TEST_COMPLETE", "Completed test", "KEEP",
+                experiment_desc="Test Draw Rounding",
+                results_dir=Path(tmpdir),
+                matrix_results=[
+                    {
+                        "mode": "royale",
+                        "results": {
+                            "baseline": {"wins": 1, "losses": 2, "draws": 1.6666666666666667},
+                            "variant": {"wins": 2, "losses": 1, "draws": 0.25},
+                        }
                     }
-                }
-            ]
-        )
-        with open(hist_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        last_entry = data[-1]
-        self.assertEqual(last_entry["baseline"]["draws"], 0.33)
-        self.assertEqual(last_entry["variant"]["draws"], 0.25)
-        self.assertEqual(last_entry["matrix_results"][0]["results"]["baseline"]["draws"], 1.67)
+                ]
+            )
+            with open(hist_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            last_entry = data[-1]
+            self.assertEqual(last_entry["baseline"]["draws"], 0.33)
+            self.assertEqual(last_entry["variant"]["draws"], 0.25)
+            self.assertEqual(last_entry["matrix_results"][0]["results"]["baseline"]["draws"], 1.67)
 
     def test_4p_initial_and_zero_win_display(self):
         self.state.handle_update({

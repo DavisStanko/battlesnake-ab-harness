@@ -1139,9 +1139,10 @@ def save_run_history(
     experiment_desc: str = "Unspecified Experiment",
     matrix_results: Optional[List[dict]] = None,
     game_mode: str = "standard",
+    results_dir: Optional[Path] = None,
 ) -> Path:
-    out_dir = PROJECT_ROOT / "ab_results"
-    out_dir.mkdir(exist_ok=True)
+    out_dir = Path(results_dir) if results_dir is not None else (PROJECT_ROOT / "ab_results")
+    out_dir.mkdir(parents=True, exist_ok=True)
     history_file = out_dir / "ab_history.json"
     history_csv_file = out_dir / "ab_history.csv"
 
