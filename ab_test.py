@@ -2482,7 +2482,8 @@ def run_ab_test_engine(
         print("      Testing 12 standard position fixtures (450ms, 5 interleaved repeats per side)...")
         try:
             from harness.depth_test import run_depth_test, format_depth_markdown_table, DEFAULT_FIXTURES_DIR
-            depth_time_ms = int(TIME_BUDGET_SEC * 1000)
+            depth_budget_sec = getattr(strat_baseline, "TIME_BUDGET_SEC", 0.450)
+            depth_time_ms = int(depth_budget_sec * 1000)
             depth_ok, depth_results = run_depth_test(
                 baseline_strat=_baseline_module_name,
                 variant_strat=_variant_module_name,
