@@ -1176,6 +1176,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .header-badges {
       display: flex;
       align-items: center;
+      justify-content: flex-end;
       gap: 0.5rem;
       flex-wrap: nowrap;
       flex-shrink: 0;
@@ -1196,13 +1197,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       flex-shrink: 0;
     }
 
+    .badge-elapsed {
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+    }
+
     #elapsedTime {
       display: inline-block;
-      width: 11ch;
       font-family: 'JetBrains Mono', monospace;
       font-variant-numeric: tabular-nums;
       font-feature-settings: "tnum";
-      text-align: left;
+      text-align: right;
     }
 
     .status-dot {
@@ -2140,7 +2146,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="header-badges">
-      <div class="badge">
+      <div class="badge badge-elapsed">
         ⏱️ <span id="elapsedTime">0s</span>
       </div>
       <div class="badge">
