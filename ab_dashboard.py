@@ -1178,6 +1178,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       flex-shrink: 0;
     }
 
+    #elapsedTime {
+      display: inline-block;
+      width: 11ch;
+      font-family: 'JetBrains Mono', monospace;
+      font-variant-numeric: tabular-nums;
+      font-feature-settings: "tnum";
+      text-align: left;
+    }
+
     .status-dot {
       width: 9px;
       height: 9px;
