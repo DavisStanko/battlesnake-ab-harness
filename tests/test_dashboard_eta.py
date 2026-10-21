@@ -5,6 +5,7 @@ test_dashboard_eta.py — Unit Tests for Multi-Mode Persistent ETA Calculation i
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 import urllib.request
 
@@ -303,12 +304,28 @@ class TestDashboardETA(unittest.TestCase):
 
 
 class TestDashboardServerRendering(unittest.TestCase):
+    def test_idle_state_no_timer_and_no_eta(self):
+        """
+        Verify that when dashboard starts without an active test runner,
+        it enters IDLE state with 0s elapsed time (not ticking) and None for ETA.
+        """
+        state = DashboardState()
+        self.assertEqual(state.status, "IDLE")
+        d = state.to_dict()
+        self.assertEqual(d["status"], "IDLE")
+        self.assertFalse(d["runner_alive"])
+        self.assertEqual(d["elapsed_seconds"], 0.0)
+        self.assertEqual(d["mode_elapsed_seconds"], 0.0)
+        self.assertIsNone(d["eta_seconds"])
+        self.assertEqual(d["eta_breakdown"], [])
+
     def test_dashboard_server_renders_eta_on_ephemeral_port(self):
         """
         Starts a temporary dashboard server on an ephemeral port,
-        initializes synthetic state, queries /api/state and HTML /,
-        and verifies the 1500s ETA is accurately served and rendered.
+        initializes running state, queries /api/state and HTML /,
+        and verifies the 1500s ETA is accurately served and rendered when running.
         """
+        import os
         temp_dir = tempfile.TemporaryDirectory()
         try:
             timings_file = Path(temp_dir.name) / "synthetic_timings.json"
@@ -324,7 +341,10 @@ class TestDashboardServerRendering(unittest.TestCase):
                 strategy_variant="variant",
                 target_games=100,
                 game_mode="standard",
+                status="RUNNING",
             )
+            state.active_pid = os.getpid()
+            state.start_time = time.time()
             state.matrix_progress = [
                 {"mode": "standard", "status": "RUNNING", "games": 0, "max_games": 100},
                 {"mode": "constrictor", "status": "PENDING", "games": 0, "max_games": 200},

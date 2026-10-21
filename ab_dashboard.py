@@ -345,11 +345,12 @@ class DashboardState:
         experiment_desc: str = "Unspecified Experiment",
         game_mode: str = "standard",
         num_snakes: int = 4,
+        status: str = "IDLE",
     ):
         self.lock = threading.RLock()
-        self.status = "RUNNING"
-        self.stop_type = "IN_PROGRESS"
-        self.stop_reason = ""
+        self.status = status
+        self.stop_type = "IDLE" if status == "IDLE" else "IN_PROGRESS"
+        self.stop_reason = "" if status == "RUNNING" else "No active benchmark running"
         self.active_pid: Optional[int] = None
         self.total_played = 0
         self.target_games = target_games
@@ -410,13 +411,13 @@ class DashboardState:
 
         self.suite_start_time: Optional[float] = None
         self._last_desc: str = experiment_desc
-        self.start_time = time.time()
+        self.start_time: Optional[float] = time.time() if status == "RUNNING" else None
         self.end_time: Optional[float] = None
         self.csv_path = ""
         self.recommendation = "PENDING"
         self.skip_requested: bool = False
         self.last_activity_time = time.time()
-        self.last_game_time: float = time.time()
+        self.last_game_time: float = 0.0
 
     def _init_snakes_stats(self, num_snakes: int, var_name: str, base_name: str) -> Dict[str, Dict[str, int]]:
         return {
@@ -520,10 +521,12 @@ class DashboardState:
             elif action == "update_matrix":
                 self.matrix_progress = payload.get("matrix_progress", self.matrix_progress)
             elif action == "update_game":
-                if self.status == "DISCONNECTED":
+                if self.status in ("DISCONNECTED", "IDLE"):
                     self.status = "RUNNING"
                     self.stop_type = "IN_PROGRESS"
                     self.stop_reason = ""
+                if not self.start_time:
+                    self.start_time = time.time()
                 self.last_game_time = time.time()
                 game_num = payload.get("game_num", 0)
                 seed = payload.get("seed", 0)
@@ -575,6 +578,12 @@ class DashboardState:
                             self.snakes_stats[self.strategy_baseline]["losses"] += 1
             elif action == "init_depth":
                 self.run_type = "depth"
+                self.status = "RUNNING"
+                self.stop_type = "IN_PROGRESS"
+                self.stop_reason = ""
+                self.start_time = time.time()
+                self.last_game_time = time.time()
+                self.end_time = None
                 self.depth_data = {
                     "total_positions": payload.get("total_positions", 12),
                     "completed_positions": 0,
@@ -592,10 +601,12 @@ class DashboardState:
                 }
                 self.target_games = payload.get("total_positions", 12)
             elif action == "update_pool_game":
-                if self.status == "DISCONNECTED":
+                if self.status in ("DISCONNECTED", "IDLE"):
                     self.status = "RUNNING"
                     self.stop_type = "IN_PROGRESS"
                     self.stop_reason = ""
+                if not self.start_time:
+                    self.start_time = time.time()
                 self.last_game_time = time.time()
                 self.total_played += 1
                 c_score = float(payload.get("cand_score", 0.0))
@@ -646,10 +657,12 @@ class DashboardState:
                 if payload.get("opponents"):
                     self.pool_data["opponents"] = payload.get("opponents")
             elif action == "update_depth_position":
-                if self.status == "DISCONNECTED":
+                if self.status in ("DISCONNECTED", "IDLE"):
                     self.status = "RUNNING"
                     self.stop_type = "IN_PROGRESS"
                     self.stop_reason = ""
+                if not self.start_time:
+                    self.start_time = time.time()
                 self.last_game_time = time.time()
                 comp = payload.get("completed_positions", 0)
                 tot = payload.get("total_positions", 12)
@@ -842,14 +855,20 @@ class DashboardState:
                         if not self.end_time:
                             self.end_time = getattr(self, "last_game_time", time.time())
             elif self.status == "RUNNING":
-                # No PID registered; fallback inactivity timer (generous 15 minutes)
-                last_g_time = getattr(self, "last_game_time", self.start_time)
-                if time.time() - last_g_time > 900.0:
-                    self.status = "DISCONNECTED"
-                    self.stop_type = "DISCONNECTED"
-                    self.stop_reason = "No simulation progress received in over 15 minutes (Runner disconnected)."
-                    if not self.end_time:
-                        self.end_time = getattr(self, "last_game_time", time.time())
+                if self.total_played == 0 and self.active_pid is None:
+                    # No active test runner connected
+                    self.status = "IDLE"
+                    self.stop_type = "IDLE"
+                    self.stop_reason = "No active benchmark running"
+                    self.start_time = None
+                else:
+                    last_g_time = getattr(self, "last_game_time", self.start_time)
+                    if last_g_time and (time.time() - last_g_time > 900.0):
+                        self.status = "DISCONNECTED"
+                        self.stop_type = "DISCONNECTED"
+                        self.stop_reason = "No simulation progress received in over 15 minutes (Runner disconnected)."
+                        if not self.end_time:
+                            self.end_time = getattr(self, "last_game_time", time.time())
 
             played = self.total_played
             draw_share = 1.0 / self.num_snakes
@@ -930,26 +949,35 @@ class DashboardState:
                 next_checkpoint_display = "Continuous (z=2.8)"
                 games_to_next = max(0, self.max_games - played)
 
-            now = self.end_time or time.time()
-            suite_start = getattr(self, "suite_start_time", None) or self.start_time
-            suite_elapsed = now - suite_start
-            mode_elapsed = now - self.start_time
+            if self.status == "IDLE" or not self.start_time:
+                suite_elapsed = 0.0
+                mode_elapsed = 0.0
+                eta_info = {"total_eta_seconds": None, "has_history": False, "is_stable": False, "breakdown": []}
+            else:
+                now = self.end_time or time.time()
+                suite_start = getattr(self, "suite_start_time", None) or self.start_time or now
+                suite_elapsed = max(0.0, now - suite_start)
+                mode_start = self.start_time or now
+                mode_elapsed = max(0.0, now - mode_start)
 
-            eta_info = calculate_eta(
-                matrix_progress=live_matrix_progress if live_matrix_progress else self.matrix_progress,
-                current_mode=self.game_mode,
-                current_played=played,
-                current_max_games=self.target_games or self.max_games or 200,
-                current_mode_elapsed=mode_elapsed,
-                run_type=getattr(self, "run_type", "self"),
-                depth_data=getattr(self, "depth_data", None),
-            )
+                if self.status == "RUNNING" and (self.total_played > 0 or self.active_pid is not None):
+                    eta_info = calculate_eta(
+                        matrix_progress=live_matrix_progress if live_matrix_progress else self.matrix_progress,
+                        current_mode=self.game_mode,
+                        current_played=played,
+                        current_max_games=self.target_games or self.max_games or 200,
+                        current_mode_elapsed=mode_elapsed,
+                        run_type=getattr(self, "run_type", "self"),
+                        depth_data=getattr(self, "depth_data", None),
+                    )
+                else:
+                    eta_info = {"total_eta_seconds": None, "has_history": False, "is_stable": False, "breakdown": []}
 
             return {
                 "status": self.status,
                 "stop_type": self.stop_type,
                 "stop_reason": self.stop_reason,
-                "runner_alive": (self.status == "RUNNING"),
+                "runner_alive": (self.status == "RUNNING" and (self.active_pid is not None or self.total_played > 0)),
                 "last_game_time": getattr(self, "last_game_time", self.start_time),
                 "skip_requested": self.skip_requested,
                 "active_pid": self.active_pid,
@@ -2255,6 +2283,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           if (statusDot.style.backgroundColor !== targetColor) statusDot.style.backgroundColor = targetColor;
           if (statusDot.style.animation !== 'pulse 2s infinite') statusDot.style.animation = 'pulse 2s infinite';
           setText(statusText, 'LIVE');
+        } else if (data.status === 'IDLE' || data.status === 'WAITING') {
+          if (statusDot.style.animation !== 'none') statusDot.style.animation = 'none';
+          statusDot.style.backgroundColor = 'var(--draw-color)';
+          setText(statusText, 'IDLE');
         } else {
           if (statusDot.style.animation !== 'none') statusDot.style.animation = 'none';
           statusDot.style.backgroundColor = 'var(--draw-color)';
@@ -2264,10 +2296,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       const subtext = document.getElementById('headerSubtext');
       if (subtext) {
-        const expTitle = data.experiment_desc || 'Unspecified Experiment';
-        const newSub = `Testing: ${expTitle}`;
-        if (subtext.innerText !== newSub) subtext.innerText = newSub;
-        if (subtext.title !== newSub) subtext.title = newSub;
+        if (data.status === 'IDLE') {
+          const newSub = 'Idle: Waiting for benchmark test to start';
+          if (subtext.innerText !== newSub) subtext.innerText = newSub;
+          if (subtext.title !== newSub) subtext.title = newSub;
+        } else {
+          const expTitle = data.experiment_desc || 'Unspecified Experiment';
+          const newSub = `Testing: ${expTitle}`;
+          if (subtext.innerText !== newSub) subtext.innerText = newSub;
+          if (subtext.title !== newSub) subtext.title = newSub;
+        }
       }
 
       // Mode Badge
@@ -2305,6 +2343,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const pace = (isRunning && modeElapsed > 0) ? (data.total_played / modeElapsed) : 0;
       if (isRunning) {
         setText('paceValue', `${pace.toFixed(3)} games/sec`);
+      } else if (data.status === 'IDLE' || data.status === 'WAITING') {
+        setText('paceValue', `0.000 games/sec (Idle)`);
       } else {
         setText('paceValue', `0.000 games/sec (Paused)`);
       }
@@ -2572,6 +2612,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       if (data.status === 'FINISHED' || data.status === 'STOPPED' || remainingGames === 0) {
         setText('runsSubtext', `${pctComplete}% Complete (${data.status === 'STOPPED' ? 'Stopped' : 'Done'})`);
+      } else if (data.status === 'IDLE' || data.status === 'WAITING') {
+        setText('runsSubtext', `0.0% Complete (Idle - Waiting for test to start)`);
       } else if (data.status === 'DISCONNECTED') {
         setText('runsSubtext', `${pctComplete}% Complete (Disconnected)`);
       } else if (data.eta_seconds != null && data.eta_seconds > 0 && isRunning) {
@@ -2585,7 +2627,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const etaSec = remainingGames / pace;
         setText('runsSubtext', `${pctComplete}% Complete (~${formatSeconds(etaSec)} left)`);
       } else {
-        setText('runsSubtext', `${pctComplete}% Complete (Calculating ETA...)`);
+        setText('runsSubtext', `${pctComplete}% Complete`);
       }
 
       // Banner (only show when test is finished with final recommendation, stopped, or disconnected)
@@ -2594,7 +2636,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const bannerDesc = document.getElementById('bannerDesc');
 
       if (banner) {
-        if (data.status === 'DISCONNECTED') {
+        if (data.status === 'IDLE' || data.status === 'WAITING') {
+          banner.style.display = 'none';
+        } else if (data.status === 'DISCONNECTED') {
           if (banner.style.display !== 'flex') banner.style.display = 'flex';
           if (banner.className !== 'banner revert') banner.className = 'banner revert';
           setHTML(bannerTitle, '⚠️ DISCONNECTED');
