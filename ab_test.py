@@ -2354,12 +2354,14 @@ def run_ab_test_engine(
     if test_strategy and hasattr(test_strategy, "run_variant_unit_tests"):
         if dash_client is not None:
             dash_client.update_unit_tests(status="RUNNING")
+        t_unit_start = time.perf_counter()
         passed, test_msg = test_strategy.run_variant_unit_tests()
+        unit_dur = round(time.perf_counter() - t_unit_start, 2)
         if not passed:
             print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
             print(f"     Details: {test_msg}\n")
             if dash_client is not None:
-                dash_client.update_unit_tests(status="FAILED", details=test_msg)
+                dash_client.update_unit_tests(status="FAILED", details=test_msg, duration_sec=unit_dur)
             stop_type = "TEST_FAILURE"
             stop_reason = f"Unit test suite failed: {test_msg}"
             recommendation = "TEST_FAILURE"
@@ -2375,7 +2377,7 @@ def run_ab_test_engine(
             print_summary(0, results, stop_type, stop_reason, history_path, experiment_desc=desc, recommendation=recommendation)
             return
         if dash_client is not None:
-            dash_client.update_unit_tests(status="PASSED", details=test_msg)
+            dash_client.update_unit_tests(status="PASSED", details=test_msg, duration_sec=unit_dur)
         print("  [✓] Strategy variant passed all tactical unit tests.\n")
     else:
         if dash_client is not None:
@@ -2787,15 +2789,17 @@ def run_pool_benchmark(
         if test_strategy and hasattr(test_strategy, "run_variant_unit_tests"):
             if dash_client is not None:
                 dash_client.update_unit_tests(status="RUNNING")
+            t_unit_start = time.perf_counter()
             passed, test_msg = test_strategy.run_variant_unit_tests()
+            unit_dur = round(time.perf_counter() - t_unit_start, 2)
             if not passed:
                 if dash_client is not None:
-                    dash_client.update_unit_tests(status="FAILED", details=test_msg)
+                    dash_client.update_unit_tests(status="FAILED", details=test_msg, duration_sec=unit_dur)
                 print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
                 print(f"     Details: {test_msg}\n")
                 sys.exit(1)
             if dash_client is not None:
-                dash_client.update_unit_tests(status="PASSED", details=test_msg)
+                dash_client.update_unit_tests(status="PASSED", details=test_msg, duration_sec=unit_dur)
             print("  [✓] Strategy variant passed all tactical unit tests.\n")
         else:
             if dash_client is not None:
