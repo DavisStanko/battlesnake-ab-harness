@@ -2113,10 +2113,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="header-badges">
-      <div class="badge" id="headerUnitPill" title="Tactical Safety Suite Status">
-        <span class="status-dot" id="headerUnitDot" style="background-color: var(--draw-color);"></span>
-        <span id="headerUnitText">Unit Tests: Pending</span>
-      </div>
       <div class="badge">
         ⏱️ <span id="elapsedTime">0s</span>
       </div>
@@ -2193,6 +2189,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div id="stageCol-self"><span id="stageStatus-self"></span><span id="stageScore-self"></span><span id="stageMeta-self"></span></div>
       <div id="stageCol-pool"><span id="stageStatus-pool"></span><span id="stageScore-pool"></span><span id="stageMeta-pool"></span></div>
       <span id="headerEtaBadge"><span id="headerEtaText"></span></span>
+      <span id="headerUnitPill"><span id="headerUnitDot"></span><span id="headerUnitText"></span></span>
     </div>
 
     <!-- Stage Detail Panel (Expanded below rail, Requirement 1) -->
@@ -2933,28 +2930,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     setRailSeg('pool', poolStatus, poolDur);
 
-    // Header Unit Tests Pill (Requirement 2)
-    const headerPillDot = document.getElementById('headerUnitDot');
-    const headerPillText = document.getElementById('headerUnitText');
-    if (headerPillDot && headerPillText) {
-      if (unitStatus === 'FAILED') {
-        headerPillDot.style.backgroundColor = 'var(--danger-color)';
-        headerPillDot.style.animation = 'none';
-        headerPillText.innerText = 'Unit Tests: FAILED';
-      } else if (unitStatus === 'DONE') {
-        headerPillDot.style.backgroundColor = 'var(--variant-color)';
-        headerPillDot.style.animation = 'none';
-        headerPillText.innerText = `Unit Tests: ${unitData.passed || 40}/${unitData.total || 40} Passed`;
-      } else if (unitStatus === 'RUNNING') {
-        headerPillDot.style.backgroundColor = '#60a5fa';
-        headerPillDot.style.animation = 'pulse 1.5s infinite';
-        headerPillText.innerText = 'Unit Tests: Running...';
-      } else {
-        headerPillDot.style.backgroundColor = 'var(--draw-color)';
-        headerPillDot.style.animation = 'none';
-        headerPillText.innerText = 'Unit Tests: Pending';
-      }
-    }
+    // Header Unit Tests Pill (Removed: redundant with stage rail and failure banner)
+    const headerPill = document.getElementById('headerUnitPill');
+    if (headerPill) headerPill.style.display = 'none';
 
     // Red Banner on Failure (Requirement 2)
     const failBanner = document.getElementById('unitTestFailBanner');
