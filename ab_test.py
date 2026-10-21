@@ -2340,6 +2340,8 @@ def run_ab_test_engine(
     if not dash_client.is_running():
         sys.exit(f"[!] Fatal error: Failed to connect to dashboard at port {dashboard_port}. An A/B test cannot run without showing in the browser.")
 
+    t_suite_start = time.time()
+
     # ── Step 1: Tactical Unit Tests ──
     print("[1/2] Running strategy safety unit tests on variant...")
     test_strategy = None
@@ -2403,7 +2405,8 @@ def run_ab_test_engine(
     results_dir = PROJECT_ROOT / "ab_results"
     results_dir.mkdir(parents=True, exist_ok=True)
     t_wall_start = time.perf_counter()
-    t_suite_start = time.time()
+    if "t_suite_start" not in locals() or t_suite_start is None:
+        t_suite_start = time.time()
 
     checkpoint_data: Dict[str, Any] = {
         "desc": desc,
@@ -2582,6 +2585,7 @@ def run_ab_test_engine(
             matrix_progress[idx]["win_share"] = res["var_win_share"]
             matrix_progress[idx]["games"] = res["total_played"]
             matrix_progress[idx]["reason"] = res["stop_reason"]
+            matrix_progress[idx]["duration_sec"] = res["duration_sec"]
             dash_client.update_matrix(matrix_progress)
 
             # Early stoppage: ONLY halt remaining matrix modes if a regression is confirmed (REVERT)

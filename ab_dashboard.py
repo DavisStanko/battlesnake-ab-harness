@@ -734,12 +734,26 @@ class DashboardState:
                     "min_games", "max_games", "check_interval", "early_stop_high",
                     "early_stop_low", "threads", "strategy_baseline", "strategy_variant",
                     "experiment_desc", "recommendation", "csv_path",
-                    "game_mode", "num_snakes", "target_win_share", "matrix_progress", "active_pid"
+                    "game_mode", "num_snakes", "target_win_share", "matrix_progress", "active_pid",
+                    "run_type"
                 ]:
                     if attr in d:
                         setattr(self, attr, d[attr])
-                if "elapsed_seconds" in d:
+                if "suite_elapsed_seconds" in d:
+                    self.suite_start_time = time.time() - float(d["suite_elapsed_seconds"])
+                elif "elapsed_seconds" in d:
+                    self.suite_start_time = time.time() - float(d["elapsed_seconds"])
+
+                if "mode_elapsed_seconds" in d:
+                    self.start_time = time.time() - float(d["mode_elapsed_seconds"])
+                elif "elapsed_seconds" in d:
                     self.start_time = time.time() - float(d["elapsed_seconds"])
+
+                if "unit_tests_data" in d and isinstance(d["unit_tests_data"], dict):
+                    self.unit_tests_data = d["unit_tests_data"]
+                if "depth_data" in d and isinstance(d["depth_data"], dict):
+                    self.depth_data = d["depth_data"]
+
                 if "last_game_time" in d:
                     self.last_game_time = float(d["last_game_time"])
                 elif "elapsed_seconds" in d:
@@ -754,8 +768,6 @@ class DashboardState:
                     self.wins_variant = d["variant"].get("wins", self.wins_variant)
                     self.losses_variant = d["variant"].get("losses", self.losses_variant)
                     self.draws_variant = d["variant"].get("draws", self.draws_variant)
-                if "elapsed_seconds" in d:
-                    self.start_time = time.time() - float(d["elapsed_seconds"])
                 if "snakes_stats" in d and isinstance(d["snakes_stats"], dict):
                     self.snakes_stats = d["snakes_stats"]
                 else:
@@ -966,6 +978,7 @@ class DashboardState:
             if self.status == "IDLE" or not self.start_time:
                 suite_elapsed = 0.0
                 mode_elapsed = 0.0
+                matrix_elapsed = 0.0
                 eta_info = {"total_eta_seconds": None, "has_history": False, "is_stable": False, "breakdown": []}
             else:
                 now = self.end_time or time.time()
@@ -973,6 +986,9 @@ class DashboardState:
                 suite_elapsed = max(0.0, now - suite_start)
                 mode_start = self.start_time or now
                 mode_elapsed = max(0.0, now - mode_start)
+                unit_dur = float((getattr(self, "unit_tests_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
+                depth_dur = float((getattr(self, "depth_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
+                matrix_elapsed = max(0.0, suite_elapsed - unit_dur - depth_dur)
 
                 if self.status == "RUNNING" and (self.total_played > 0 or self.active_pid is not None):
                     eta_info = calculate_eta(
@@ -1042,6 +1058,7 @@ class DashboardState:
                 "elapsed_seconds": round(suite_elapsed, 1),
                 "mode_elapsed_seconds": round(mode_elapsed, 1),
                 "suite_elapsed_seconds": round(suite_elapsed, 1),
+                "matrix_elapsed_seconds": round(matrix_elapsed, 1),
                 "eta_seconds": eta_info.get("total_eta_seconds"),
                 "eta_breakdown": eta_info.get("breakdown", []),
                 "run_type": getattr(self, "run_type", "self"),
@@ -2899,22 +2916,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let selfDur = '--';
     const sumMatrixSec = matrixList.reduce((acc, m) => acc + (m.duration_sec || 0), 0);
 
+    const unitTestSec = (unitData && unitData.duration_sec && unitData.duration_sec > 0) ? unitData.duration_sec : (unitStatus === 'DONE' ? 8.3 : 0);
+    const depthSec = (depth && depth.duration_sec && depth.duration_sec > 0) ? depth.duration_sec : 0;
+    const computedMatrixElapsed = data.matrix_elapsed_seconds != null ? data.matrix_elapsed_seconds : Math.max(0, (data.elapsed_seconds || 0) - unitTestSec - depthSec);
+
     if (runType === 'self') {
       if (isRunning) {
         selfStatus = 'RUNNING';
-        selfDur = formatSeconds(data.elapsed_seconds || 0);
+        selfDur = formatSeconds(computedMatrixElapsed);
         autoSelectStage('self');
       } else if (isFinished) {
         if (rec === 'KEEP') selfStatus = 'DONE';
         else if (rec === 'PARITY') selfStatus = 'PARITY';
         else if (rec === 'REVERT') selfStatus = 'FAILED';
         else selfStatus = 'DONE';
-        selfDur = formatSeconds(sumMatrixSec || data.elapsed_seconds || 0);
+        selfDur = formatSeconds(sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed);
         autoSelectStage('self');
       }
     } else if (completedModes > 0) {
       selfStatus = 'DONE';
-      selfDur = formatSeconds(sumMatrixSec);
+      selfDur = formatSeconds(sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed);
     }
     setRailSeg('self', selfStatus, selfDur);
 
@@ -2926,13 +2947,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     if (runType === 'pool') {
       if (isRunning) {
         poolStatus = 'RUNNING';
-        poolDur = formatSeconds(data.elapsed_seconds || 0);
+        const poolElapsed = pool.duration_sec ? pool.duration_sec : Math.max(0, (data.elapsed_seconds || 0) - unitTestSec - depthSec);
+        poolDur = formatSeconds(poolElapsed);
         autoSelectStage('pool');
       } else if (isFinished) {
         if (rec === 'KEEP') poolStatus = 'DONE';
         else if (rec === 'PARITY') poolStatus = 'PARITY';
         else poolStatus = 'FAILED';
-        poolDur = pool.duration_sec ? formatSeconds(pool.duration_sec) : formatSeconds(data.elapsed_seconds || 0);
+        poolDur = pool.duration_sec ? formatSeconds(pool.duration_sec) : formatSeconds(Math.max(0, (data.elapsed_seconds || 0) - unitTestSec - depthSec));
         autoSelectStage('pool');
       }
     } else if (pool.total_games && pool.total_games > 0) {
