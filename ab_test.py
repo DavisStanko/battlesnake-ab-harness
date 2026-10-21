@@ -1141,6 +1141,8 @@ def save_run_history(
     game_mode: str = "standard",
     results_dir: Optional[Path] = None,
     depth_results: Optional[dict] = None,
+    unit_tests_data: Optional[dict] = None,
+    pool_data: Optional[Any] = None,
 ) -> Path:
     out_dir = Path(results_dir) if results_dir is not None else (PROJECT_ROOT / "ab_results")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1197,6 +1199,10 @@ def save_run_history(
         run_entry["matrix_results"] = sanitized_matrix
     if depth_results is not None:
         run_entry["depth_results"] = depth_results
+    if unit_tests_data is not None:
+        run_entry["unit_tests"] = unit_tests_data
+    if pool_data is not None:
+        run_entry["pool_data"] = pool_data
 
     history.append(run_entry)
     history = history[-100:]
@@ -2365,12 +2371,14 @@ def run_ab_test_engine(
         except ImportError:
             test_strategy = None
 
+    unit_tests_result: Optional[Dict[str, Any]] = None
     if test_strategy and hasattr(test_strategy, "run_variant_unit_tests"):
         if dash_client is not None:
             dash_client.update_unit_tests(status="RUNNING")
         t_unit_start = time.perf_counter()
         passed, test_msg = test_strategy.run_variant_unit_tests()
         unit_dur = round(time.perf_counter() - t_unit_start, 2)
+        unit_tests_result = {"status": "PASSED" if passed else "FAILED", "details": test_msg, "duration_sec": unit_dur}
         if not passed:
             print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
             print(f"     Details: {test_msg}\n")
@@ -2385,7 +2393,8 @@ def run_ab_test_engine(
             }
             history_path = save_run_history(
                 STRATEGY_BASELINE, STRATEGY_VARIANT, 0, results,
-                stop_type, stop_reason, recommendation, experiment_desc=desc
+                stop_type, stop_reason, recommendation, experiment_desc=desc,
+                unit_tests_data=unit_tests_result,
             )
             dash_client.set_finished(stop_type, stop_reason, recommendation, str(history_path))
             print_summary(0, results, stop_type, stop_reason, history_path, experiment_desc=desc, recommendation=recommendation)
@@ -2394,6 +2403,7 @@ def run_ab_test_engine(
             dash_client.update_unit_tests(status="PASSED", details=test_msg, duration_sec=unit_dur)
         print("  [✓] Strategy variant passed all tactical unit tests.\n")
     else:
+        unit_tests_result = {"status": "PASSED", "details": "Tactical unit tests skipped (standalone harness mode)"}
         if dash_client is not None:
             dash_client.update_unit_tests(status="PASSED", details="Tactical unit tests skipped (standalone harness mode)")
         print("  [✓] No tactical unit tests registered (standalone harness mode).\n")
@@ -2508,6 +2518,7 @@ def run_ab_test_engine(
             "target_share": m["target_share"],
             "decision": "PENDING",
             "reason": "",
+            "z_score": None,
         }
         for m in active_matrix
     ]
@@ -2631,6 +2642,7 @@ def run_ab_test_engine(
             matrix_progress[idx]["games"] = res["total_played"]
             matrix_progress[idx]["reason"] = res["stop_reason"]
             matrix_progress[idx]["duration_sec"] = res["duration_sec"]
+            matrix_progress[idx]["z_score"] = res.get("z_score")
             dash_client.update_matrix(matrix_progress)
 
             # Early stoppage: ONLY halt remaining matrix modes if a regression is confirmed (REVERT)
@@ -2698,6 +2710,7 @@ def run_ab_test_engine(
         matrix_results=matrix_results,
         game_mode=modes,
         depth_results=depth_results,
+        unit_tests_data=unit_tests_result,
     )
 
     dash_client.set_finished(overall_stop_type, overall_stop_reason, overall_recommendation, str(history_path))
@@ -2826,6 +2839,7 @@ def run_pool_benchmark(
     ]
 
     # Step 1: Tactical unit tests
+    unit_tests_result: Optional[Dict[str, Any]] = None
     if not skip_smoke:
         print("[1/2] Running strategy safety unit tests on variant...")
         test_strategy = None
@@ -2843,6 +2857,7 @@ def run_pool_benchmark(
             t_unit_start = time.perf_counter()
             passed, test_msg = test_strategy.run_variant_unit_tests()
             unit_dur = round(time.perf_counter() - t_unit_start, 2)
+            unit_tests_result = {"status": "PASSED" if passed else "FAILED", "details": test_msg, "duration_sec": unit_dur}
             if not passed:
                 if dash_client is not None:
                     dash_client.update_unit_tests(status="FAILED", details=test_msg, duration_sec=unit_dur)
@@ -2853,10 +2868,12 @@ def run_pool_benchmark(
                 dash_client.update_unit_tests(status="PASSED", details=test_msg, duration_sec=unit_dur)
             print("  [✓] Strategy variant passed all tactical unit tests.\n")
         else:
+            unit_tests_result = {"status": "PASSED", "details": "Tactical unit tests skipped (standalone harness mode)"}
             if dash_client is not None:
                 dash_client.update_unit_tests(status="PASSED", details="Tactical unit tests skipped (standalone harness mode)")
             print("  [✓] Tactical unit tests skipped (standalone harness mode).\n")
     else:
+        unit_tests_result = {"status": "PASSED", "details": "Pre-flight unit tests skipped via --skip-smoke"}
         print("  [i] Pre-flight unit tests skipped via --skip-smoke.\n")
 
     print("[2/2] Executing External Pool Evaluation Suite...")
@@ -3120,6 +3137,24 @@ def run_pool_benchmark(
     )
     print(f"  Results Ledger:   Appended row to {ledger_path.resolve()}")
     print("=" * 80 + "\n")
+
+    history_path = save_run_history(
+        strategy_baseline=baseline_module,
+        strategy_variant=variant_module,
+        total_games=sum(m["games"] for m in all_mode_stats),
+        results={
+            baseline_module: {"wins": 0, "losses": 0, "draws": 0},
+            variant_module: {"wins": 0, "losses": 0, "draws": 0},
+        },
+        stop_type=overall_decision,
+        stop_reason=overall_reason,
+        recommendation=overall_decision,
+        experiment_desc=desc,
+        matrix_results=None,
+        game_mode=modes,
+        unit_tests_data=unit_tests_result,
+        pool_data=all_mode_stats,
+    )
 
     if dash_client is not None:
         dash_client.set_finished(

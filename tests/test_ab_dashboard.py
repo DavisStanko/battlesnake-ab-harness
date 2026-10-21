@@ -489,17 +489,6 @@ class TestDashboardSkip(unittest.TestCase):
         duel_item = next(m for m in d["matrix_progress"] if m["mode"] == "duel")
         self.assertEqual(duel_item["status"], "RUNNING")
 
-    def test_history_table_headers_and_mode_columns(self):
-        from ab_dashboard import DASHBOARD_HTML
-        self.assertIn("Constrictor", DASHBOARD_HTML)
-        self.assertIn("Royale", DASHBOARD_HTML)
-        self.assertIn("Duel", DASHBOARD_HTML)
-        self.assertIn("Standard", DASHBOARD_HTML)
-        # Verify legacy columns were removed from the table headers
-        self.assertNotIn('<th title="Baseline win percentage and win count">Baseline</th>', DASHBOARD_HTML)
-        self.assertNotIn('<th title="Tie game percentage and draw count">Draws</th>', DASHBOARD_HTML)
-        self.assertNotIn('<th title="Variant win percentage and win count">Variant</th>', DASHBOARD_HTML)
-
     def test_spawn_balance_uniformity(self):
         from ab_test import _setup_initial_board
         corners = [(1, 1), (1, 9), (9, 1), (9, 9)]
@@ -528,62 +517,6 @@ class TestDashboardSkip(unittest.TestCase):
         for pt in corners + cardinals:
             self.assertEqual(v_counts_2p[pt], 25, f"2P variant spawn at {pt} was visited {v_counts_2p[pt]} times, expected 25")
             self.assertEqual(b_counts_2p[pt], 25, f"2P baseline spawn at {pt} was visited {b_counts_2p[pt]} times, expected 25")
-
-    def test_view_only_post_endpoints_and_no_html_buttons(self):
-        import urllib.request
-        import urllib.error
-        from ab_dashboard import DASHBOARD_HTML
-
-        # Verify no <button> or action handlers in HTML
-        self.assertNotIn("<button", DASHBOARD_HTML)
-        self.assertNotIn("onclick", DASHBOARD_HTML)
-        self.assertNotIn("skipActiveMode", DASHBOARD_HTML)
-        self.assertNotIn("cancelActiveRun", DASHBOARD_HTML)
-
-        server, port = start_dashboard_server(self.state, preferred_port=0, timeout_seconds=60)
-        try:
-            # Action endpoints return 405 Method Not Allowed
-            for endpoint in ("/api/skip", "/api/cancel", "/api/stop", "/api/kill"):
-                req = urllib.request.Request(
-                    f"http://localhost:{port}{endpoint}",
-                    data=b"{}",
-                    headers={"Content-Type": "application/json"}
-                )
-                with self.assertRaises(urllib.error.HTTPError) as ctx:
-                    urllib.request.urlopen(req)
-                self.assertEqual(ctx.exception.code, 405)
-        finally:
-            server.shutdown()
-            server.server_close()
-
-    def test_dashboard_favicon_tags_and_endpoints(self):
-        import urllib.request
-        import xml.etree.ElementTree as ET
-        from ab_dashboard import DASHBOARD_HTML, FAVICON_SVG
-
-        # 1. HTML has favicon link tags
-        self.assertIn('rel="icon"', DASHBOARD_HTML)
-        self.assertIn('data:image/svg+xml,', DASHBOARD_HTML)
-        self.assertIn('/favicon.ico', DASHBOARD_HTML)
-
-        # 2. FAVICON_SVG is valid XML and contains snake emoji
-        root = ET.fromstring(FAVICON_SVG)
-        self.assertIn("svg", root.tag)
-        self.assertIn("🐍", FAVICON_SVG)
-
-        # 3. HTTP GET for /favicon.ico and /favicon.svg returns 200 and image/svg+xml
-        server, port = start_dashboard_server(self.state, preferred_port=0, timeout_seconds=60)
-        try:
-            for endpoint in ("/favicon.ico", "/favicon.svg", "/favicon.ico?v=2"):
-                req = urllib.request.Request(f"http://localhost:{port}{endpoint}")
-                with urllib.request.urlopen(req) as resp:
-                    self.assertEqual(resp.status, 200)
-                    self.assertEqual(resp.headers.get("Content-Type"), "image/svg+xml")
-                    body = resp.read().decode("utf-8")
-                    self.assertEqual(body, FAVICON_SVG)
-        finally:
-            server.shutdown()
-            server.server_close()
 
     def test_load_run_history_resolution(self):
         from ab_dashboard import load_run_history

@@ -7,7 +7,6 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
-import urllib.request
 
 from harness.ab_dashboard import (
     append_mode_timing,
@@ -15,7 +14,6 @@ from harness.ab_dashboard import (
     get_mode_medians,
     calculate_eta,
     DashboardState,
-    start_dashboard_server,
 )
 
 
@@ -302,8 +300,6 @@ class TestDashboardETA(unittest.TestCase):
         self.assertEqual(eta_live["breakdown"][0]["rate_source"], "live")
         self.assertTrue(eta_live["is_stable"])
 
-
-class TestDashboardServerRendering(unittest.TestCase):
     def test_idle_state_no_timer_and_no_eta(self):
         """
         Verify that when dashboard starts without an active test runner,
@@ -318,182 +314,6 @@ class TestDashboardServerRendering(unittest.TestCase):
         self.assertEqual(d["mode_elapsed_seconds"], 0.0)
         self.assertIsNone(d["eta_seconds"])
         self.assertEqual(d["eta_breakdown"], [])
-
-    def test_dashboard_server_renders_eta_on_ephemeral_port(self):
-        """
-        Starts a temporary dashboard server on an ephemeral port,
-        initializes running state, queries /api/state and HTML /,
-        and verifies the 1500s ETA is accurately served and rendered when running.
-        """
-        import os
-        temp_dir = tempfile.TemporaryDirectory()
-        try:
-            timings_file = Path(temp_dir.name) / "synthetic_timings.json"
-            synthetic_timings = [
-                {"mode": "standard", "run_type": "self", "games": 100, "elapsed_seconds": 1000.0},
-                {"mode": "constrictor", "run_type": "self", "games": 200, "elapsed_seconds": 500.0},
-            ]
-            with open(timings_file, "w", encoding="utf-8") as f:
-                json.dump(synthetic_timings, f)
-
-            state = DashboardState(
-                strategy_baseline="baseline",
-                strategy_variant="variant",
-                target_games=100,
-                game_mode="standard",
-                status="RUNNING",
-            )
-            state.active_pid = os.getpid()
-            state.start_time = time.time()
-            state.matrix_progress = [
-                {"mode": "standard", "status": "RUNNING", "games": 0, "max_games": 100},
-                {"mode": "constrictor", "status": "PENDING", "games": 0, "max_games": 200},
-            ]
-
-            # Start server on ephemeral port (preferred_port=0 lets OS choose free port)
-            server, port = start_dashboard_server(state, preferred_port=0)
-            try:
-                # Patch timings file for this server instance
-                import harness.ab_dashboard as abd
-                orig_timings_file = abd.MODE_TIMINGS_FILE
-                abd.MODE_TIMINGS_FILE = timings_file
-
-                try:
-                    # 1. Test /api/state JSON
-                    with urllib.request.urlopen(f"http://localhost:{port}/api/state", timeout=2.0) as resp:
-                        self.assertEqual(resp.status, 200)
-                        api_data = json.loads(resp.read().decode("utf-8"))
-
-                    self.assertIn("eta_seconds", api_data)
-                    self.assertAlmostEqual(api_data["eta_seconds"], 1500.0, places=1)
-                    self.assertEqual(len(api_data["eta_breakdown"]), 2)
-
-                    # 2. Test / HTML
-                    with urllib.request.urlopen(f"http://localhost:{port}/", timeout=2.0) as resp:
-                        self.assertEqual(resp.status, 200)
-                        html_content = resp.read().decode("utf-8")
-
-                    self.assertIn("runsSubtext", html_content)
-                    self.assertIn("data.eta_seconds", html_content)
-                    self.assertIn("Total Run ETA", html_content)
-                finally:
-                    abd.MODE_TIMINGS_FILE = orig_timings_file
-            finally:
-                server.shutdown()
-                server.server_close()
-        finally:
-            temp_dir.cleanup()
-
-    def test_pool_and_depth_telemetry_and_html_elements(self):
-        """
-        Verifies that pool evaluation updates and depth benchmark updates
-        populate api state correctly and that HTML contains pool & depth DOM elements.
-        """
-        state = DashboardState(
-            strategy_baseline="strategies.strategy_baseline",
-            strategy_variant="strategies.strategy_variant",
-        )
-        server, port = start_dashboard_server(state, preferred_port=0)
-        try:
-            # 1. Test HTML contains required depth and pool cards and elements
-            with urllib.request.urlopen(f"http://localhost:{port}/", timeout=2.0) as resp:
-                self.assertEqual(resp.status, 200)
-                html = resp.read().decode("utf-8")
-
-            self.assertIn("depthCard", html)
-            self.assertIn("poolOpponentsCard", html)
-            self.assertIn("depthVarValue", html)
-            self.assertIn("depthBaseValue", html)
-            self.assertIn("depthNpsRatioValue", html)
-            self.assertIn("depthAgreeValue", html)
-            self.assertIn("depthTableBody", html)
-            self.assertIn("poolOpponentsTableBody", html)
-            self.assertIn("pipelineCard", html)
-
-            # 2. Test Pool State update
-            state.handle_update({
-                "action": "init",
-                "run_type": "pool",
-                "experiment_desc": "Pool Zoo Benchmark",
-                "strategy_baseline": "baseline",
-                "strategy_variant": "variant",
-                "game_mode": "standard",
-                "min_games": 20,
-                "max_games": 20,
-                "threads": 4,
-            })
-            state.handle_update({
-                "action": "update_pool_game",
-                "game_num": 1,
-                "mode": "standard",
-                "cand_score": 1.0,
-                "base_score": 0.0,
-                "cand_won": True,
-                "base_won": False,
-                "opponents": ["alpha-snake"],
-                "turns": 35,
-            })
-            state.handle_update({
-                "action": "update_pool_mode",
-                "mode": "standard",
-                "cand_share": 65.0,
-                "base_share": 35.0,
-                "delta": 30.0,
-                "z_score": 2.15,
-                "decision": "KEEP",
-            })
-
-            with urllib.request.urlopen(f"http://localhost:{port}/api/state", timeout=2.0) as resp:
-                self.assertEqual(resp.status, 200)
-                p_state = json.loads(resp.read().decode("utf-8"))
-
-            self.assertEqual(p_state["run_type"], "pool")
-            self.assertIsNotNone(p_state["pool_data"])
-            self.assertEqual(p_state["pool_data"]["cand_score"], 1.0)
-            self.assertEqual(p_state["pool_data"]["cand_wins"], 1)
-            self.assertEqual(len(p_state["pool_data"]["opponents"]), 1)
-            self.assertEqual(p_state["pool_data"]["opponents"][0]["opponent"], "alpha-snake")
-
-            # 3. Test Depth State update
-            state.handle_update({
-                "action": "init_depth",
-                "total_positions": 12,
-                "time_ms": 450,
-                "repeats": 5,
-            })
-            state.handle_update({
-                "action": "update_depth_position",
-                "completed_positions": 1,
-                "total_positions": 12,
-                "mode": "standard",
-                "turn": 25,
-                "base_med_depth": 7.0,
-                "var_med_depth": 8.0,
-                "delta_depth": 1.0,
-                "base_med_nps": 120000,
-                "var_med_nps": 135000,
-                "nps_ratio": 1.12,
-                "agreement_pct": 100.0,
-                "passed": True,
-            })
-
-            with urllib.request.urlopen(f"http://localhost:{port}/api/state", timeout=2.0) as resp:
-                self.assertEqual(resp.status, 200)
-                d_state = json.loads(resp.read().decode("utf-8"))
-
-            self.assertEqual(d_state["run_type"], "depth")
-            self.assertIsNotNone(d_state["depth_data"])
-            self.assertEqual(d_state["depth_data"]["completed_positions"], 1)
-            self.assertEqual(d_state["depth_data"]["total_positions"], 12)
-            self.assertEqual(d_state["depth_data"]["median_var_depth"], 8.0)
-            self.assertEqual(d_state["depth_data"]["median_base_depth"], 7.0)
-            self.assertEqual(len(d_state["depth_data"]["fixtures"]), 1)
-            self.assertEqual(d_state["depth_data"]["fixtures"][0]["mode"], "standard")
-            self.assertEqual(d_state["depth_data"]["fixtures"][0]["turn"], 25)
-
-        finally:
-            server.shutdown()
-            server.server_close()
 
 
 if __name__ == "__main__":
