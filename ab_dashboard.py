@@ -2612,12 +2612,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     // Lead Text
     const leadEl = document.getElementById('leadText');
     const leadTitle = document.getElementById('leadTitle');
+    if (leadTitle) leadTitle.innerText = 'WIN VALUE LEAD';
     if (leadEl) {
       if (is4p) {
-        if (leadTitle) leadTitle.innerText = 'VARIANT vs 25% PARITY';
         const deltaParity = varWS - 25.0;
         if (Math.abs(deltaParity) < 0.05) {
-          setText(leadEl, 'PARITY');
+          setText(leadEl, 'EVEN');
           leadEl.style.color = 'var(--text-main)';
         } else if (deltaParity > 0) {
           setText(leadEl, `+${deltaParity.toFixed(1)}%`);
@@ -2627,7 +2627,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           leadEl.style.color = 'var(--danger-color)';
         }
       } else {
-        if (leadTitle) leadTitle.innerText = 'WIN VALUE LEAD';
         const netPts = varPts - basePts;
         if (Math.abs(netPts) < 0.01) {
           setText(leadEl, 'EVEN');
