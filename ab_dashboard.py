@@ -1052,6 +1052,18 @@ class DashboardState:
                 "experiment_desc": self.experiment_desc
             }
 
+            now = time.time()
+            if not hasattr(self, "_last_disk_dump") or (now - self._last_disk_dump > 2.0):
+                self._last_disk_dump = now
+                try:
+                    with open("/tmp/dashboard_live_state.json.tmp", "w", encoding="utf-8") as f:
+                        json.dump(res, f)
+                    os.replace("/tmp/dashboard_live_state.json.tmp", "/tmp/dashboard_live_state.json")
+                except Exception:
+                    pass
+
+            return res
+
 
 FAVICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text x="50" y="50" dominant-baseline="central" text-anchor="middle" font-size="80">🐍</text></svg>"""
 
@@ -1173,6 +1185,64 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background-color: var(--variant-color);
       box-shadow: 0 0 10px var(--variant-color);
       animation: pulse 1.5s infinite;
+      transition: all 0.2s ease;
+    }
+
+    .badge-status-idle {
+      border-color: rgba(148, 163, 184, 0.25);
+      color: var(--text-muted);
+    }
+    .badge-status-idle .status-dot {
+      background-color: var(--draw-color);
+      box-shadow: none;
+      animation: none;
+    }
+
+    .badge-status-running {
+      border-color: rgba(56, 189, 248, 0.4);
+      background: rgba(56, 189, 248, 0.1);
+      color: #38bdf8;
+    }
+    .badge-status-running .status-dot {
+      background-color: #38bdf8;
+      box-shadow: 0 0 10px #38bdf8;
+      animation: pulse 1.5s infinite;
+    }
+
+    .badge-status-keep {
+      border-color: rgba(16, 185, 129, 0.5);
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--variant-color);
+      font-weight: 700;
+    }
+    .badge-status-keep .status-dot {
+      background-color: var(--variant-color);
+      box-shadow: 0 0 10px var(--variant-color);
+      animation: none;
+    }
+
+    .badge-status-parity {
+      border-color: rgba(245, 158, 11, 0.5);
+      background: rgba(245, 158, 11, 0.15);
+      color: #f59e0b;
+      font-weight: 700;
+    }
+    .badge-status-parity .status-dot {
+      background-color: #f59e0b;
+      box-shadow: 0 0 10px #f59e0b;
+      animation: none;
+    }
+
+    .badge-status-reject {
+      border-color: rgba(239, 68, 68, 0.5);
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--danger-color);
+      font-weight: 700;
+    }
+    .badge-status-reject .status-dot {
+      background-color: var(--danger-color);
+      box-shadow: 0 0 10px var(--danger-color);
+      animation: none;
     }
 
     @keyframes pulse {
@@ -2286,13 +2356,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <!-- Active Run Hero & Progress Section (Visible only during active/finished runs, hidden when idle) -->
   <div id="activeRunHero" style="display: none;">
-    <!-- Decision Status Banner -->
-    <div class="banner idle" id="decisionBanner">
-      <div>
-        <div class="banner-title" id="bannerTitle">⏸️ DECISION: AWAITING TEST</div>
-        <div class="banner-desc" id="bannerDesc">Matrix early-stopping thresholds: KEEP (z >= 1.645 or early stop), PARITY (no regression), REVERT (z <= -1.645).</div>
-      </div>
-    </div>
+    <!-- Hidden compatibility elements -->
+    <div id="decisionBanner" style="display: none;"><span id="bannerTitle"></span><span id="bannerDesc"></span></div>
 
     <!-- Tug-of-War Hero Card -->
     <div class="hero-card" id="heroCard">
@@ -3561,80 +3626,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
 
   function updateDecisionBanner(data, isRunning, is4p, varWS, varPts, targetStr, played, maxG) {
-    const banner = document.getElementById('decisionBanner');
-    const bannerTitle = document.getElementById('bannerTitle');
-    const bannerDesc = document.getElementById('bannerDesc');
-    const runType = data.run_type || 'self';
-
-    if (!banner || !bannerTitle || !bannerDesc) return;
-
-    if (data.status === 'IDLE' || data.status === 'WAITING' || (!isRunning && data.status !== 'FINISHED' && data.status !== 'STOPPED' && data.status !== 'DISCONNECTED')) {
-      banner.className = 'banner idle';
-      setHTML(bannerTitle, '⏸️ DECISION: AWAITING TEST');
-      setText(bannerDesc, 'Matrix early-stopping thresholds: KEEP (z >= 1.645 or early stop), PARITY (no regression), REVERT (z <= -1.645).');
-    } else if (data.status === 'DISCONNECTED') {
-      banner.className = 'banner revert';
-      setHTML(bannerTitle, '⚠️ DISCONNECTED');
-      setText(bannerDesc, `${data.stop_reason || 'The simulation runner is not active.'} Paused at ${played}/${maxG} games.`);
-    } else if (data.status === 'FINISHED' || data.status === 'STOPPED') {
-      if (data.stop_type === 'MANUAL_ABORT' || data.status === 'STOPPED') {
-        banner.className = 'banner info';
-        setHTML(bannerTitle, '⏹️ TEST STOPPED / CANCELLED');
-        setText(bannerDesc, `${data.stop_reason || 'Simulation run stopped by user.'} Progress: ${played}/${maxG} games played.`);
-      } else if (data.stop_type === 'USER_SKIPPED' || data.recommendation === 'SKIPPED') {
-        banner.className = 'banner info';
-        setHTML(bannerTitle, '⏭️ TEST SKIPPED BY USER');
-        setText(bannerDesc, `${data.stop_reason || 'Simulation mode skipped by user.'} Progress: ${played}/${maxG} games played.`);
-      } else if (data.stop_type === 'TEST_FAILURE') {
-        banner.className = 'banner revert';
-        setHTML(bannerTitle, '❌ RECOMMENDATION: TEST FAILURE');
-        setText(bannerDesc, `${data.stop_reason || 'Unit test suite failed for strategy variant.'}`);
-      } else if (runType === 'pool') {
-        const pDelta = (data.pool_data && data.pool_data.delta != null) ? data.pool_data.delta : 0.0;
-        const pZ = (data.pool_data && data.pool_data.z_score != null) ? data.pool_data.z_score : 0.0;
-        if (data.recommendation === 'KEEP') {
-          banner.className = 'banner keep';
-          setHTML(bannerTitle, '🎉 RECOMMENDATION: KEEP VARIANT (POOL GATE PASSED)');
-          setText(bannerDesc, `${data.stop_reason || ''} Candidate out-performed baseline vs pool (Δ: ${pDelta >= 0 ? '+' : ''}${pDelta.toFixed(1)}%, z = ${pZ >= 0 ? '+' : ''}${pZ.toFixed(2)} >= +1.645).`);
-        } else if (data.recommendation === 'PARITY') {
-          banner.className = 'banner parity';
-          setHTML(bannerTitle, '🟡 RECOMMENDATION: PARITY (POOL GATE CONFIRMED)');
-          setText(bannerDesc, `${data.stop_reason || ''} Candidate performed within statistical parity of baseline vs pool (Δ: ${pDelta >= 0 ? '+' : ''}${pDelta.toFixed(1)}%, z = ${pZ >= 0 ? '+' : ''}${pZ.toFixed(2)}).`);
-        } else {
-          banner.className = 'banner revert';
-          setHTML(bannerTitle, '⚠️ RECOMMENDATION: REVERT VARIANT (POOL GATE FAILED)');
-          setText(bannerDesc, `${data.stop_reason || ''} Candidate underperformed baseline vs pool (Δ: ${pDelta >= 0 ? '+' : ''}${pDelta.toFixed(1)}%, z = ${pZ >= 0 ? '+' : ''}${pZ.toFixed(2)} <= -1.645).`);
-        }
-      } else if (runType === 'depth') {
-        const dDelta = (data.depth_data && data.depth_data.delta_depth != null) ? data.depth_data.delta_depth : 0.0;
-        const dNps = (data.depth_data && data.depth_data.nps_ratio != null) ? data.depth_data.nps_ratio : 1.0;
-        if (data.recommendation === 'KEEP' || (data.depth_data && data.depth_data.passed)) {
-          banner.className = 'banner keep';
-          setHTML(bannerTitle, '🎉 RECOMMENDATION: DEPTH BENCHMARK PASSED');
-          setText(bannerDesc, `${data.stop_reason || ''} Variant depth met or exceeded baseline (Δ: ${dDelta >= 0 ? '+' : ''}${dDelta.toFixed(1)} depth, NPS ratio: ${dNps.toFixed(2)}x).`);
-        } else {
-          banner.className = 'banner revert';
-          setHTML(bannerTitle, '⚠️ RECOMMENDATION: DEPTH REGRESSION DETECTED');
-          setText(bannerDesc, `${data.stop_reason || ''} Variant median depth fell below baseline in tested fixtures.`);
-        }
-      } else if (data.recommendation === 'KEEP') {
-        banner.className = 'banner keep';
-        setHTML(bannerTitle, '🎉 RECOMMENDATION: KEEP VARIANT');
-        setText(bannerDesc, `${data.stop_reason || ''} Final Win Share: ${varWS.toFixed(1)}% (${varPts.toFixed(1)} Pts) vs Target: ${targetStr}`);
-      } else if (data.recommendation === 'PARITY') {
-        banner.className = 'banner parity';
-        setHTML(bannerTitle, '🟡 RECOMMENDATION: PARITY (NO REGRESSION)');
-        setText(bannerDesc, `${data.stop_reason || ''} Final Win Share: ${varWS.toFixed(1)}% (${varPts.toFixed(1)} Pts) vs Target: ${targetStr}. Confirmed no regression; suitable for bug fixes and neutral refactors.`);
-      } else {
-        banner.className = 'banner revert';
-        setHTML(bannerTitle, '⚠️ RECOMMENDATION: REVERT VARIANT');
-        setText(bannerDesc, `${data.stop_reason || ''} Final Win Share: ${varWS.toFixed(1)}% (${varPts.toFixed(1)} Pts) vs Target: ${targetStr}`);
-      }
-    } else if (isRunning) {
-      banner.className = 'banner info';
-      setHTML(bannerTitle, '⚡ EVALUATION IN PROGRESS');
-      setText(bannerDesc, 'Accumulating simulation results. Decision will finalize when early stopping threshold is reached or all games complete.');
-    }
+    // Deprecated: Decision card removed in favor of top-header status chip (IDLE, RUNNING, KEEP, PARITY, REJECT)
   }
 
   function updateHistoryTable(data) {
@@ -3765,39 +3757,41 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const runType = data.run_type || 'self';
       const isRunning = (data.status === 'RUNNING' && data.runner_alive !== false);
 
-      // Header Status & Experiment Info
-      const statusDot = document.getElementById('statusDot');
+      // Header Status Chip
+      const statusBadge = document.getElementById('statusBadge');
       const statusText = document.getElementById('statusText');
-      if (statusDot && statusText) {
-        if (data.status === 'FINISHED') {
-          if (statusDot.style.animation !== 'none') statusDot.style.animation = 'none';
-          let targetColor = 'var(--danger-color)';
-          if (data.recommendation === 'KEEP') targetColor = 'var(--variant-color)';
-          else if (data.recommendation === 'PARITY') targetColor = '#f59e0b';
-          if (statusDot.style.backgroundColor !== targetColor) statusDot.style.backgroundColor = targetColor;
-          setText(statusText, data.recommendation === 'KEEP' ? 'KEEP' : (data.recommendation === 'PARITY' ? 'PARITY' : (data.recommendation === 'REVERT' ? 'REVERT' : 'FINISHED')));
+      if (statusBadge && statusText) {
+        let chipStatus = 'idle';
+        let chipLabel = 'IDLE';
+
+        if (isRunning) {
+          chipStatus = 'running';
+          chipLabel = 'RUNNING';
+        } else if (data.status === 'FINISHED' || data.status === 'TEST_FAILURE') {
+          const rec = (data.recommendation || '').toUpperCase();
+          if (rec === 'KEEP') {
+            chipStatus = 'keep';
+            chipLabel = 'KEEP';
+          } else if (rec === 'PARITY') {
+            chipStatus = 'parity';
+            chipLabel = 'PARITY';
+          } else {
+            chipStatus = 'reject';
+            chipLabel = 'REJECT';
+          }
         } else if (data.status === 'DISCONNECTED') {
-          if (statusDot.style.animation !== 'none') statusDot.style.animation = 'none';
-          statusDot.style.backgroundColor = 'var(--danger-color)';
-          setText(statusText, 'DISCONNECTED');
+          chipStatus = 'reject';
+          chipLabel = 'DISCONNECTED';
         } else if (data.status === 'STOPPED') {
-          if (statusDot.style.animation !== 'none') statusDot.style.animation = 'none';
-          statusDot.style.backgroundColor = 'var(--draw-color)';
-          setText(statusText, 'STOPPED');
-        } else if (isRunning) {
-          const targetColor = 'var(--variant-color)';
-          if (statusDot.style.backgroundColor !== targetColor) statusDot.style.backgroundColor = targetColor;
-          if (statusDot.style.animation !== 'pulse 2s infinite') statusDot.style.animation = 'pulse 2s infinite';
-          setText(statusText, 'LIVE');
-        } else if (data.status === 'IDLE' || data.status === 'WAITING') {
-          if (statusDot.style.animation !== 'none') statusDot.style.animation = 'none';
-          statusDot.style.backgroundColor = 'var(--draw-color)';
-          setText(statusText, 'IDLE');
+          chipStatus = 'idle';
+          chipLabel = 'STOPPED';
         } else {
-          if (statusDot.style.animation !== 'none') statusDot.style.animation = 'none';
-          statusDot.style.backgroundColor = 'var(--draw-color)';
-          setText(statusText, String(data.status || 'IDLE').toUpperCase());
+          chipStatus = 'idle';
+          chipLabel = 'IDLE';
         }
+
+        statusBadge.className = `badge badge-status-${chipStatus}`;
+        setText(statusText, chipLabel);
       }
 
       const subtext = document.getElementById('headerSubtext');
@@ -3857,12 +3851,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     } catch (e) {
       console.error('Dashboard update error:', e);
-      const statusDot = document.getElementById('statusDot');
+      const statusBadge = document.getElementById('statusBadge');
       const statusText = document.getElementById('statusText');
-      if (statusDot && statusText) {
-        statusDot.style.animation = 'none';
-        statusDot.style.backgroundColor = 'var(--draw-color)';
-        statusText.innerText = 'DISCONNECTED';
+      if (statusBadge && statusText) {
+        statusBadge.className = 'badge badge-status-reject';
+        setText(statusText, 'DISCONNECTED');
       }
     } finally {
       isUpdating = false;
@@ -4248,12 +4241,15 @@ def main():
     args = parser.parse_args()
 
     state = DashboardState()
-    if args.load_state and os.path.exists(args.load_state):
+    state_file = args.load_state or ("/tmp/dashboard_live_state.json" if os.path.exists("/tmp/dashboard_live_state.json") else "")
+    if state_file and os.path.exists(state_file):
         try:
-            with open(args.load_state, "r", encoding="utf-8") as f:
+            with open(state_file, "r", encoding="utf-8") as f:
                 saved_data = json.load(f)
-            state.handle_update({"action": "restore", "data": saved_data})
-            print(f"[*] Restored dashboard state from {args.load_state}")
+            mtime = os.path.getmtime(state_file)
+            if time.time() - mtime < 3600:
+                state.handle_update({"action": "restore", "data": saved_data})
+                print(f"[*] Restored dashboard state from {state_file}")
         except Exception as e:
             print(f"[!] Failed to restore state: {e}")
 
