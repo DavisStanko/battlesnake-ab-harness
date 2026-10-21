@@ -2139,7 +2139,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="stage-rail-card" id="pipelineCard">
     <div class="stage-rail-header">
       <span class="pipeline-title">⚡ Validation Pipeline</span>
-      <span class="pipeline-subtitle" id="pipelineSubtitle">Ready • 4 Validation Stages</span>
     </div>
     <div class="stage-rail" id="stageRail">
       <div class="stage-segment pending" id="railSegment-unit">
@@ -2199,6 +2198,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div id="stageCol-pool"><span id="stageStatus-pool"></span><span id="stageScore-pool"></span><span id="stageMeta-pool"></span></div>
       <span id="headerEtaBadge"><span id="headerEtaText"></span></span>
       <span id="headerUnitPill"><span id="headerUnitDot"></span><span id="headerUnitText"></span></span>
+      <span id="pipelineSubtitle"></span>
     </div>
 
     <!-- Stage Detail Panel (Expanded below rail, Requirement 1) -->
@@ -2959,14 +2959,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     const headerEtaBadge = document.getElementById('headerEtaBadge');
     if (headerEtaBadge) headerEtaBadge.style.display = 'none';
 
-    // Pipeline Subtitle
+    // Pipeline Subtitle (Removed: redundant with highlighted stage segment)
     const subEl = document.getElementById('pipelineSubtitle');
-    if (subEl) {
-      if (isIdle) subEl.innerText = 'Ready • 4 Validation Stages';
-      else if (isRunning) subEl.innerText = `Live Execution • Stage: ${runType.toUpperCase()}`;
-      else if (isFinished) subEl.innerText = `Validation Complete • Final: ${rec}`;
-      else subEl.innerText = '4 Validation Stages';
-    }
+    if (subEl) subEl.style.display = 'none';
   }
 
   function updatePipelineUI(data) {
