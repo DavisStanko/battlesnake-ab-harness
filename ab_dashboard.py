@@ -153,22 +153,50 @@ def calculate_eta(
     mode_timings: Optional[list] = None,
     timings_path: Optional[Path] = None,
     min_stable_games: int = 20,
+    depth_data: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """
     Computes total ETA across all modes with remaining games:
-    1. For current mode:
+    1. For depth test runs (run_type="depth"):
+       Uses remaining positions * repeats * budget (blended with live position rate).
+    2. For current mode:
        If current_played >= min_stable_games, blends using live rate (mode_elapsed / current_played).
-       Before threshold, uses history median for this mode.
-    2. For modes still to come:
+       Before threshold, uses history median for this mode and run_type (self or pool).
+    3. For modes still to come:
        Uses history median seconds-per-game for that mode and run_type.
-    3. A mode with no history falls back to current mode's rate.
-    4. A run with no history at all behaves exactly as dashboard does now (current mode remaining / pace).
+    4. A mode with no history falls back to current mode's rate.
+    5. A run with no history at all behaves exactly as dashboard does now (current mode remaining / pace).
     """
+    if run_type == "depth":
+        depth_info = depth_data or {}
+        total_pos = depth_info.get("total_positions", 12) or 12
+        completed_pos = depth_info.get("completed_positions", current_played) or current_played
+        rem_pos = max(0, total_pos - completed_pos)
+        time_ms = depth_info.get("time_ms", 450) or 450
+        repeats = depth_info.get("repeats", 5) or 5
+        live_spp = (current_mode_elapsed / completed_pos) if (completed_pos > 0 and current_mode_elapsed > 0) else None
+        budget_spp = (repeats * 2 * time_ms) / 1000.0
+        spg = live_spp if live_spp is not None else budget_spp
+        eta_sec = rem_pos * spg
+        return {
+            "total_eta_seconds": round(eta_sec, 1),
+            "has_history": True,
+            "is_stable": bool(completed_pos >= 2 and live_spp is not None),
+            "breakdown": [{
+                "mode": "depth_fixtures",
+                "games_left": rem_pos,
+                "rate_spg": round(spg, 3),
+                "rate_source": "live" if live_spp is not None else "budget",
+                "eta_seconds": round(eta_sec, 1),
+            }],
+        }
+
     timings = mode_timings if mode_timings is not None else load_mode_timings(timings_path)
     has_any_history = bool(timings and len(timings) > 0)
 
+    effective_min_stable = 10 if run_type == "pool" else min_stable_games
     curr_live_spg = (current_mode_elapsed / current_played) if (current_played > 0 and current_mode_elapsed > 0) else None
-    is_curr_stable = bool(current_played >= min_stable_games and curr_live_spg is not None)
+    is_curr_stable = bool(current_played >= effective_min_stable and curr_live_spg is not None)
 
     # Legacy fallback when no history at all
     if not has_any_history:
@@ -340,6 +368,36 @@ class DashboardState:
         self.matrix_progress = []
         self.run_type = "self"
 
+        self.pool_data: Dict[str, Any] = {
+            "cand_score": 0.0,
+            "base_score": 0.0,
+            "cand_wins": 0,
+            "base_wins": 0,
+            "total_games": 0,
+            "cand_share": 0.0,
+            "base_share": 0.0,
+            "delta": 0.0,
+            "z_score": 0.0,
+            "opponents": [],
+            "opponents_map": {},
+            "mode_stats": {},
+        }
+        self.depth_data: Dict[str, Any] = {
+            "completed_positions": 0,
+            "total_positions": 12,
+            "time_ms": 450,
+            "repeats": 5,
+            "median_var_depth": 0.0,
+            "median_base_depth": 0.0,
+            "delta_depth": 0.0,
+            "nps_ratio": 1.0,
+            "agreement_pct": 100.0,
+            "passed": True,
+            "fixtures": [],
+            "mode_summaries": {},
+            "aggregate": {},
+        }
+
         self.wins_baseline = 0
         self.losses_baseline = 0
         self.draws_baseline = 0
@@ -418,6 +476,35 @@ class DashboardState:
                 self.wins_variant = 0
                 self.losses_variant = 0
                 self.draws_variant = 0
+                self.pool_data = {
+                    "cand_score": 0.0,
+                    "base_score": 0.0,
+                    "cand_wins": 0,
+                    "base_wins": 0,
+                    "total_games": 0,
+                    "cand_share": 0.0,
+                    "base_share": 0.0,
+                    "delta": 0.0,
+                    "z_score": 0.0,
+                    "opponents": [],
+                    "opponents_map": {},
+                    "mode_stats": {},
+                }
+                self.depth_data = {
+                    "completed_positions": 0,
+                    "total_positions": 12,
+                    "time_ms": 450,
+                    "repeats": 5,
+                    "median_var_depth": 0.0,
+                    "median_base_depth": 0.0,
+                    "delta_depth": 0.0,
+                    "nps_ratio": 1.0,
+                    "agreement_pct": 100.0,
+                    "passed": True,
+                    "fixtures": [],
+                    "mode_summaries": {},
+                    "aggregate": {},
+                }
                 self.snakes_stats = self._init_snakes_stats(self.num_snakes, self.strategy_variant, self.strategy_baseline)
                 self.start_time = time.time()
                 explicit_suite = payload.get("suite_start_time")
@@ -486,6 +573,133 @@ class DashboardState:
                             self.snakes_stats[self.strategy_variant]["wins"] += 1
                         if self.strategy_baseline in self.snakes_stats:
                             self.snakes_stats[self.strategy_baseline]["losses"] += 1
+            elif action == "init_depth":
+                self.run_type = "depth"
+                self.depth_data = {
+                    "total_positions": payload.get("total_positions", 12),
+                    "completed_positions": 0,
+                    "time_ms": payload.get("time_ms", 450),
+                    "repeats": payload.get("repeats", 5),
+                    "median_var_depth": 0.0,
+                    "median_base_depth": 0.0,
+                    "delta_depth": 0.0,
+                    "nps_ratio": 1.0,
+                    "agreement_pct": 100.0,
+                    "passed": True,
+                    "fixtures": [],
+                    "mode_summaries": {},
+                    "aggregate": {},
+                }
+                self.target_games = payload.get("total_positions", 12)
+            elif action == "update_pool_game":
+                if self.status == "DISCONNECTED":
+                    self.status = "RUNNING"
+                    self.stop_type = "IN_PROGRESS"
+                    self.stop_reason = ""
+                self.last_game_time = time.time()
+                self.total_played += 1
+                c_score = float(payload.get("cand_score", 0.0))
+                b_score = float(payload.get("base_score", 0.0))
+                self.pool_data["cand_score"] += c_score
+                self.pool_data["base_score"] += b_score
+                self.pool_data["total_games"] = self.total_played
+                if payload.get("cand_won"):
+                    self.pool_data["cand_wins"] += 1
+                    self.wins_variant += 1
+                if payload.get("base_won"):
+                    self.pool_data["base_wins"] += 1
+                    self.wins_baseline += 1
+                c_sh = (self.pool_data["cand_score"] / self.total_played * 100.0) if self.total_played > 0 else 0.0
+                b_sh = (self.pool_data["base_score"] / self.total_played * 100.0) if self.total_played > 0 else 0.0
+                self.pool_data["cand_share"] = round(c_sh, 1)
+                self.pool_data["base_share"] = round(b_sh, 1)
+                self.pool_data["delta"] = round(c_sh - b_sh, 1)
+                for opp in payload.get("opponents", []):
+                    if opp not in self.pool_data.setdefault("opponents_map", {}):
+                        self.pool_data["opponents_map"][opp] = {"games": 0, "cand_score": 0.0, "base_score": 0.0}
+                    om = self.pool_data["opponents_map"][opp]
+                    om["games"] += 1
+                    om["cand_score"] += c_score
+                    om["base_score"] += b_score
+                self.pool_data["opponents"] = [
+                    {
+                        "opponent": opp,
+                        "games": om["games"],
+                        "cand_win_pct": round(om["cand_score"] / om["games"] * 100.0, 1) if om["games"] > 0 else 0.0,
+                        "base_win_pct": round(om["base_score"] / om["games"] * 100.0, 1) if om["games"] > 0 else 0.0,
+                        "delta": round((om["cand_score"] - om["base_score"]) / om["games"] * 100.0, 1) if om["games"] > 0 else 0.0,
+                    }
+                    for opp, om in self.pool_data.get("opponents_map", {}).items()
+                ]
+            elif action == "update_pool_mode":
+                m_mode = payload.get("mode")
+                if self.matrix_progress:
+                    for item in self.matrix_progress:
+                        if item.get("mode") == m_mode:
+                            dec = payload.get("decision", "PARITY")
+                            item["status"] = "PASSED" if dec == "KEEP" else ("PARITY" if dec == "PARITY" else "FAILED")
+                            item["cand_share"] = round(float(payload.get("cand_share", 0.0)), 1)
+                            item["base_share"] = round(float(payload.get("base_share", 0.0)), 1)
+                            item["delta"] = round(float(payload.get("delta", 0.0)), 1)
+                            item["z_score"] = round(float(payload.get("z_score", 0.0)), 2)
+                            item["decision"] = dec
+                if payload.get("opponents"):
+                    self.pool_data["opponents"] = payload.get("opponents")
+            elif action == "update_depth_position":
+                if self.status == "DISCONNECTED":
+                    self.status = "RUNNING"
+                    self.stop_type = "IN_PROGRESS"
+                    self.stop_reason = ""
+                self.last_game_time = time.time()
+                comp = payload.get("completed_positions", 0)
+                tot = payload.get("total_positions", 12)
+                self.total_played = comp
+                self.target_games = tot
+                self.depth_data["completed_positions"] = comp
+                self.depth_data["total_positions"] = tot
+                fixture_entry = {
+                    "mode": payload.get("mode", ""),
+                    "turn": payload.get("turn", 0),
+                    "base_med_depth": round(float(payload.get("base_med_depth", 0.0)), 1),
+                    "var_med_depth": round(float(payload.get("var_med_depth", 0.0)), 1),
+                    "delta_depth": round(float(payload.get("delta_depth", 0.0)), 1),
+                    "base_med_nps": int(payload.get("base_med_nps", 0)),
+                    "var_med_nps": int(payload.get("var_med_nps", 0)),
+                    "nps_ratio": round(float(payload.get("nps_ratio", 1.0)), 2),
+                    "agreement_pct": round(float(payload.get("agreement_pct", 100.0)), 1),
+                    "passed": bool(payload.get("passed", True)),
+                }
+                f_list = self.depth_data.setdefault("fixtures", [])
+                existing_idx = next((i for i, f in enumerate(f_list) if f["mode"] == fixture_entry["mode"] and f["turn"] == fixture_entry["turn"]), None)
+                if existing_idx is not None:
+                    f_list[existing_idx] = fixture_entry
+                else:
+                    f_list.append(fixture_entry)
+                var_depths = [f["var_med_depth"] for f in f_list]
+                base_depths = [f["base_med_depth"] for f in f_list]
+                nps_ratios = [f["nps_ratio"] for f in f_list]
+                agrees = [f["agreement_pct"] for f in f_list]
+                if var_depths and base_depths:
+                    import statistics
+                    med_v = statistics.median(var_depths)
+                    med_b = statistics.median(base_depths)
+                    self.depth_data["median_var_depth"] = round(med_v, 1)
+                    self.depth_data["median_base_depth"] = round(med_b, 1)
+                    self.depth_data["delta_depth"] = round(med_v - med_b, 1)
+                if nps_ratios:
+                    import statistics
+                    self.depth_data["nps_ratio"] = round(statistics.median(nps_ratios), 2)
+                if agrees:
+                    import statistics
+                    self.depth_data["agreement_pct"] = round(statistics.mean(agrees), 1)
+                self.depth_data["passed"] = all(f.get("passed", True) for f in f_list)
+            elif action == "finish_depth":
+                self.depth_data["median_base_depth"] = round(float(payload.get("overall_base_d", 0.0)), 1)
+                self.depth_data["median_var_depth"] = round(float(payload.get("overall_var_d", 0.0)), 1)
+                self.depth_data["delta_depth"] = round(float(payload.get("overall_delta_d", 0.0)), 1)
+                self.depth_data["nps_ratio"] = round(float(payload.get("overall_nps_r", 1.0)), 2)
+                self.depth_data["agreement_pct"] = round(float(payload.get("overall_agree", 100.0)), 1)
+                self.depth_data["passed"] = bool(payload.get("overall_pass", True))
             elif action == "restore":
                 d = payload.get("data", {})
                 for attr in [
@@ -728,6 +942,7 @@ class DashboardState:
                 current_max_games=self.target_games or self.max_games or 200,
                 current_mode_elapsed=mode_elapsed,
                 run_type=getattr(self, "run_type", "self"),
+                depth_data=getattr(self, "depth_data", None),
             )
 
             return {
@@ -788,6 +1003,8 @@ class DashboardState:
                 "eta_seconds": eta_info.get("total_eta_seconds"),
                 "eta_breakdown": eta_info.get("breakdown", []),
                 "run_type": getattr(self, "run_type", "self"),
+                "pool_data": getattr(self, "pool_data", None),
+                "depth_data": getattr(self, "depth_data", None),
                 "snakes_stats": self.snakes_stats,
                 "run_history": load_run_history(),
                 "experiment_desc": self.experiment_desc
@@ -1501,6 +1718,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="header-badges">
+      <div class="badge" id="runTypeBadge">
+        <span id="runTypeIcon">🏎️</span> <span id="runTypeText">SELF-PLAY A/B</span>
+      </div>
       <div class="badge">
         ⏱️ <span id="elapsedTime">0s</span>
       </div>
@@ -1525,8 +1745,77 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Fixed-Position Depth Benchmark Card (shown when run_type == 'depth') -->
+  <div class="table-card" id="depthCard" style="display: none;">
+    <div class="table-title">
+      <span>📐 Fixed-Position Depth Benchmark</span>
+      <span style="font-size: 0.85rem; font-weight: 700; color: var(--variant-color);" id="depthStatusBadge">EVALUATING</span>
+    </div>
+
+    <!-- Depth Hero Metrics Grid -->
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1.5rem;" id="depthMetricsGrid">
+      <div class="matrix-col" style="background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.4);">
+        <div class="matrix-col-top">
+          <span class="matrix-col-name">VARIANT MEDIAN DEPTH</span>
+          <span class="matrix-col-status matrix-status-passed" id="depthVarBadge">VAR</span>
+        </div>
+        <div class="matrix-col-score" style="color: var(--variant-color);" id="depthVarValue">0.0</div>
+        <div class="matrix-col-meta" id="depthVarMeta">Search Depth</div>
+      </div>
+      <div class="matrix-col" style="background: rgba(59, 130, 246, 0.08); border-color: rgba(59, 130, 246, 0.4);">
+        <div class="matrix-col-top">
+          <span class="matrix-col-name">BASELINE MEDIAN DEPTH</span>
+          <span class="matrix-col-status matrix-status-running" id="depthBaseBadge">BASE</span>
+        </div>
+        <div class="matrix-col-score" style="color: var(--baseline-color);" id="depthBaseValue">0.0</div>
+        <div class="matrix-col-meta" id="depthBaseMeta">Search Depth</div>
+      </div>
+      <div class="matrix-col">
+        <div class="matrix-col-top">
+          <span class="matrix-col-name">NPS RATIO (V / B)</span>
+          <span class="matrix-col-status matrix-status-pending">SPEED</span>
+        </div>
+        <div class="matrix-col-score" style="color: #60a5fa;" id="depthNpsRatioValue">1.00x</div>
+        <div class="matrix-col-meta" id="depthNpsMeta">Nodes / Second</div>
+      </div>
+      <div class="matrix-col">
+        <div class="matrix-col-top">
+          <span class="matrix-col-name">MOVE AGREEMENT</span>
+          <span class="matrix-col-status matrix-status-pending">TACTICS</span>
+        </div>
+        <div class="matrix-col-score" style="color: var(--text-main);" id="depthAgreeValue">100.0%</div>
+        <div class="matrix-col-meta">Identical Best Move %</div>
+      </div>
+    </div>
+
+    <!-- Depth Fixtures Breakdown Table -->
+    <div class="history-table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th style="text-align: left; min-width: 90px;">Mode</th>
+            <th style="min-width: 60px;">Turn</th>
+            <th style="min-width: 90px;">Base Depth</th>
+            <th style="min-width: 90px;">Var Depth</th>
+            <th style="min-width: 80px;">Δ Depth</th>
+            <th style="min-width: 90px;">Base NPS</th>
+            <th style="min-width: 90px;">Var NPS</th>
+            <th style="min-width: 80px;">NPS Ratio</th>
+            <th style="min-width: 80px;">Agree %</th>
+            <th style="min-width: 90px;">Status</th>
+          </tr>
+        </thead>
+        <tbody id="depthTableBody">
+          <tr>
+            <td colspan="10" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Evaluating fixed positions...</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <!-- Tug-of-War Hero Card -->
-  <div class="hero-card">
+  <div class="hero-card" id="heroCard">
     <div class="tug-header">
       <div class="strategy-stat baseline">
         <div class="strategy-name" id="baselineName">BASELINE</div>
@@ -1608,6 +1897,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div>
       <div class="banner-title" id="bannerTitle">ℹ️ Test In Progress</div>
       <div class="banner-desc" id="bannerDesc">Accumulating game results to evaluate early stop thresholds...</div>
+    </div>
+  </div>
+
+  <!-- Pool Opponents Breakdown Card (shown when run_type == 'pool') -->
+  <div class="table-card" id="poolOpponentsCard" style="display: none;">
+    <div class="table-title">
+      <span>🐍 Pool Opponent Head-to-Head Breakdown</span>
+      <span style="font-size: 0.8rem; font-weight: 500; color: var(--text-muted);" id="poolOpponentsCount">0 Opponents</span>
+    </div>
+    <div class="history-table-wrapper">
+      <table>
+        <thead>
+          <tr>
+            <th style="text-align: left; min-width: 140px;">Opponent</th>
+            <th style="min-width: 70px;">Games</th>
+            <th style="min-width: 110px;">Candidate Win %</th>
+            <th style="min-width: 110px;">Baseline Win %</th>
+            <th style="min-width: 90px;">Delta (Δ)</th>
+          </tr>
+        </thead>
+        <tbody id="poolOpponentsTableBody">
+          <tr>
+            <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Waiting for pool opponent results...</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
@@ -1700,6 +2015,179 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   let lastHistoryJSON = '';
   let isUpdating = false;
 
+  function updateDepthUI(data) {
+    const depth = data.depth_data || {};
+    const varD = (depth.median_var_depth != null) ? depth.median_var_depth : 0.0;
+    const baseD = (depth.median_base_depth != null) ? depth.median_base_depth : 0.0;
+    const deltaD = (depth.delta_depth != null) ? depth.delta_depth : (varD - baseD);
+    const npsR = (depth.nps_ratio != null) ? depth.nps_ratio : 1.0;
+    const agree = (depth.agreement_pct != null) ? depth.agreement_pct : 100.0;
+
+    setText('depthVarValue', varD.toFixed(1));
+    const varMeta = document.getElementById('depthVarMeta');
+    if (varMeta) {
+      if (deltaD > 0) {
+        varMeta.innerText = `+${deltaD.toFixed(1)} Depth vs Base`;
+        varMeta.style.color = 'var(--variant-color)';
+      } else if (deltaD < 0) {
+        varMeta.innerText = `${deltaD.toFixed(1)} Depth vs Base`;
+        varMeta.style.color = 'var(--danger-color)';
+      } else {
+        varMeta.innerText = `Parity (0.0 Depth vs Base)`;
+        varMeta.style.color = 'var(--text-muted)';
+      }
+    }
+
+    setText('depthBaseValue', baseD.toFixed(1));
+    setText('depthNpsRatioValue', `${npsR.toFixed(2)}x`);
+    const npsMeta = document.getElementById('depthNpsMeta');
+    if (npsMeta) {
+      npsMeta.innerText = npsR >= 1.0 ? 'Faster / Equal Search' : 'Slower Search';
+      npsMeta.style.color = npsR >= 1.0 ? 'var(--variant-color)' : 'var(--danger-color)';
+    }
+
+    setText('depthAgreeValue', `${agree.toFixed(1)}%`);
+
+    const statusBadge = document.getElementById('depthStatusBadge');
+    if (statusBadge) {
+      if (data.status === 'FINISHED') {
+        const passed = depth.passed !== false && deltaD >= 0;
+        statusBadge.innerText = passed ? 'PASSED (NO REGRESSION)' : 'DEPTH REGRESSION';
+        statusBadge.style.color = passed ? 'var(--variant-color)' : 'var(--danger-color)';
+      } else {
+        statusBadge.innerText = `EVALUATING (${depth.completed_positions || 0}/${depth.total_positions || 12})`;
+        statusBadge.style.color = '#60a5fa';
+      }
+    }
+
+    // Render fixtures table
+    const tbody = document.getElementById('depthTableBody');
+    if (tbody) {
+      const fixtures = depth.fixtures || [];
+      if (fixtures.length === 0) {
+        setHTML(tbody, '<tr><td colspan="10" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Evaluating fixed positions...</td></tr>');
+      } else {
+        const rowsHtml = fixtures.map(f => {
+          const delta = (f.delta_depth != null) ? f.delta_depth : (f.var_med_depth - f.base_med_depth);
+          const isPass = f.passed !== false && delta >= 0;
+          const statusClass = isPass ? 'passed' : 'failed';
+          const statusText = isPass ? 'PASS' : 'REGRESSION';
+          const deltaColor = delta > 0 ? 'var(--variant-color)' : (delta < 0 ? 'var(--danger-color)' : 'var(--text-muted)');
+          const npsColor = f.nps_ratio >= 1.0 ? 'var(--variant-color)' : 'var(--danger-color)';
+
+          return `
+            <tr>
+              <td style="text-align: left; font-weight: 700;">${escapeHtml(f.mode.toUpperCase())}</td>
+              <td>Turn ${f.turn}</td>
+              <td>${f.base_med_depth.toFixed(1)}</td>
+              <td style="font-weight: 700; color: var(--variant-color);">${f.var_med_depth.toFixed(1)}</td>
+              <td style="color: ${deltaColor}; font-weight: 700;">${delta > 0 ? '+' : ''}${delta.toFixed(1)}</td>
+              <td>${Math.round(f.base_med_nps || 0).toLocaleString()}</td>
+              <td>${Math.round(f.var_med_nps || 0).toLocaleString()}</td>
+              <td style="color: ${npsColor}; font-weight: 700;">${f.nps_ratio.toFixed(2)}x</td>
+              <td>${f.agreement_pct.toFixed(1)}%</td>
+              <td><span class="matrix-col-status matrix-status-${statusClass}">${statusText}</span></td>
+            </tr>
+          `;
+        }).join('');
+        setHTML(tbody, rowsHtml);
+      }
+    }
+
+    // Update Runs Card for depth
+    const completed = depth.completed_positions || data.total_played || 0;
+    const total = depth.total_positions || data.target_games || 12;
+    setText('runsValue', `${completed} / ${total} Positions`);
+    const pct = total > 0 ? ((completed / total) * 100).toFixed(1) : 0;
+    setWidth('runsProgress', pct);
+  }
+
+  function updatePoolUI(data) {
+    const pool = data.pool_data || {};
+    const candWS = (pool.cand_share != null) ? pool.cand_share : 0.0;
+    const baseWS = (pool.base_share != null) ? pool.base_share : 0.0;
+    const delta = (pool.delta != null) ? pool.delta : (candWS - baseWS);
+    const zScore = (pool.z_score != null) ? pool.z_score : 0.0;
+    const totalG = pool.total_games || data.total_played || 0;
+    const candScore = pool.cand_score || pool.cand_wins || 0.0;
+    const baseScore = pool.base_score || pool.base_wins || 0.0;
+
+    setText('baselineName', 'BASELINE vs POOL');
+    setText('variantName', 'CANDIDATE vs POOL');
+    setText('baselinePts', `${baseWS.toFixed(1)}%`);
+    setText('variantPts', `${candWS.toFixed(1)}%`);
+    setText('baselineSubtext', `${baseScore.toFixed(1)} / ${totalG} Wins`);
+    setText('variantSubtext', `${candScore.toFixed(1)} / ${totalG} Wins`);
+
+    setText('leadTitle', 'POOL WIN SHARE DELTA (Δ)');
+    const leadEl = document.getElementById('leadText');
+    if (leadEl) {
+      leadEl.innerText = `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%`;
+      leadEl.style.color = delta > 0 ? 'var(--variant-color)' : (delta < 0 ? 'var(--danger-color)' : 'var(--text-main)');
+    }
+    const zEl = document.getElementById('drawsHeaderRate');
+    if (zEl) {
+      zEl.innerText = `z = ${zScore > 0 ? '+' : ''}${zScore.toFixed(2)}`;
+      zEl.style.color = zScore >= 1.645 ? 'var(--variant-color)' : (zScore <= -1.645 ? 'var(--danger-color)' : '#f59e0b');
+    }
+
+    // Update Tug of War Bar for Pool
+    const sumWS = candWS + baseWS;
+    const relVarPct = sumWS > 0 ? (candWS / sumWS * 100) : 50.0;
+    const relBasePct = 100.0 - relVarPct;
+
+    const tugBaselinesWrap = document.getElementById('tugBaselinesWrap');
+    const varPtsBar = document.getElementById('variantPtsBar');
+    const baseSeg1 = document.getElementById('baseSeg1');
+    if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${relBasePct}%`;
+    if (varPtsBar) {
+      varPtsBar.style.display = 'flex';
+      varPtsBar.style.width = `${relVarPct}%`;
+      setText('variantPtsBarText', `${candWS.toFixed(1)}%`);
+    }
+    if (baseSeg1) {
+      baseSeg1.style.display = 'flex';
+      baseSeg1.style.width = '100%';
+      setText('baseSeg1Text', `${baseWS.toFixed(1)}%`);
+    }
+    const labelParity = document.getElementById('labelParity');
+    const threshParity = document.getElementById('threshParity');
+    if (labelParity) { labelParity.innerText = 'PARITY'; labelParity.style.left = '50%'; }
+    if (threshParity) threshParity.style.left = '50%';
+
+    // Update Opponents Table
+    const oppTbody = document.getElementById('poolOpponentsTableBody');
+    const oppCount = document.getElementById('poolOpponentsCount');
+    const opponents = pool.opponents || [];
+    if (oppCount) oppCount.innerText = `${opponents.length} Opponent${opponents.length === 1 ? '' : 's'}`;
+    if (oppTbody) {
+      if (opponents.length === 0) {
+        setHTML(oppTbody, '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Waiting for pool opponent results...</td></tr>');
+      } else {
+        const oppRows = opponents.map(o => {
+          const d = (o.delta != null) ? o.delta : (o.cand_win_pct - o.base_win_pct);
+          const dColor = d > 0 ? 'var(--variant-color)' : (d < 0 ? 'var(--danger-color)' : 'var(--text-muted)');
+          return `
+            <tr>
+              <td style="text-align: left; font-weight: 700; color: var(--text-main);">${escapeHtml(o.opponent)}</td>
+              <td>${o.games}</td>
+              <td style="color: var(--variant-color); font-weight: 700;">${o.cand_win_pct.toFixed(1)}%</td>
+              <td style="color: var(--baseline-color); font-weight: 700;">${o.base_win_pct.toFixed(1)}%</td>
+              <td style="color: ${dColor}; font-weight: 700;">${d > 0 ? '+' : ''}${d.toFixed(1)}%</td>
+            </tr>
+          `;
+        }).join('');
+        setHTML(oppTbody, oppRows);
+      }
+    }
+
+    // Update Runs Card for Pool
+    const maxG = data.target_games || data.max_games || 100;
+    setText('runsValue', `${totalG} / ${maxG} Paired Games`);
+    const pctComplete = maxG > 0 ? ((totalG / maxG) * 100).toFixed(1) : 0;
+    setWidth('runsProgress', pctComplete);
+  }
+
   async function updateDashboard() {
     if (isUpdating) return;
     isUpdating = true;
@@ -1707,6 +2195,41 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const res = await fetch('/api/data');
       if (!res.ok) return;
       const data = await res.json();
+
+      // Run Type Badge
+      const runType = data.run_type || 'self';
+      const runTypeIcon = document.getElementById('runTypeIcon');
+      const runTypeText = document.getElementById('runTypeText');
+      if (runType === 'pool') {
+        if (runTypeIcon) runTypeIcon.innerText = '🏊';
+        if (runTypeText) runTypeText.innerText = 'POOL EVALUATION';
+      } else if (runType === 'depth') {
+        if (runTypeIcon) runTypeIcon.innerText = '📐';
+        if (runTypeText) runTypeText.innerText = 'DEPTH BENCHMARK';
+      } else {
+        if (runTypeIcon) runTypeIcon.innerText = '🏎️';
+        if (runTypeText) runTypeText.innerText = 'SELF-PLAY A/B';
+      }
+
+      const heroCard = document.getElementById('heroCard');
+      const poolOpponentsCard = document.getElementById('poolOpponentsCard');
+      const depthCard = document.getElementById('depthCard');
+
+      if (runType === 'depth') {
+        if (heroCard) heroCard.style.display = 'none';
+        if (poolOpponentsCard) poolOpponentsCard.style.display = 'none';
+        if (depthCard) depthCard.style.display = 'block';
+        updateDepthUI(data);
+      } else if (runType === 'pool') {
+        if (heroCard) heroCard.style.display = 'block';
+        if (poolOpponentsCard) poolOpponentsCard.style.display = 'block';
+        if (depthCard) depthCard.style.display = 'none';
+        updatePoolUI(data);
+      } else {
+        if (heroCard) heroCard.style.display = 'block';
+        if (poolOpponentsCard) poolOpponentsCard.style.display = 'none';
+        if (depthCard) depthCard.style.display = 'none';
+      }
 
       // Header Status & Experiment Info
       const statusDot = document.getElementById('statusDot');
@@ -1829,6 +2352,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
             let scoreText = effectiveStatus === 'PENDING' ? '--' : (effectiveStatus === 'SKIPPED' && !gamesVal ? 'SKIPPED' : `${winShareVal.toFixed(1)}%`);
             let metaText = `Target: > ${(m.target_share || (m.num_snakes === 4 ? 25.0 : 50.0)).toFixed(1)}% (${gamesVal}/${m.max_games || 200}G)`;
+            if (runType === 'pool') {
+              const deltaVal = (m.delta != null) ? m.delta : 0.0;
+              const zVal = (m.z_score != null) ? m.z_score : 0.0;
+              scoreText = effectiveStatus === 'PENDING' ? '--' : `${deltaVal >= 0 ? '+' : ''}${deltaVal.toFixed(1)}%`;
+              metaText = effectiveStatus === 'PENDING' ? `Target: z >= +1.645 (${m.max_games || 20}G)` : `z = ${zVal >= 0 ? '+' : ''}${zVal.toFixed(2)} (${gamesVal}/${m.max_games || 20}G)`;
+            }
             let scoreColor = effectiveStatus === 'PASSED' ? 'var(--variant-color)' : (effectiveStatus === 'PARITY' ? '#f59e0b' : (effectiveStatus === 'FAILED' ? 'var(--danger-color)' : (effectiveStatus === 'SKIPPED' ? '#fbbf24' : (effectiveStatus === 'RUNNING' ? '#60a5fa' : 'var(--text-main)'))));
             return `
               <div class="matrix-col ${statusClass}">
@@ -1846,121 +2375,170 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
       }
 
-      setText('baselinePts', `${basePts.toFixed(1)} Pts`);
-      setText('variantPts', `${varPts.toFixed(1)} Pts`);
-      setText('baselineSubtext', `${baseW} Wins`);
-      setText('variantSubtext', `${varW} Wins`);
-      setText('drawsHeaderRate', `${drawsCount} Draws`);
+      if (runType === 'self') {
+        setText('baselinePts', `${basePts.toFixed(1)} Pts`);
+        setText('variantPts', `${varPts.toFixed(1)} Pts`);
+        setText('baselineSubtext', `${baseW} Wins`);
+        setText('variantSubtext', `${varW} Wins`);
+        setText('drawsHeaderRate', `${drawsCount} Draws`);
 
-      // Dynamic Threshold Markers & Labels
-      const labelParity = document.getElementById('labelParity');
-      const threshParity = document.getElementById('threshParity');
-      const labelKeep = document.getElementById('labelKeep');
-      const threshKeep = document.getElementById('threshKeep');
-      const labelRevert = document.getElementById('labelRevert');
-      const threshRevert = document.getElementById('threshRevert');
+        // Dynamic Threshold Markers & Labels
+        const labelParity = document.getElementById('labelParity');
+        const threshParity = document.getElementById('threshParity');
+        const labelKeep = document.getElementById('labelKeep');
+        const threshKeep = document.getElementById('threshKeep');
+        const labelRevert = document.getElementById('labelRevert');
+        const threshRevert = document.getElementById('threshRevert');
 
-      const highStop = data.current_early_stop_high || data.early_stop_high || (is4p ? 35.0 : 60.0);
-      const lowStop = data.current_early_stop_low || data.early_stop_low || (is4p ? 18.0 : 40.0);
+        const highStop = data.current_early_stop_high || data.early_stop_high || (is4p ? 35.0 : 60.0);
+        const lowStop = data.current_early_stop_low || data.early_stop_low || (is4p ? 18.0 : 40.0);
 
-      if (is4p) {
-        // 4-Player Parity = 25% for variant (75% for baselines)
-        if (labelParity) { labelParity.innerText = '25% PARITY'; labelParity.style.left = '75%'; }
-        if (threshParity) { threshParity.style.left = '75%'; }
-        const keepPos = 100 - highStop;
-        if (labelKeep) {
-          labelKeep.innerText = `${highStop.toFixed(1)}% KEEP`;
-          labelKeep.style.left = `${keepPos}%`;
-          labelKeep.style.transform = keepPos < 10 ? 'translateX(-15%)' : 'translateX(-50%)';
-        }
-        if (threshKeep) { threshKeep.style.left = `${keepPos}%`; }
-        const revertPos = 100 - lowStop;
-        if (labelRevert) {
-          labelRevert.innerText = `${lowStop.toFixed(1)}% REVERT`;
-          labelRevert.style.left = `${revertPos}%`;
-          labelRevert.style.transform = revertPos > 88 ? 'translateX(-85%)' : 'translateX(-50%)';
-        }
-        if (threshRevert) { threshRevert.style.left = `${revertPos}%`; }
-      } else {
-        // 1v1 Parity = 50%
-        if (labelParity) { labelParity.innerText = '50% PARITY'; labelParity.style.left = '50%'; }
-        if (threshParity) { threshParity.style.left = '50%'; }
-        const keepPos = 100 - highStop;
-        if (labelKeep) {
-          labelKeep.innerText = `${highStop.toFixed(1)}% KEEP`;
-          labelKeep.style.left = `${keepPos}%`;
-          labelKeep.style.transform = keepPos < 10 ? 'translateX(-15%)' : 'translateX(-50%)';
-        }
-        if (threshKeep) { threshKeep.style.left = `${keepPos}%`; }
-        const revertPos = 100 - lowStop;
-        if (labelRevert) {
-          labelRevert.innerText = `${lowStop.toFixed(1)}% REVERT`;
-          labelRevert.style.left = `${revertPos}%`;
-          labelRevert.style.transform = revertPos > 88 ? 'translateX(-85%)' : 'translateX(-50%)';
-        }
-        if (threshRevert) { threshRevert.style.left = `${revertPos}%`; }
-      }
-
-      // Lead Text
-      const leadEl = document.getElementById('leadText');
-      const leadTitle = document.getElementById('leadTitle');
-      if (leadEl) {
         if (is4p) {
-          if (leadTitle) leadTitle.innerText = 'VARIANT vs 25% PARITY';
-          const deltaParity = varWS - 25.0;
-          if (Math.abs(deltaParity) < 0.05) {
-            setText(leadEl, 'PARITY');
-            leadEl.style.color = 'var(--text-main)';
-          } else if (deltaParity > 0) {
-            setText(leadEl, `+${deltaParity.toFixed(1)}%`);
-            leadEl.style.color = 'var(--variant-color)';
-          } else {
-            setText(leadEl, `${deltaParity.toFixed(1)}%`);
-            leadEl.style.color = 'var(--danger-color)';
+          // 4-Player Parity = 25% for variant (75% for baselines)
+          if (labelParity) { labelParity.innerText = '25% PARITY'; labelParity.style.left = '75%'; }
+          if (threshParity) { threshParity.style.left = '75%'; }
+          const keepPos = 100 - highStop;
+          if (labelKeep) {
+            labelKeep.innerText = `${highStop.toFixed(1)}% KEEP`;
+            labelKeep.style.left = `${keepPos}%`;
+            labelKeep.style.transform = keepPos < 10 ? 'translateX(-15%)' : 'translateX(-50%)';
           }
+          if (threshKeep) { threshKeep.style.left = `${keepPos}%`; }
+          const revertPos = 100 - lowStop;
+          if (labelRevert) {
+            labelRevert.innerText = `${lowStop.toFixed(1)}% REVERT`;
+            labelRevert.style.left = `${revertPos}%`;
+            labelRevert.style.transform = revertPos > 88 ? 'translateX(-85%)' : 'translateX(-50%)';
+          }
+          if (threshRevert) { threshRevert.style.left = `${revertPos}%`; }
         } else {
-          if (leadTitle) leadTitle.innerText = 'WIN VALUE LEAD';
-          const netPts = varPts - basePts;
-          if (Math.abs(netPts) < 0.01) {
-            setText(leadEl, 'EVEN');
-            leadEl.style.color = 'var(--text-main)';
-          } else if (netPts > 0) {
-            setText(leadEl, `+${netPts.toFixed(1)}`);
-            leadEl.style.color = 'var(--variant-color)';
+          // 1v1 Parity = 50%
+          if (labelParity) { labelParity.innerText = '50% PARITY'; labelParity.style.left = '50%'; }
+          if (threshParity) { threshParity.style.left = '50%'; }
+          const keepPos = 100 - highStop;
+          if (labelKeep) {
+            labelKeep.innerText = `${highStop.toFixed(1)}% KEEP`;
+            labelKeep.style.left = `${keepPos}%`;
+            labelKeep.style.transform = keepPos < 10 ? 'translateX(-15%)' : 'translateX(-50%)';
+          }
+          if (threshKeep) { threshKeep.style.left = `${keepPos}%`; }
+          const revertPos = 100 - lowStop;
+          if (labelRevert) {
+            labelRevert.innerText = `${lowStop.toFixed(1)}% REVERT`;
+            labelRevert.style.left = `${revertPos}%`;
+            labelRevert.style.transform = revertPos > 88 ? 'translateX(-85%)' : 'translateX(-50%)';
+          }
+          if (threshRevert) { threshRevert.style.left = `${revertPos}%`; }
+        }
+
+        // Lead Text
+        const leadEl = document.getElementById('leadText');
+        const leadTitle = document.getElementById('leadTitle');
+        if (leadEl) {
+          if (is4p) {
+            if (leadTitle) leadTitle.innerText = 'VARIANT vs 25% PARITY';
+            const deltaParity = varWS - 25.0;
+            if (Math.abs(deltaParity) < 0.05) {
+              setText(leadEl, 'PARITY');
+              leadEl.style.color = 'var(--text-main)';
+            } else if (deltaParity > 0) {
+              setText(leadEl, `+${deltaParity.toFixed(1)}%`);
+              leadEl.style.color = 'var(--variant-color)';
+            } else {
+              setText(leadEl, `${deltaParity.toFixed(1)}%`);
+              leadEl.style.color = 'var(--danger-color)';
+            }
           } else {
-            setText(leadEl, `-${Math.abs(netPts).toFixed(1)}`);
-            leadEl.style.color = 'var(--baseline-color)';
+            if (leadTitle) leadTitle.innerText = 'WIN VALUE LEAD';
+            const netPts = varPts - basePts;
+            if (Math.abs(netPts) < 0.01) {
+              setText(leadEl, 'EVEN');
+              leadEl.style.color = 'var(--text-main)';
+            } else if (netPts > 0) {
+              setText(leadEl, `+${netPts.toFixed(1)}`);
+              leadEl.style.color = 'var(--variant-color)';
+            } else {
+              setText(leadEl, `-${Math.abs(netPts).toFixed(1)}`);
+              leadEl.style.color = 'var(--baseline-color)';
+            }
           }
         }
-      }
 
-      // Bar 1: Win Share (Points) Tug-of-War Bar
-      const tugBaselinesWrap = document.getElementById('tugBaselinesWrap');
-      const varPtsBar = document.getElementById('variantPtsBar');
-      const baseSeg1 = document.getElementById('baseSeg1');
-      const baseSeg2 = document.getElementById('baseSeg2');
-      const baseSeg3 = document.getElementById('baseSeg3');
-      const baseSegs = [baseSeg1, baseSeg2, baseSeg3];
+        // Bar 1: Win Share (Points) Tug-of-War Bar
+        const tugBaselinesWrap = document.getElementById('tugBaselinesWrap');
+        const varPtsBar = document.getElementById('variantPtsBar');
+        const baseSeg1 = document.getElementById('baseSeg1');
+        const baseSeg2 = document.getElementById('baseSeg2');
+        const baseSeg3 = document.getElementById('baseSeg3');
+        const baseSegs = [baseSeg1, baseSeg2, baseSeg3];
 
-      if (is4p) {
-        if (played === 0) {
-          if (tugBaselinesWrap) tugBaselinesWrap.style.width = '75%';
-          if (varPtsBar) {
-            varPtsBar.style.display = 'flex';
-            varPtsBar.style.width = '25%';
-            setText('variantPtsBarText', '25.0%');
+        if (is4p) {
+          if (played === 0) {
+            if (tugBaselinesWrap) tugBaselinesWrap.style.width = '75%';
+            if (varPtsBar) {
+              varPtsBar.style.display = 'flex';
+              varPtsBar.style.width = '25%';
+              setText('variantPtsBarText', '25.0%');
+            }
+            if (baseSeg1) {
+              baseSeg1.style.display = 'flex';
+              baseSeg1.style.width = '100%';
+              setText('baseSeg1Text', 'BASELINES 75.0%');
+            }
+            if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
+            if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
+          } else {
+            if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${baseWS}%`;
+            if (varPtsBar) {
+              if (varWS <= 0) {
+                varPtsBar.style.display = 'none';
+                varPtsBar.style.width = '0%';
+              } else {
+                varPtsBar.style.display = 'flex';
+                varPtsBar.style.width = `${varWS}%`;
+                setText('variantPtsBarText', varWS > 6 ? `${varWS.toFixed(1)}%` : '');
+              }
+            }
+            if (data.snakes_list && data.snakes_list.length > 0) {
+              const baseSnakes = data.snakes_list.filter(s => !s.is_variant);
+              const totalBasePts = baseSnakes.reduce((acc, s) => acc + (s.points || 0), 0);
+              if (totalBasePts <= 0) {
+                baseSegs.forEach(seg => {
+                  if (seg) {
+                    seg.style.display = 'none';
+                    seg.style.width = '0%';
+                  }
+                });
+              } else if (baseSnakes.length === 1) {
+                if (baseSeg1) {
+                  baseSeg1.style.display = 'flex';
+                  baseSeg1.style.width = '100%';
+                  setText('baseSeg1Text', baseWS > 6 ? `Base ${baseWS.toFixed(1)}%` : '');
+                }
+                if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
+                if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
+              } else {
+                baseSegs.forEach((seg, i) => {
+                  if (seg && baseSnakes[i]) {
+                    const pts = baseSnakes[i].points || 0;
+                    if (pts <= 0) {
+                      seg.style.display = 'none';
+                      seg.style.width = '0%';
+                    } else {
+                      const wPct = (pts / totalBasePts) * 100;
+                      seg.style.display = 'flex';
+                      seg.style.width = `${wPct}%`;
+                      setText(`baseSeg${i + 1}Text`, (baseWS * (wPct / 100)) > 7 ? `B${i + 1} ${(baseSnakes[i].win_share).toFixed(1)}%` : '');
+                    }
+                  }
+                });
+              }
+            }
           }
-          if (baseSeg1) {
-            baseSeg1.style.display = 'flex';
-            baseSeg1.style.width = '100%';
-            setText('baseSeg1Text', 'BASELINES 75.0%');
-          }
-          if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
-          if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
         } else {
           if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${baseWS}%`;
           if (varPtsBar) {
-            if (varWS <= 0) {
+            if (played > 0 && varWS <= 0) {
               varPtsBar.style.display = 'none';
               varPtsBar.style.width = '0%';
             } else {
@@ -1969,74 +2547,29 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               setText('variantPtsBarText', varWS > 6 ? `${varWS.toFixed(1)}%` : '');
             }
           }
-          if (data.snakes_list && data.snakes_list.length > 0) {
-            const baseSnakes = data.snakes_list.filter(s => !s.is_variant);
-            const totalBasePts = baseSnakes.reduce((acc, s) => acc + (s.points || 0), 0);
-            if (totalBasePts <= 0) {
-              baseSegs.forEach(seg => {
-                if (seg) {
-                  seg.style.display = 'none';
-                  seg.style.width = '0%';
-                }
-              });
-            } else if (baseSnakes.length === 1) {
-              if (baseSeg1) {
-                baseSeg1.style.display = 'flex';
-                baseSeg1.style.width = '100%';
-                setText('baseSeg1Text', baseWS > 6 ? `Base ${baseWS.toFixed(1)}%` : '');
-              }
-              if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
-              if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
+          if (baseSeg1) {
+            if (played > 0 && baseWS <= 0) {
+              baseSeg1.style.display = 'none';
+              baseSeg1.style.width = '0%';
             } else {
-              baseSegs.forEach((seg, i) => {
-                if (seg && baseSnakes[i]) {
-                  const pts = baseSnakes[i].points || 0;
-                  if (pts <= 0) {
-                    seg.style.display = 'none';
-                    seg.style.width = '0%';
-                  } else {
-                    const wPct = (pts / totalBasePts) * 100;
-                    seg.style.display = 'flex';
-                    seg.style.width = `${wPct}%`;
-                    setText(`baseSeg${i + 1}Text`, (baseWS * (wPct / 100)) > 7 ? `B${i + 1} ${(baseSnakes[i].win_share).toFixed(1)}%` : '');
-                  }
-                }
-              });
+              baseSeg1.style.display = 'flex';
+              baseSeg1.style.width = '100%';
+              setText('baseSeg1Text', baseWS > 6 ? `${baseWS.toFixed(1)}%` : '');
             }
           }
+          if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
+          if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
         }
-      } else {
-        if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${baseWS}%`;
-        if (varPtsBar) {
-          if (played > 0 && varWS <= 0) {
-            varPtsBar.style.display = 'none';
-            varPtsBar.style.width = '0%';
-          } else {
-            varPtsBar.style.display = 'flex';
-            varPtsBar.style.width = `${varWS}%`;
-            setText('variantPtsBarText', varWS > 6 ? `${varWS.toFixed(1)}%` : '');
-          }
-        }
-        if (baseSeg1) {
-          if (played > 0 && baseWS <= 0) {
-            baseSeg1.style.display = 'none';
-            baseSeg1.style.width = '0%';
-          } else {
-            baseSeg1.style.display = 'flex';
-            baseSeg1.style.width = '100%';
-            setText('baseSeg1Text', baseWS > 6 ? `${baseWS.toFixed(1)}%` : '');
-          }
-        }
-        if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
-        if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
+        const maxG = data.target_games || data.max_games || 300;
+        setText('runsValue', `${played} / ${maxG} Games`);
+        const pctComplete = maxG > 0 ? ((played / maxG) * 100).toFixed(1) : 0;
+        setWidth('runsProgress', pctComplete);
       }
       // Runs Card & ETA Calculation
       const maxG = data.target_games || data.max_games || 300;
-      setText('runsValue', `${played} / ${maxG} Games`);
       const pctComplete = maxG > 0 ? ((played / maxG) * 100).toFixed(1) : 0;
-      setWidth('runsProgress', pctComplete);
-
       const remainingGames = Math.max(0, maxG - played);
+
       if (data.status === 'FINISHED' || data.status === 'STOPPED' || remainingGames === 0) {
         setText('runsSubtext', `${pctComplete}% Complete (${data.status === 'STOPPED' ? 'Stopped' : 'Done'})`);
       } else if (data.status === 'DISCONNECTED') {
@@ -2077,6 +2610,34 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             if (banner.className !== 'banner info') banner.className = 'banner info';
             setHTML(bannerTitle, '⏭️ TEST SKIPPED BY USER');
             setText(bannerDesc, `${data.stop_reason || 'Simulation mode skipped by user.'} Progress: ${played}/${maxG} games played.`);
+          } else if (runType === 'pool') {
+            const pDelta = (data.pool_data && data.pool_data.delta != null) ? data.pool_data.delta : 0.0;
+            const pZ = (data.pool_data && data.pool_data.z_score != null) ? data.pool_data.z_score : 0.0;
+            if (data.recommendation === 'KEEP') {
+              if (banner.className !== 'banner keep') banner.className = 'banner keep';
+              setHTML(bannerTitle, '🎉 RECOMMENDATION: KEEP VARIANT (POOL GATE PASSED)');
+              setText(bannerDesc, `${data.stop_reason || ''} Candidate out-performed baseline vs pool (Δ: ${pDelta >= 0 ? '+' : ''}${pDelta.toFixed(1)}%, z = ${pZ >= 0 ? '+' : ''}${pZ.toFixed(2)} >= +1.645).`);
+            } else if (data.recommendation === 'PARITY') {
+              if (banner.className !== 'banner parity') banner.className = 'banner parity';
+              setHTML(bannerTitle, '🟡 RECOMMENDATION: PARITY (POOL GATE CONFIRMED)');
+              setText(bannerDesc, `${data.stop_reason || ''} Candidate performed within statistical parity of baseline vs pool (Δ: ${pDelta >= 0 ? '+' : ''}${pDelta.toFixed(1)}%, z = ${pZ >= 0 ? '+' : ''}${pZ.toFixed(2)}).`);
+            } else {
+              if (banner.className !== 'banner revert') banner.className = 'banner revert';
+              setHTML(bannerTitle, '⚠️ RECOMMENDATION: REVERT VARIANT (POOL GATE FAILED)');
+              setText(bannerDesc, `${data.stop_reason || ''} Candidate underperformed baseline vs pool (Δ: ${pDelta >= 0 ? '+' : ''}${pDelta.toFixed(1)}%, z = ${pZ >= 0 ? '+' : ''}${pZ.toFixed(2)} <= -1.645).`);
+            }
+          } else if (runType === 'depth') {
+            const dDelta = (data.depth_data && data.depth_data.delta_depth != null) ? data.depth_data.delta_depth : 0.0;
+            const dNps = (data.depth_data && data.depth_data.nps_ratio != null) ? data.depth_data.nps_ratio : 1.0;
+            if (data.recommendation === 'KEEP' || (data.depth_data && data.depth_data.passed)) {
+              if (banner.className !== 'banner keep') banner.className = 'banner keep';
+              setHTML(bannerTitle, '🎉 RECOMMENDATION: DEPTH BENCHMARK PASSED');
+              setText(bannerDesc, `${data.stop_reason || ''} Variant depth met or exceeded baseline (Δ: ${dDelta >= 0 ? '+' : ''}${dDelta.toFixed(1)} depth, NPS ratio: ${dNps.toFixed(2)}x).`);
+            } else {
+              if (banner.className !== 'banner revert') banner.className = 'banner revert';
+              setHTML(bannerTitle, '⚠️ RECOMMENDATION: DEPTH REGRESSION DETECTED');
+              setText(bannerDesc, `${data.stop_reason || ''} Variant median depth fell below baseline in tested fixtures.`);
+            }
           } else if (data.recommendation === 'KEEP') {
             if (banner.className !== 'banner keep') banner.className = 'banner keep';
             setHTML(bannerTitle, '🎉 RECOMMENDATION: KEEP VARIANT');
@@ -2522,6 +3083,31 @@ class DashboardClient:
             "recommendation": recommendation,
             "csv_path": csv_path,
         }, sync=True)
+
+    def update_pool_game(self, **kwargs):
+        payload = {"action": "update_pool_game"}
+        payload.update(kwargs)
+        self.post_update(payload)
+
+    def update_pool_mode(self, **kwargs):
+        payload = {"action": "update_pool_mode"}
+        payload.update(kwargs)
+        self.post_update(payload, sync=True)
+
+    def init_depth(self, **kwargs):
+        payload = {"action": "init_depth"}
+        payload.update(kwargs)
+        self.post_update(payload, sync=True)
+
+    def update_depth_position(self, **kwargs):
+        payload = {"action": "update_depth_position"}
+        payload.update(kwargs)
+        self.post_update(payload)
+
+    def finish_depth(self, **kwargs):
+        payload = {"action": "finish_depth"}
+        payload.update(kwargs)
+        self.post_update(payload, sync=True)
 
 
 def ensure_dashboard_running(port: int = 8888, timeout_seconds: int = 600) -> DashboardClient:

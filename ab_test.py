@@ -2260,6 +2260,12 @@ def parse_args() -> argparse.Namespace:
         help="Number of paired games per mode to evaluate against the pool",
     )
     parser.add_argument(
+        "--dashboard-port",
+        type=int,
+        default=DASHBOARD_PORT,
+        help=f"Port for the real-time web monitoring dashboard (default: {DASHBOARD_PORT})",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Resume an interrupted A/B benchmark run from the last saved checkpoint in ab_results/",
@@ -2296,6 +2302,7 @@ def run_ab_test_engine(
             variant_module=variant_module,
             threads=threads,
             skip_smoke=skip_smoke,
+            dashboard_port=dashboard_port,
         )
         return
     if baseline_module is None:
@@ -2683,6 +2690,7 @@ def run_pool_benchmark(
     variant_module: Optional[str] = None,
     threads: int = THREADS,
     skip_smoke: bool = False,
+    dashboard_port: int = DASHBOARD_PORT,
 ) -> Dict[str, Any]:
     """
     Evaluates candidate strategy vs pool and baseline strategy vs pool using the same seed stream.
@@ -2732,6 +2740,29 @@ def run_pool_benchmark(
     print(f"  Workers:          {threads} parallel worker processes")
     print("=" * 80 + "\n")
 
+    dash_client = None
+    if ensure_dashboard_running is not None:
+        try:
+            dash_client = ensure_dashboard_running(port=dashboard_port)
+        except Exception as e:
+            print(f"  [!] Dashboard connection error: {e}")
+            dash_client = None
+
+    matrix_progress = [
+        {
+            "mode": m["mode"],
+            "name": m["name"],
+            "num_snakes": m["num_snakes"],
+            "status": "pending",
+            "cand_share": 0.0,
+            "base_share": 0.0,
+            "delta": 0.0,
+            "z_score": 0.0,
+            "decision": "",
+        }
+        for m in active_matrix
+    ]
+
     # Step 1: Tactical unit tests
     if not skip_smoke:
         print("[1/2] Running strategy safety unit tests on variant...")
@@ -2760,11 +2791,51 @@ def run_pool_benchmark(
     t_suite_start = time.perf_counter()
     all_mode_stats = []
 
+    if dash_client is not None:
+        dash_client.init_test(
+            strategy_baseline=baseline_module,
+            strategy_variant=variant_module,
+            min_games=pool_games,
+            max_games=pool_games,
+            check_interval=pool_games,
+            early_stop_high=100.0,
+            early_stop_low=0.0,
+            threads=threads,
+            experiment_desc=desc,
+            game_mode=active_matrix[0]["mode"] if active_matrix else "standard",
+            num_snakes=active_matrix[0]["num_snakes"] if active_matrix else 2,
+            target_win_share=50.0,
+            matrix_progress=matrix_progress,
+            suite_start_time=t_suite_start,
+            run_type="pool",
+        )
+
     for idx, m_spec in enumerate(active_matrix):
         m_mode = m_spec["mode"]
         m_name = m_spec["name"]
         num_snakes = m_spec["num_snakes"]
         base_seed = 42_000 + idx * 10_000
+
+        matrix_progress[idx]["status"] = "running"
+        if dash_client is not None:
+            dash_client.init_test(
+                strategy_baseline=baseline_module,
+                strategy_variant=variant_module,
+                min_games=pool_games,
+                max_games=pool_games,
+                check_interval=pool_games,
+                early_stop_high=100.0,
+                early_stop_low=0.0,
+                threads=threads,
+                experiment_desc=desc,
+                game_mode=m_mode,
+                num_snakes=num_snakes,
+                target_win_share=50.0,
+                matrix_progress=matrix_progress,
+                suite_start_time=t_suite_start,
+                run_type="pool",
+            )
+            dash_client.update_matrix(matrix_progress)
 
         print(f"\n>>> Running Mode: {m_name} ({pool_games} paired games)...")
         print("-" * 80)
@@ -2805,6 +2876,17 @@ def run_pool_benchmark(
                         f"Cand: {c_outcome:<4s} ({cand_res['turns']:3d}t) | "
                         f"Base: {b_outcome:<4s} ({base_res['turns']:3d}t) | Δ: {d_str}"
                     )
+                    if dash_client is not None:
+                        dash_client.update_pool_game(
+                            game_num=len(mode_results),
+                            mode=m_mode,
+                            cand_score=cand_res["score"],
+                            base_score=base_res["score"],
+                            cand_won=bool(cand_res.get("won", False)),
+                            base_won=bool(base_res.get("won", False)),
+                            opponents=res["opponents"],
+                            turns=max(cand_res.get("turns", 0), base_res.get("turns", 0)),
+                        )
         else:
             _pool_worker_init(pool_snakes, variant_module, baseline_module)
             for task in tasks:
@@ -2822,6 +2904,17 @@ def run_pool_benchmark(
                     f"Cand: {c_outcome:<4s} ({cand_res['turns']:3d}t) | "
                     f"Base: {b_outcome:<4s} ({base_res['turns']:3d}t) | Δ: {d_str}"
                 )
+                if dash_client is not None:
+                    dash_client.update_pool_game(
+                        game_num=len(mode_results),
+                        mode=m_mode,
+                        cand_score=cand_res["score"],
+                        base_score=base_res["score"],
+                        cand_won=bool(cand_res.get("won", False)),
+                        base_won=bool(base_res.get("won", False)),
+                        opponents=res["opponents"],
+                        turns=max(cand_res.get("turns", 0), base_res.get("turns", 0)),
+                    )
 
         mode_results.sort(key=lambda r: r["game_num"])
         N = len(mode_results)
@@ -2903,6 +2996,24 @@ def run_pool_benchmark(
             "decision": decision,
         })
 
+        matrix_progress[idx]["status"] = "PASSED" if decision == "KEEP" else ("PARITY" if decision == "PARITY" else "FAILED")
+        matrix_progress[idx]["cand_share"] = cand_win_share
+        matrix_progress[idx]["base_share"] = base_win_share
+        matrix_progress[idx]["delta"] = delta
+        matrix_progress[idx]["z_score"] = z_score
+        matrix_progress[idx]["decision"] = decision
+
+        if dash_client is not None:
+            dash_client.update_pool_mode(
+                mode=m_mode,
+                cand_share=cand_win_share,
+                base_share=base_win_share,
+                delta=delta,
+                z_score=z_score,
+                decision=decision,
+            )
+            dash_client.update_matrix(matrix_progress)
+
     reverts = [m for m in all_mode_stats if m["decision"] == "REVERT"]
     keeps = [m for m in all_mode_stats if m["decision"] == "KEEP"]
     if reverts:
@@ -2938,6 +3049,14 @@ def run_pool_benchmark(
     print(f"  Results Ledger:   Appended row to {ledger_path.resolve()}")
     print("=" * 80 + "\n")
 
+    if dash_client is not None:
+        dash_client.set_finished(
+            stop_type=overall_decision,
+            stop_reason=overall_reason,
+            recommendation=overall_decision,
+            csv_path=str(ledger_path.resolve()),
+        )
+
     return {
         "all_mode_stats": all_mode_stats,
         "overall_decision": overall_decision,
@@ -2954,6 +3073,7 @@ def main():
         variant_module=args.variant_module,
         skip_smoke=args.skip_smoke,
         resume=args.resume,
+        dashboard_port=args.dashboard_port,
         pool=args.pool,
         pool_games=args.pool_games,
     )

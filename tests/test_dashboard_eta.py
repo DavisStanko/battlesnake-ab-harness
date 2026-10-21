@@ -214,6 +214,93 @@ class TestDashboardETA(unittest.TestCase):
         self.assertEqual(loaded3[1]["mode"], "constrictor")
         self.assertEqual(loaded3[1]["run_type"], "pool")
 
+    def test_pool_mode_eta_calculation(self):
+        """
+        Verify that pool mode ETA correctly filters historical timings by run_type='pool'
+        and uses the 10-game stability threshold for live blending.
+        """
+        timings = [
+            {"mode": "standard", "run_type": "pool", "games": 20, "elapsed_seconds": 20.0},     # 1.0 s/game pool
+            {"mode": "constrictor", "run_type": "pool", "games": 20, "elapsed_seconds": 10.0},  # 0.5 s/game pool
+            {"mode": "standard", "run_type": "self", "games": 200, "elapsed_seconds": 2000.0},  # 10.0 s/game self
+        ]
+
+        matrix_progress = [
+            {"mode": "standard", "status": "RUNNING", "games": 0, "max_games": 20},
+            {"mode": "constrictor", "status": "PENDING", "games": 0, "max_games": 20},
+        ]
+
+        # Prior to 10 games, uses pool history (1.0s/game for standard, 0.5s for constrictor)
+        eta_res = calculate_eta(
+            matrix_progress=matrix_progress,
+            current_mode="standard",
+            current_played=5,
+            current_max_games=20,
+            current_mode_elapsed=4.0,  # 0.8s live rate, but not stable yet (<10 games)
+            run_type="pool",
+            mode_timings=timings,
+        )
+
+        self.assertFalse(eta_res["is_stable"])
+        # Standard: 15 left * 1.0s = 15.0s; Constrictor: 20 left * 0.5s = 10.0s -> Total = 25.0s
+        self.assertAlmostEqual(eta_res["total_eta_seconds"], 25.0, places=1)
+
+        # At >= 10 games, is_stable becomes True and standard blends with live rate (10.0s / 10 games = 1.0s)
+        eta_stable = calculate_eta(
+            matrix_progress=matrix_progress,
+            current_mode="standard",
+            current_played=10,
+            current_max_games=20,
+            current_mode_elapsed=8.0,  # 0.8s live rate
+            run_type="pool",
+            mode_timings=timings,
+        )
+        self.assertTrue(eta_stable["is_stable"])
+        # Standard: 10 left * 0.8s = 8.0s; Constrictor: 20 left * 0.5s = 10.0s -> Total = 18.0s
+        self.assertAlmostEqual(eta_stable["total_eta_seconds"], 18.0, places=1)
+
+    def test_depth_test_eta_calculation(self):
+        """
+        Verify that depth test ETA computes accurately from remaining fixture positions,
+        repetition budget, and live spp blending.
+        """
+        depth_data = {
+            "total_positions": 12,
+            "completed_positions": 0,
+            "time_ms": 450,
+            "repeats": 5,
+        }
+
+        # 0 completed positions: uses budget_spp = (5 repeats * 2 snakes * 450ms) / 1000 = 4.5s/position
+        # 12 positions * 4.5s = 54.0s
+        eta_budget = calculate_eta(
+            matrix_progress=[],
+            current_mode="depth",
+            current_played=0,
+            current_max_games=12,
+            current_mode_elapsed=0.0,
+            run_type="depth",
+            depth_data=depth_data,
+        )
+        self.assertAlmostEqual(eta_budget["total_eta_seconds"], 54.0, places=1)
+        self.assertEqual(eta_budget["breakdown"][0]["rate_source"], "budget")
+
+        # After 4 positions completed in 16.0s (4.0s/position live):
+        # 8 positions left * 4.0s = 32.0s
+        depth_data["completed_positions"] = 4
+        eta_live = calculate_eta(
+            matrix_progress=[],
+            current_mode="depth",
+            current_played=4,
+            current_max_games=12,
+            current_mode_elapsed=16.0,
+            run_type="depth",
+            depth_data=depth_data,
+        )
+        self.assertAlmostEqual(eta_live["total_eta_seconds"], 32.0, places=1)
+        self.assertEqual(eta_live["breakdown"][0]["rate_source"], "live")
+        self.assertTrue(eta_live["is_stable"])
+
 
 class TestDashboardServerRendering(unittest.TestCase):
     def test_dashboard_server_renders_eta_on_ephemeral_port(self):
@@ -276,6 +363,117 @@ class TestDashboardServerRendering(unittest.TestCase):
                 server.server_close()
         finally:
             temp_dir.cleanup()
+
+    def test_pool_and_depth_telemetry_and_html_elements(self):
+        """
+        Verifies that pool evaluation updates and depth benchmark updates
+        populate api state correctly and that HTML contains pool & depth DOM elements.
+        """
+        state = DashboardState(
+            strategy_baseline="strategies.strategy_baseline",
+            strategy_variant="strategies.strategy_variant",
+        )
+        server, port = start_dashboard_server(state, preferred_port=0)
+        try:
+            # 1. Test HTML contains required depth and pool cards and elements
+            with urllib.request.urlopen(f"http://localhost:{port}/", timeout=2.0) as resp:
+                self.assertEqual(resp.status, 200)
+                html = resp.read().decode("utf-8")
+
+            self.assertIn("depthCard", html)
+            self.assertIn("poolOpponentsCard", html)
+            self.assertIn("depthVarValue", html)
+            self.assertIn("depthBaseValue", html)
+            self.assertIn("depthNpsRatioValue", html)
+            self.assertIn("depthAgreeValue", html)
+            self.assertIn("depthTableBody", html)
+            self.assertIn("poolOpponentsTableBody", html)
+            self.assertIn("runTypeBadge", html)
+
+            # 2. Test Pool State update
+            state.handle_update({
+                "action": "init",
+                "run_type": "pool",
+                "experiment_desc": "Pool Zoo Benchmark",
+                "strategy_baseline": "baseline",
+                "strategy_variant": "variant",
+                "game_mode": "standard",
+                "min_games": 20,
+                "max_games": 20,
+                "threads": 4,
+            })
+            state.handle_update({
+                "action": "update_pool_game",
+                "game_num": 1,
+                "mode": "standard",
+                "cand_score": 1.0,
+                "base_score": 0.0,
+                "cand_won": True,
+                "base_won": False,
+                "opponents": ["alpha-snake"],
+                "turns": 35,
+            })
+            state.handle_update({
+                "action": "update_pool_mode",
+                "mode": "standard",
+                "cand_share": 65.0,
+                "base_share": 35.0,
+                "delta": 30.0,
+                "z_score": 2.15,
+                "decision": "KEEP",
+            })
+
+            with urllib.request.urlopen(f"http://localhost:{port}/api/state", timeout=2.0) as resp:
+                self.assertEqual(resp.status, 200)
+                p_state = json.loads(resp.read().decode("utf-8"))
+
+            self.assertEqual(p_state["run_type"], "pool")
+            self.assertIsNotNone(p_state["pool_data"])
+            self.assertEqual(p_state["pool_data"]["cand_score"], 1.0)
+            self.assertEqual(p_state["pool_data"]["cand_wins"], 1)
+            self.assertEqual(len(p_state["pool_data"]["opponents"]), 1)
+            self.assertEqual(p_state["pool_data"]["opponents"][0]["opponent"], "alpha-snake")
+
+            # 3. Test Depth State update
+            state.handle_update({
+                "action": "init_depth",
+                "total_positions": 12,
+                "time_ms": 450,
+                "repeats": 5,
+            })
+            state.handle_update({
+                "action": "update_depth_position",
+                "completed_positions": 1,
+                "total_positions": 12,
+                "mode": "standard",
+                "turn": 25,
+                "base_med_depth": 7.0,
+                "var_med_depth": 8.0,
+                "delta_depth": 1.0,
+                "base_med_nps": 120000,
+                "var_med_nps": 135000,
+                "nps_ratio": 1.12,
+                "agreement_pct": 100.0,
+                "passed": True,
+            })
+
+            with urllib.request.urlopen(f"http://localhost:{port}/api/state", timeout=2.0) as resp:
+                self.assertEqual(resp.status, 200)
+                d_state = json.loads(resp.read().decode("utf-8"))
+
+            self.assertEqual(d_state["run_type"], "depth")
+            self.assertIsNotNone(d_state["depth_data"])
+            self.assertEqual(d_state["depth_data"]["completed_positions"], 1)
+            self.assertEqual(d_state["depth_data"]["total_positions"], 12)
+            self.assertEqual(d_state["depth_data"]["median_var_depth"], 8.0)
+            self.assertEqual(d_state["depth_data"]["median_base_depth"], 7.0)
+            self.assertEqual(len(d_state["depth_data"]["fixtures"]), 1)
+            self.assertEqual(d_state["depth_data"]["fixtures"][0]["mode"], "standard")
+            self.assertEqual(d_state["depth_data"]["fixtures"][0]["turn"], 25)
+
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

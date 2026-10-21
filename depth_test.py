@@ -51,6 +51,14 @@ from harness.ab_test import (
 )
 from harness.simulator import simulate_turn
 
+try:
+    from harness.ab_dashboard import ensure_dashboard_running
+except ImportError:
+    try:
+        from ab_dashboard import ensure_dashboard_running
+    except ImportError:
+        ensure_dashboard_running = None
+
 DEFAULT_FIXTURES_DIR = Path(__file__).resolve().parent / "positions"
 DEFAULT_MODES = ["standard", "constrictor", "royale", "duel"]
 DEFAULT_TURNS = [25, 50, 75]
@@ -350,6 +358,8 @@ def run_depth_test(
     fixtures_dir: Path = DEFAULT_FIXTURES_DIR,
     modes: Sequence[str] = DEFAULT_MODES,
     turns: Sequence[int] = DEFAULT_TURNS,
+    dashboard_port: int = 8888,
+    enable_dashboard: bool = True,
 ) -> Tuple[bool, Dict[str, Any]]:
     """
     Executes fixed-position depth test suite across all requested modes.
@@ -380,11 +390,82 @@ def run_depth_test(
             print(f"  Missing: {mf}")
         return False, {}
 
+    dash_client = None
+    if enable_dashboard and ensure_dashboard_running is not None:
+        try:
+            dash_client = ensure_dashboard_running(port=dashboard_port)
+        except Exception as e:
+            dash_client = None
+
+    total_positions = len(modes) * len(turns)
+    completed_positions = 0
+    t_suite_start = time.time()
+
+    matrix_progress = [
+        {
+            "mode": m,
+            "name": m.capitalize(),
+            "num_snakes": 2 if m == "duel" else 4,
+            "status": "pending",
+            "cand_share": 0.0,
+            "base_share": 0.0,
+            "delta": 0.0,
+            "z_score": 0.0,
+            "decision": "",
+        }
+        for m in modes
+    ]
+
+    if dash_client is not None:
+        dash_client.init_test(
+            strategy_baseline=baseline_strat,
+            strategy_variant=variant_strat,
+            min_games=total_positions,
+            max_games=total_positions,
+            check_interval=total_positions,
+            early_stop_high=100.0,
+            early_stop_low=0.0,
+            threads=1,
+            experiment_desc=f"Depth Benchmark: {variant_strat} vs {baseline_strat} ({time_ms}ms, {repeats} reps)",
+            game_mode=modes[0] if modes else "standard",
+            num_snakes=4,
+            target_win_share=50.0,
+            matrix_progress=matrix_progress,
+            suite_start_time=t_suite_start,
+            run_type="depth",
+        )
+        dash_client.init_depth(
+            total_positions=total_positions,
+            time_ms=time_ms,
+            repeats=repeats,
+        )
+
     mode_results: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
     mode_summaries: Dict[str, Dict[str, Any]] = {}
     flagged_regressions: List[str] = []
 
-    for mode in modes:
+    for idx, mode in enumerate(modes):
+        matrix_progress[idx]["status"] = "running"
+        if dash_client is not None:
+            dash_client.init_test(
+                strategy_baseline=baseline_strat,
+                strategy_variant=variant_strat,
+                min_games=total_positions,
+                max_games=total_positions,
+                check_interval=total_positions,
+                early_stop_high=100.0,
+                early_stop_low=0.0,
+                threads=1,
+                experiment_desc=f"Depth Benchmark: {variant_strat} vs {baseline_strat} ({time_ms}ms, {repeats} reps)",
+                game_mode=mode,
+                num_snakes=2 if mode == "duel" else 4,
+                target_win_share=50.0,
+                matrix_progress=matrix_progress,
+                suite_start_time=t_suite_start,
+                run_type="depth",
+            )
+            dash_client.update_matrix(matrix_progress)
+
         print(f"\nEvaluating mode: {mode.upper()}...")
         for turn in turns:
             fpath = fixtures_dir / f"{mode}_turn{turn}.json"
@@ -397,6 +478,24 @@ def run_depth_test(
             )
             res["turn"] = turn
             mode_results[mode].append(res)
+            completed_positions += 1
+
+            if dash_client is not None:
+                dash_client.update_depth_position(
+                    completed_positions=completed_positions,
+                    total_positions=total_positions,
+                    mode=mode,
+                    turn=turn,
+                    base_med_depth=res["base_med_depth"],
+                    var_med_depth=res["var_med_depth"],
+                    delta_depth=res["delta_depth"],
+                    base_med_nps=res["base_med_nps"],
+                    var_med_nps=res["var_med_nps"],
+                    nps_ratio=res["nps_ratio"],
+                    agreement_pct=res["agreement_pct"],
+                    passed=not (res["var_med_depth"] < res["base_med_depth"]),
+                )
+
             print(
                 f"  Turn {turn:2d}: Base Depth={res['base_med_depth']:4.1f} | "
                 f"Var Depth={res['var_med_depth']:4.1f} (Δ {res['delta_depth']:+4.1f}) | "
@@ -420,6 +519,12 @@ def run_depth_test(
         is_regression = med_var_d < med_base_d
         if is_regression:
             flagged_regressions.append(mode)
+
+        matrix_progress[idx]["status"] = "PASSED" if not is_regression else "FAILED"
+        matrix_progress[idx]["delta"] = delta_d
+        matrix_progress[idx]["decision"] = "KEEP" if not is_regression else "REVERT"
+        if dash_client is not None:
+            dash_client.update_matrix(matrix_progress)
 
         mode_summaries[mode] = {
             "base_med_depth": med_base_d,
@@ -516,6 +621,22 @@ def run_depth_test(
     else:
         print("\n[SUCCESS] No depth regressions detected across any mode.")
 
+    if dash_client is not None:
+        dash_client.finish_depth(
+            overall_base_d=overall_base_d,
+            overall_var_d=overall_var_d,
+            overall_delta_d=overall_delta_d,
+            overall_nps_r=overall_nps_r,
+            overall_agree=overall_agree,
+            overall_pass=overall_pass,
+        )
+        dash_client.set_finished(
+            stop_type="KEEP" if overall_pass else "REVERT",
+            stop_reason="All modes depth-passed" if overall_pass else f"Depth regression in {', '.join(flagged_regressions)}",
+            recommendation="KEEP" if overall_pass else "REVERT",
+            csv_path="",
+        )
+
     return overall_pass, {
         "modes": mode_results,
         "summaries": mode_summaries,
@@ -578,6 +699,17 @@ def parse_args() -> argparse.Namespace:
         default="standard,constrictor,royale,duel",
         help="Comma-separated list of modes to test or generate.",
     )
+    parser.add_argument(
+        "--dashboard-port",
+        type=int,
+        default=8888,
+        help="Port for the real-time web monitoring dashboard (default: 8888).",
+    )
+    parser.add_argument(
+        "--no-dashboard",
+        action="store_true",
+        help="Disable automatic dashboard connection and telemetry.",
+    )
     return parser.parse_args()
 
 
@@ -597,6 +729,8 @@ def main() -> None:
         repeats=args.repeats,
         fixtures_dir=fixtures_dir,
         modes=modes,
+        dashboard_port=args.dashboard_port,
+        enable_dashboard=not args.no_dashboard,
     )
 
     sys.exit(0 if passed else 1)
