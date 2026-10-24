@@ -526,6 +526,30 @@ class TestDashboardSkip(unittest.TestCase):
         last_entry = history[-1]
         self.assertIn("recommendation", last_entry)
 
+    def test_omitted_modes_render_skipped(self):
+        from ab_dashboard import render_html_with_state, DASHBOARD_HTML
+        data = {
+            "status": "FINISHED",
+            "recommendation": "PARITY",
+            "game_mode": "constrictor,royale,standard",
+            "matrix_progress": [
+                {"mode": "constrictor", "name": "Constrictor 4P", "status": "PARITY", "games": 200, "max_games": 200, "win_share": 25.0},
+                {"mode": "royale", "name": "Royale 4P", "status": "PARITY", "games": 200, "max_games": 200, "win_share": 25.0},
+                {"mode": "standard", "name": "Standard 4P", "status": "PARITY", "games": 200, "max_games": 200, "win_share": 25.0},
+            ],
+            "pool_data": {
+                "modes": {
+                    "constrictor": {"cand_share": 33.8, "base_share": 37.5, "delta": -3.8, "decision": "PARITY", "games": 40, "max_games": 40},
+                    "royale": {"cand_share": 25.0, "base_share": 38.8, "delta": -13.8, "decision": "PARITY", "games": 40, "max_games": 40},
+                    "standard": {"cand_share": 22.5, "base_share": 28.7, "delta": -6.2, "decision": "PARITY", "games": 40, "max_games": 40},
+                }
+            }
+        }
+        rendered = render_html_with_state(DASHBOARD_HTML, data)
+        # In both matrix and pool tables, Duel 1v1 must be SKIPPED instead of PENDING
+        self.assertIn('<span class="matrix-col-status matrix-status-skipped">SKIPPED</span>', rendered)
+        self.assertNotIn('<span class="matrix-col-status matrix-status-pending">PENDING</span>', rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2868,6 +2868,10 @@ def run_pool_benchmark(
             "delta": 0.0,
             "z_score": 0.0,
             "decision": "",
+            "games": 0,
+            "max_games": pool_games,
+            "cand_games": 0,
+            "base_games": 0,
         }
         for m in active_matrix
     ]
@@ -3112,11 +3116,15 @@ def run_pool_benchmark(
             "mode": m_mode,
             "name": m_name,
             "games": N,
+            "max_games": pool_games,
+            "cand_games": N,
+            "base_games": N,
             "cand_win_share": cand_win_share,
             "base_win_share": base_win_share,
             "delta": delta,
             "z_score": z_score,
             "decision": decision,
+            "duration_sec": t_mode_elapsed,
         })
 
         matrix_progress[idx]["status"] = "PASSED" if decision == "KEEP" else ("PARITY" if decision == "PARITY" else "FAILED")
@@ -3125,6 +3133,11 @@ def run_pool_benchmark(
         matrix_progress[idx]["delta"] = delta
         matrix_progress[idx]["z_score"] = z_score
         matrix_progress[idx]["decision"] = decision
+        matrix_progress[idx]["games"] = N
+        matrix_progress[idx]["max_games"] = pool_games
+        matrix_progress[idx]["cand_games"] = N
+        matrix_progress[idx]["base_games"] = N
+        matrix_progress[idx]["duration_sec"] = t_mode_elapsed
 
         if dash_client is not None:
             dash_client.update_pool_mode(
@@ -3134,6 +3147,11 @@ def run_pool_benchmark(
                 delta=delta,
                 z_score=z_score,
                 decision=decision,
+                games=N,
+                max_games=pool_games,
+                cand_games=N,
+                base_games=N,
+                duration_sec=t_mode_elapsed,
             )
             dash_client.update_matrix(matrix_progress)
 

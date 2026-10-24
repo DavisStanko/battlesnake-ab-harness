@@ -973,16 +973,57 @@ class DashboardState:
                 ]
             elif action == "update_pool_mode":
                 m_mode = payload.get("mode")
+                games = payload.get("games")
+                max_games = payload.get("max_games")
+                cand_games = payload.get("cand_games", games)
+                base_games = payload.get("base_games", games)
+                dec = payload.get("decision", "PARITY")
+                status = "PASSED" if dec == "KEEP" else ("PARITY" if dec == "PARITY" else "FAILED")
+                c_sh = round(float(payload.get("cand_share", 0.0)), 1)
+                b_sh = round(float(payload.get("base_share", 0.0)), 1)
+                d_val = round(float(payload.get("delta", 0.0)), 1)
+                z_val = round(float(payload.get("z_score", 0.0)), 2)
+                dur = payload.get("duration_sec")
+
                 if self.matrix_progress:
                     for item in self.matrix_progress:
                         if item.get("mode") == m_mode:
-                            dec = payload.get("decision", "PARITY")
-                            item["status"] = "PASSED" if dec == "KEEP" else ("PARITY" if dec == "PARITY" else "FAILED")
-                            item["cand_share"] = round(float(payload.get("cand_share", 0.0)), 1)
-                            item["base_share"] = round(float(payload.get("base_share", 0.0)), 1)
-                            item["delta"] = round(float(payload.get("delta", 0.0)), 1)
-                            item["z_score"] = round(float(payload.get("z_score", 0.0)), 2)
+                            item["status"] = status
+                            item["cand_share"] = c_sh
+                            item["base_share"] = b_sh
+                            item["delta"] = d_val
+                            item["z_score"] = z_val
                             item["decision"] = dec
+                            if games is not None:
+                                item["games"] = games
+                            if max_games is not None:
+                                item["max_games"] = max_games
+                            if cand_games is not None:
+                                item["cand_games"] = cand_games
+                            if base_games is not None:
+                                item["base_games"] = base_games
+                            if dur is not None:
+                                item["duration_sec"] = dur
+                modes_dict = self.pool_data.setdefault("modes", {})
+                mode_entry = {
+                    "cand_share": c_sh,
+                    "base_share": b_sh,
+                    "delta": d_val,
+                    "z_score": z_val,
+                    "decision": dec,
+                    "status": status,
+                }
+                if games is not None:
+                    mode_entry["games"] = games
+                if max_games is not None:
+                    mode_entry["max_games"] = max_games
+                if cand_games is not None:
+                    mode_entry["cand_games"] = cand_games
+                if base_games is not None:
+                    mode_entry["base_games"] = base_games
+                if dur is not None:
+                    mode_entry["duration_sec"] = dur
+                modes_dict[m_mode] = mode_entry
                 if payload.get("opponents"):
                     self.pool_data["opponents"] = payload.get("opponents")
             elif action == "update_depth_position":
@@ -3668,7 +3709,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     ];
 
     if (poolModesBody) {
-      const modeDataMap = pool.mode_results || pool.modes || pool.mode_stats || {};
+      let rawModes = pool.mode_results || pool.modes || pool.mode_stats || {};
+      const modeDataMap = {};
+      if (Array.isArray(rawModes)) {
+        rawModes.forEach(item => {
+          if (item && item.mode) modeDataMap[item.mode.toLowerCase()] = item;
+        });
+      } else if (rawModes && typeof rawModes === 'object') {
+        Object.keys(rawModes).forEach(k => {
+          modeDataMap[k.toLowerCase()] = rawModes[k];
+        });
+      }
+
       const matrixList = (data.matrix_progress && data.matrix_progress.length > 0) ? data.matrix_progress : [];
       const modeMap = {};
       matrixList.forEach(m => { if (m.mode) modeMap[m.mode.toLowerCase()] = m; });
@@ -3692,10 +3744,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const m = modeMap[modeKey] || {};
         const isCurrentActive = isPoolRunning && (activeModeClean === modeKey);
 
-        const candShare = md.cand_share != null ? md.cand_share : (m.cand_share != null ? m.cand_share : (isCurrentActive ? (pool.cand_share || 0) : null));
-        const baseShare = md.base_share != null ? md.base_share : (m.base_share != null ? m.base_share : (isCurrentActive ? (pool.base_share || 0) : null));
-        const delta = md.delta != null ? md.delta : (m.delta != null ? m.delta : (candShare != null && baseShare != null ? (candShare - baseShare) : null));
-        const z = md.z_score != null ? md.z_score : (m.z_score != null ? m.z_score : (isCurrentActive ? overallZ : null));
+        const isOmitted = (matrixList.length > 0 && !modeMap[modeKey] && !modeDataMap[modeKey]);
+        const isExplicitSkipped = (m.status === 'SKIPPED' || md.status === 'SKIPPED' || m.decision === 'SKIPPED' || md.decision === 'SKIPPED');
+        const isSkipped = isOmitted || isExplicitSkipped;
+
+        const candShare = isOmitted ? null : (md.cand_share != null ? md.cand_share : (m.cand_share != null ? m.cand_share : (isCurrentActive ? (pool.cand_share || 0) : null)));
+        const baseShare = isOmitted ? null : (md.base_share != null ? md.base_share : (m.base_share != null ? m.base_share : (isCurrentActive ? (pool.base_share || 0) : null)));
+        const delta = isOmitted ? null : (md.delta != null ? md.delta : (m.delta != null ? m.delta : (candShare != null && baseShare != null ? (candShare - baseShare) : null)));
+        const z = isOmitted ? null : (md.z_score != null ? md.z_score : (m.z_score != null ? m.z_score : (isCurrentActive ? overallZ : null)));
 
         const maxGames = md.max_games || m.max_games || bm.max_games || 200;
         const candGames = md.cand_games != null ? md.cand_games : (isCurrentActive ? (pool.cand_games || data.total_played || 0) : (md.games || m.games || 0));
@@ -3707,6 +3763,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if (isCurrentActive) {
           statusClass = 'running';
           statusText = 'RUNNING';
+        } else if (isSkipped) {
+          statusClass = 'skipped';
+          statusText = 'SKIPPED';
+          completedPoolModes++;
         } else if (md.decision || m.decision) {
           const dec = md.decision || m.decision;
           statusText = dec;
@@ -3719,10 +3779,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
 
         // 1. Mode: Name only
-        // 2. Games: "cand / max · base / max"
-        const gamesText = (gamesActive > 0 || statusText !== 'PENDING')
+        // 2. Games: "cand / max · base / max" (or "--" if skipped without games)
+        const gamesText = (gamesActive > 0)
           ? `${candGames} / ${maxGames} · ${baseGames} / ${maxGames}`
-          : `0 / ${maxGames} · 0 / ${maxGames}`;
+          : (isSkipped ? '--' : `0 / ${maxGames} · 0 / ${maxGames}`);
         const pctDone = maxGames > 0 ? Math.min(100, (gamesActive / maxGames) * 100) : 0;
 
         // 3. Win Share: combined "variant% / baseline%"
@@ -3746,7 +3806,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         // 6. Time (Finished: duration, Running: rem " left", Queued: exp " est")
         let etaText = '--';
         const dur = md.duration_sec || m.duration_sec;
-        if (['PASSED', 'PARITY', 'FAILED', 'KEEP', 'REVERT'].includes(statusText) || dur != null) {
+        if (isSkipped) {
+          etaText = '--';
+        } else if (['PASSED', 'PARITY', 'FAILED', 'KEEP', 'REVERT'].includes(statusText) || dur != null) {
           etaText = (dur != null && dur > 0) ? formatDuration(dur) : '--';
         } else if (isCurrentActive) {
           const b = etaMap[modeKey];
@@ -4082,12 +4144,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const m = modeMap[modeKey] || {};
       const isCurrentActive = isSelfRunning && (activeModeClean === modeKey);
 
+      const isOmitted = (matrixList.length > 0 && !modeMap[modeKey]);
+      const isExplicitSkipped = (m.status === 'SKIPPED' || m.decision === 'SKIPPED');
+      const isSkipped = isOmitted || isExplicitSkipped;
+
       let effectiveStatus = 'PENDING';
-      if (m.status && ['PASSED', 'PARITY', 'FAILED', 'SKIPPED'].includes(m.status)) {
+      if (isCurrentActive) {
+        effectiveStatus = 'RUNNING';
+      } else if (isSkipped) {
+        effectiveStatus = 'SKIPPED';
+        completedCount++;
+      } else if (m.status && ['PASSED', 'PARITY', 'FAILED'].includes(m.status)) {
         effectiveStatus = m.status;
         completedCount++;
-      } else if (isCurrentActive) {
-        effectiveStatus = 'RUNNING';
       } else if (isSelfRunning && (m.status === 'RUNNING' || m.status === 'running')) {
         effectiveStatus = 'RUNNING';
       }
@@ -4153,13 +4222,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           etaText = '--';
         }
       } else if (effectiveStatus === 'SKIPPED') {
-        scoreVal = gamesVal > 0 ? `${(m.win_share || 0).toFixed(1)}%` : 'SKIPPED';
-        scoreColor = '#fbbf24';
-        if (gamesVal > 0) {
-          const delta = (m.win_share || 0) - targetVal;
+        scoreVal = (gamesVal > 0 && m.win_share != null) ? `${Number(m.win_share).toFixed(1)}%` : '--';
+        scoreColor = (gamesVal > 0 && m.win_share != null) ? '#fbbf24' : 'var(--text-muted)';
+        if (gamesVal > 0 && m.win_share != null) {
+          const delta = Number(m.win_share) - targetVal;
           deltaText = `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%`;
           deltaColor = delta > 0.5 ? 'var(--variant-color)' : (delta < -0.5 ? 'var(--danger-color)' : '#f59e0b');
+        } else {
+          deltaText = '--';
+          deltaColor = 'var(--text-muted)';
         }
+        zScoreText = '--';
         etaText = '--';
       } else {
         const b = etaMap[modeKey];
@@ -4171,13 +4244,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
 
       const rowClass = isCurrentActive ? 'active-running' : '';
+      const gamesText = (effectiveStatus === 'SKIPPED' && gamesVal === 0) ? '--' : `${gamesVal} / ${maxGames}`;
 
       return `
         <tr class="${rowClass}">
           <td style="font-weight: 700; color: var(--text-main); text-align: left;">
             <span>${bm.name}</span>
           </td>
-          <td style="font-weight: 700;">${gamesVal} / ${maxGames}</td>
+          <td style="font-weight: 700;">${gamesText}</td>
           <td style="font-weight: 700; color: ${scoreColor}; font-size: 0.95rem;">${scoreVal}</td>
           <td style="font-weight: 700; color: ${deltaColor}; font-family: 'JetBrains Mono', monospace;">${deltaText}</td>
           <td style="font-weight: 600; color: ${zScoreText !== '--' ? (parseFloat(zScoreText) >= 1.645 ? 'var(--variant-color)' : (parseFloat(zScoreText) <= -1.645 ? 'var(--danger-color)' : '#f59e0b')) : 'var(--text-muted)'}; font-family: 'JetBrains Mono', monospace;">${zScoreText}</td>
@@ -4192,11 +4266,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     baseModes.forEach((bm) => {
       const modeKey = bm.mode;
       const m = modeMap[modeKey] || {};
-      const isCurrentActive = isSelfRunning && (activeModeClean === modeKey);
-      const gamesVal = isCurrentActive ? played : (m.games != null ? m.games : (m.total_played != null ? m.total_played : 0));
-      const maxGames = m.max_games || bm.max_games || 200;
-      totalMatrixPlayed += gamesVal;
-      totalMatrixMax += maxGames;
+      const isOmitted = (matrixList.length > 0 && !modeMap[modeKey]);
+      const isSkipped = isOmitted || (m.status === 'SKIPPED' || m.decision === 'SKIPPED');
+      if (!isSkipped) {
+        const isCurrentActive = isSelfRunning && (activeModeClean === modeKey);
+        const gamesVal = isCurrentActive ? played : (m.games != null ? m.games : (m.total_played != null ? m.total_played : 0));
+        const maxGames = m.max_games || bm.max_games || 200;
+        totalMatrixPlayed += gamesVal;
+        totalMatrixMax += maxGames;
+      }
     });
     setHTML(tableBody, rowsHtml);
     if (matrixSubtitle) matrixSubtitle.innerText = `${completedCount} / 4 Modes Complete`;
@@ -5174,8 +5252,10 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         {"mode": "duel", "name": "Duel 1v1", "target_share": 50.0, "max_games": 200, "num_snakes": 2},
         {"mode": "standard", "name": "Standard 4P", "target_share": 25.0, "max_games": 200, "num_snakes": 4},
     ]
+    matrix_list = data.get("matrix_progress") or []
+    has_matrix = len(matrix_list) > 0
     mode_map = {}
-    for m in (data.get("matrix_progress") or []):
+    for m in matrix_list:
         if m.get("mode"):
             mode_map[m["mode"].lower()] = m
 
@@ -5193,20 +5273,26 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         mkey = bm["mode"]
         m = mode_map.get(mkey, {})
         is_curr = (is_running and game_mode == mkey and run_type == "self")
+        is_omitted = has_matrix and (mkey not in mode_map)
+        is_skipped = is_omitted or (m.get("status") == "SKIPPED") or (m.get("decision") == "SKIPPED")
 
         m_status = m.get("status", "PENDING")
-        if m_status in ("PASSED", "PARITY", "FAILED", "SKIPPED"):
+        if is_curr:
+            eff_status = "RUNNING"
+        elif is_skipped:
+            eff_status = "SKIPPED"
+            completed_modes += 1
+        elif m_status in ("PASSED", "PARITY", "FAILED"):
             eff_status = m_status
             completed_modes += 1
-        elif is_curr:
-            eff_status = "RUNNING"
         else:
             eff_status = "PENDING"
 
         max_g = m.get("max_games") or bm["max_games"]
         g_val = played if is_curr else (m.get("games") if m.get("games") is not None else (m.get("total_played") or 0))
-        total_matrix_played += g_val
-        total_matrix_max += max_g
+        if not is_skipped:
+            total_matrix_played += g_val
+            total_matrix_max += max_g
         pct_done = min(100.0, (g_val / max_g * 100.0)) if max_g > 0 else 0.0
 
         target_val = bm["target_share"]
@@ -5243,6 +5329,11 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
                 z_score_text = "--"
             dur = m.get("duration_sec")
             eta_text = format_duration(float(dur)) if (dur and float(dur) > 0) else "--"
+        elif eff_status == "SKIPPED":
+            score_val = f"{float(var_ws):.1f}%" if (var_ws is not None and g_val > 0) else "--"
+            score_color = "#fbbf24" if (var_ws is not None and g_val > 0) else "var(--text-muted)"
+            z_score_text = "--"
+            eta_text = "--"
         else:
             score_val = "--"
             score_color = "var(--text-main)"
@@ -5254,7 +5345,7 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         row_class = "active-running" if is_curr else ""
         z_color = "var(--variant-color)" if z_score_text != "--" and float(z_score_text) >= 1.645 else ("var(--danger-color)" if z_score_text != "--" and float(z_score_text) <= -1.645 else ("#f59e0b" if z_score_text != "--" else "var(--text-muted)"))
 
-        if var_ws is not None and g_val > 0:
+        if eff_status != "SKIPPED" and var_ws is not None and g_val > 0:
             d_val = float(var_ws) - target_val
             d_sign = "+" if d_val > 0 else ""
             delta_text = f"{d_sign}{d_val:.1f}%"
@@ -5263,12 +5354,14 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
             delta_text = "--"
             delta_col = "var(--text-muted)"
 
+        games_display = "--" if (eff_status == "SKIPPED" and g_val == 0) else f"{g_val} / {max_g}"
+
         rows.append(f'''
         <tr class="{row_class}">
           <td style="font-weight: 700; color: var(--text-main); text-align: left;">
             <span>{bm["name"]}</span>
           </td>
-          <td style="font-weight: 700;">{g_val} / {max_g}</td>
+          <td style="font-weight: 700;">{games_display}</td>
           <td style="font-weight: 700; color: {score_color}; font-size: 0.95rem;">{score_val}</td>
           <td style="font-weight: 700; color: {delta_col}; font-family: 'JetBrains Mono', monospace;">{delta_text}</td>
           <td style="font-weight: 600; color: {z_color}; font-family: 'JetBrains Mono', monospace;">{z_score_text}</td>
@@ -5281,7 +5374,15 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
 
     # Pre-render Zoo Pool Gate table
     pool_data = data.get("pool_data") or {}
-    pool_modes = pool_data.get("mode_results") or pool_data.get("modes") or pool_data.get("mode_stats") or {}
+    raw_pool_modes = pool_data.get("mode_results") or pool_data.get("modes") or pool_data.get("mode_stats") or {}
+    pool_modes = {}
+    if isinstance(raw_pool_modes, list):
+        for item in raw_pool_modes:
+            if isinstance(item, dict) and item.get("mode"):
+                pool_modes[item["mode"].lower()] = item
+    elif isinstance(raw_pool_modes, dict):
+        pool_modes = {k.lower(): v for k, v in raw_pool_modes.items()}
+
     pool_opponents = pool_data.get("opponents") or []
     is_pool_running = (status == "RUNNING" and run_type == "pool" and data.get("runner_alive", True) is not False)
     pool_overall_z = pool_data.get("z_score", 0.0)
@@ -5291,13 +5392,16 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
     for bm in base_modes:
         mkey = bm["mode"]
         pm = pool_modes.get(mkey, {})
-        mm = mode_map.get(mkey, {}) if run_type == "pool" else {}
+        mm = mode_map.get(mkey, {})
         is_curr_pool = (is_pool_running and game_mode == mkey)
 
-        cand_s = pm.get("cand_share") if pm.get("cand_share") is not None else (mm.get("cand_share") if mm.get("cand_share") is not None else (pool_data.get("cand_share") if is_curr_pool else None))
-        base_s = pm.get("base_share") if pm.get("base_share") is not None else (mm.get("base_share") if mm.get("base_share") is not None else (pool_data.get("base_share") if is_curr_pool else None))
-        p_delta = pm.get("delta") if pm.get("delta") is not None else (mm.get("delta") if mm.get("delta") is not None else ((float(cand_s) - float(base_s)) if (cand_s is not None and base_s is not None) else None))
-        pz = pm.get("z_score") if pm.get("z_score") is not None else (mm.get("z_score") if mm.get("z_score") is not None else (pool_overall_z if is_curr_pool else None))
+        is_omitted = has_matrix and (mkey not in mode_map) and (mkey not in pool_modes)
+        is_skipped = is_omitted or (pm.get("status") == "SKIPPED") or (mm.get("status") == "SKIPPED") or (pm.get("decision") == "SKIPPED") or (mm.get("decision") == "SKIPPED")
+
+        cand_s = None if is_omitted else (pm.get("cand_share") if pm.get("cand_share") is not None else (mm.get("cand_share") if mm.get("cand_share") is not None else (pool_data.get("cand_share") if is_curr_pool else None)))
+        base_s = None if is_omitted else (pm.get("base_share") if pm.get("base_share") is not None else (mm.get("base_share") if mm.get("base_share") is not None else (pool_data.get("base_share") if is_curr_pool else None)))
+        p_delta = None if is_omitted else (pm.get("delta") if pm.get("delta") is not None else (mm.get("delta") if mm.get("delta") is not None else ((float(cand_s) - float(base_s)) if (cand_s is not None and base_s is not None) else None)))
+        pz = None if is_omitted else (pm.get("z_score") if pm.get("z_score") is not None else (mm.get("z_score") if mm.get("z_score") is not None else (pool_overall_z if is_curr_pool else None)))
 
         p_max = pm.get("max_games") or mm.get("max_games") or bm["max_games"] or 200
         cand_g = pm.get("cand_games") if pm.get("cand_games") is not None else (played if is_curr_pool else (pm.get("games") or mm.get("games") or 0))
@@ -5308,6 +5412,10 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         if is_curr_pool:
             p_status_class = "running"
             p_status_text = "RUNNING"
+        elif is_skipped:
+            p_status_class = "skipped"
+            p_status_text = "SKIPPED"
+            completed_pool_count += 1
         elif p_dec:
             p_status_text = p_dec
             p_status_class = p_dec.lower()
@@ -5320,7 +5428,7 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
             p_status_class = "pending"
             p_status_text = "PENDING"
 
-        p_games_text = f"{cand_g} / {p_max} · {base_g} / {p_max}" if (active_g > 0 or p_status_text != "PENDING") else f"0 / {p_max} · 0 / {p_max}"
+        p_games_text = f"{cand_g} / {p_max} · {base_g} / {p_max}" if (active_g > 0) else ("--" if is_skipped else f"0 / {p_max} · 0 / {p_max}")
         p_pct_done = min(100.0, (active_g / p_max * 100.0)) if p_max > 0 else 0.0
 
         if cand_s is not None and base_s is not None:
@@ -5347,7 +5455,9 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
 
         b_eta = eta_map.get(mkey, {}).get("eta_seconds")
         dur = pm.get("duration_sec") or mm.get("duration_sec")
-        if p_status_text in ("PASSED", "PARITY", "FAILED", "KEEP", "REVERT") or dur:
+        if is_skipped:
+            p_eta_text = "--"
+        elif p_status_text in ("PASSED", "PARITY", "FAILED", "KEEP", "REVERT") or dur:
             p_eta_text = format_duration(float(dur)) if (dur and float(dur) > 0) else "--"
         elif is_curr_pool:
             rem_s = float(b_eta) if b_eta else None
