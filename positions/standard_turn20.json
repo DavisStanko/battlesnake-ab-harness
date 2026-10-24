@@ -1,6 +1,6 @@
 {
   "game": {
-    "id": "fixture_standard_turn50",
+    "id": "standard_20",
     "ruleset": {
       "name": "standard",
       "version": "v1.2.3",
@@ -23,7 +23,7 @@
     "timeout": 500,
     "source": "custom"
   },
-  "turn": 50,
+  "turn": 20,
   "board": {
     "width": 11,
     "height": 11,
@@ -31,27 +31,19 @@
       {
         "id": "variant",
         "name": "variant",
-        "health": 78,
+        "health": 82,
         "body": [
-          {
-            "x": 5,
-            "y": 5
-          },
-          {
-            "x": 4,
-            "y": 5
-          },
           {
             "x": 4,
             "y": 4
           },
           {
-            "x": 4,
-            "y": 3
+            "x": 3,
+            "y": 4
           },
           {
-            "x": 4,
-            "y": 2
+            "x": 3,
+            "y": 3
           },
           {
             "x": 3,
@@ -59,136 +51,100 @@
           }
         ],
         "head": {
-          "x": 5,
-          "y": 5
+          "x": 4,
+          "y": 4
         },
-        "length": 6
+        "length": 4
       },
       {
         "id": "baseline_1",
         "name": "baseline_1",
-        "health": 95,
+        "health": 80,
         "body": [
           {
             "x": 2,
-            "y": 2
+            "y": 8
           },
           {
-            "x": 2,
-            "y": 3
-          },
-          {
-            "x": 1,
-            "y": 3
-          },
-          {
-            "x": 1,
-            "y": 4
-          },
-          {
-            "x": 0,
-            "y": 4
-          },
-          {
-            "x": 0,
-            "y": 5
-          },
-          {
-            "x": 1,
-            "y": 5
-          }
-        ],
-        "head": {
-          "x": 2,
-          "y": 2
-        },
-        "length": 7
-      },
-      {
-        "id": "baseline_2",
-        "name": "baseline_2",
-        "health": 77,
-        "body": [
-          {
-            "x": 5,
-            "y": 7
-          },
-          {
-            "x": 4,
-            "y": 7
+            "x": 3,
+            "y": 8
           },
           {
             "x": 3,
             "y": 7
-          },
-          {
-            "x": 2,
-            "y": 7
-          },
-          {
-            "x": 2,
-            "y": 8
           }
         ],
         "head": {
-          "x": 5,
-          "y": 7
+          "x": 2,
+          "y": 8
         },
-        "length": 5
+        "length": 3
+      },
+      {
+        "id": "baseline_2",
+        "name": "baseline_2",
+        "health": 82,
+        "body": [
+          {
+            "x": 8,
+            "y": 6
+          },
+          {
+            "x": 8,
+            "y": 5
+          },
+          {
+            "x": 8,
+            "y": 4
+          },
+          {
+            "x": 7,
+            "y": 4
+          }
+        ],
+        "head": {
+          "x": 8,
+          "y": 6
+        },
+        "length": 4
       },
       {
         "id": "baseline_3",
         "name": "baseline_3",
-        "health": 97,
+        "health": 90,
         "body": [
           {
-            "x": 9,
+            "x": 6,
+            "y": 4
+          },
+          {
+            "x": 6,
             "y": 5
           },
           {
-            "x": 9,
+            "x": 6,
             "y": 6
-          },
-          {
-            "x": 9,
-            "y": 7
-          },
-          {
-            "x": 8,
-            "y": 7
-          },
-          {
-            "x": 7,
-            "y": 7
           },
           {
             "x": 7,
             "y": 6
           },
           {
-            "x": 8,
-            "y": 6
+            "x": 7,
+            "y": 7
           }
         ],
         "head": {
-          "x": 9,
-          "y": 5
+          "x": 6,
+          "y": 4
         },
-        "length": 7
+        "length": 5
       }
     ],
     "food": [
       {
-        "x": 2,
-        "y": 1
-      },
-      {
-        "x": 5,
-        "y": 0
-      },
-      {
         "x": 0,
-        "y": 2
+        "y": 8
       }
     ],
     "hazards": []
@@ -196,27 +152,19 @@
   "you": {
     "id": "variant",
     "name": "variant",
-    "health": 78,
+    "health": 82,
     "body": [
-      {
-        "x": 5,
-        "y": 5
-      },
-      {
-        "x": 4,
-        "y": 5
-      },
       {
         "x": 4,
         "y": 4
       },
       {
-        "x": 4,
-        "y": 3
+        "x": 3,
+        "y": 4
       },
       {
-        "x": 4,
-        "y": 2
+        "x": 3,
+        "y": 3
       },
       {
         "x": 3,
@@ -224,9 +172,11 @@
       }
     ],
     "head": {
-      "x": 5,
-      "y": 5
+      "x": 4,
+      "y": 4
     },
-    "length": 6
-  }
+    "length": 4
+  },
+  "phase": "Early",
+  "title": "Standard Early"
 }

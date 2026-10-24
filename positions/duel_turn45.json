@@ -1,6 +1,6 @@
 {
   "game": {
-    "id": "fixture_duel_turn50",
+    "id": "duel_45",
     "ruleset": {
       "name": "duel",
       "version": "v1.2.3",
@@ -23,7 +23,7 @@
     "timeout": 500,
     "source": "custom"
   },
-  "turn": 50,
+  "turn": 45,
   "board": {
     "width": 11,
     "height": 11,
@@ -31,67 +31,15 @@
       {
         "id": "baseline",
         "name": "baseline",
-        "health": 92,
-        "body": [
-          {
-            "x": 7,
-            "y": 7
-          },
-          {
-            "x": 8,
-            "y": 7
-          },
-          {
-            "x": 8,
-            "y": 6
-          },
-          {
-            "x": 8,
-            "y": 5
-          },
-          {
-            "x": 7,
-            "y": 5
-          },
-          {
-            "x": 7,
-            "y": 4
-          },
-          {
-            "x": 8,
-            "y": 4
-          }
-        ],
-        "head": {
-          "x": 7,
-          "y": 7
-        },
-        "length": 7
-      },
-      {
-        "id": "variant",
-        "name": "variant",
-        "health": 89,
+        "health": 57,
         "body": [
           {
             "x": 4,
-            "y": 4
-          },
-          {
-            "x": 3,
-            "y": 4
-          },
-          {
-            "x": 3,
-            "y": 5
-          },
-          {
-            "x": 4,
-            "y": 5
+            "y": 7
           },
           {
             "x": 5,
-            "y": 5
+            "y": 7
           },
           {
             "x": 5,
@@ -104,15 +52,43 @@
         ],
         "head": {
           "x": 4,
-          "y": 4
+          "y": 7
         },
-        "length": 7
+        "length": 4
+      },
+      {
+        "id": "variant",
+        "name": "variant",
+        "health": 57,
+        "body": [
+          {
+            "x": 6,
+            "y": 3
+          },
+          {
+            "x": 5,
+            "y": 3
+          },
+          {
+            "x": 5,
+            "y": 4
+          },
+          {
+            "x": 6,
+            "y": 4
+          }
+        ],
+        "head": {
+          "x": 6,
+          "y": 3
+        },
+        "length": 4
       }
     ],
     "food": [
       {
-        "x": 1,
-        "y": 0
+        "x": 5,
+        "y": 5
       }
     ],
     "hazards": []
@@ -120,41 +96,31 @@
   "you": {
     "id": "baseline",
     "name": "baseline",
-    "health": 92,
+    "health": 57,
     "body": [
       {
-        "x": 7,
+        "x": 4,
         "y": 7
       },
       {
-        "x": 8,
+        "x": 5,
         "y": 7
       },
       {
-        "x": 8,
+        "x": 5,
         "y": 6
       },
       {
-        "x": 8,
-        "y": 5
-      },
-      {
-        "x": 7,
-        "y": 5
-      },
-      {
-        "x": 7,
-        "y": 4
-      },
-      {
-        "x": 8,
-        "y": 4
+        "x": 4,
+        "y": 6
       }
     ],
     "head": {
-      "x": 7,
+      "x": 4,
       "y": 7
     },
-    "length": 7
-  }
+    "length": 4
+  },
+  "phase": "Mid",
+  "title": "Duel Mid"
 }

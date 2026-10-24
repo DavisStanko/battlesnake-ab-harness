@@ -14,6 +14,14 @@ from harness.ab_dashboard import (
     get_mode_medians,
     calculate_eta,
     DashboardState,
+    calculate_rate_gpm,
+    format_rate_gpm,
+    format_duration,
+    format_elapsed_clock,
+    format_left_duration,
+    format_eta_minutes,
+    calculate_run_progress_percent,
+    format_history_time,
 )
 
 
@@ -314,6 +322,212 @@ class TestDashboardETA(unittest.TestCase):
         self.assertEqual(d["mode_elapsed_seconds"], 0.0)
         self.assertIsNone(d["eta_seconds"])
         self.assertEqual(d["eta_breakdown"], [])
+
+
+    def test_rate_gpm_unit_rule(self):
+        """
+        Unit Rule Verification: Rate must be calculated and displayed as games per minute.
+        e.g., 100 games in 1579s = ~3.8 games/min.
+        """
+        # 100 games in 1579 seconds -> ~0.06333 games/s * 60 = ~3.80 games/min
+        rate_gpm = calculate_rate_gpm(100, 1579.0)
+        self.assertAlmostEqual(rate_gpm, 3.79987, places=2)
+        rate_str = format_rate_gpm(rate_gpm)
+        self.assertEqual(rate_str, "3.8 games/min")
+
+        # Zero games or zero elapsed
+        self.assertEqual(calculate_rate_gpm(0, 100.0), 0.0)
+        self.assertEqual(format_rate_gpm(0.0), "0.0 games/min")
+        self.assertEqual(calculate_rate_gpm(10, 0.0), 0.0)
+
+        # Depth unit rule
+        depth_gpm = calculate_rate_gpm(12, 3.0)
+        self.assertEqual(depth_gpm, 240.0)
+        self.assertEqual(format_rate_gpm(depth_gpm, unit="pos/min"), "240.0 pos/min")
+
+    def test_format_duration(self):
+        """
+        Verify single duration formatter:
+        Format: two largest units, always with unit letters - '1h 32m', '48m 33s', '5m 58s', '23s'.
+        Sub-minute test durations keep one decimal ('4.7s').
+        Three-unit values like '1h 31m 52s' trimmed to two units ('1h 31m').
+        """
+        self.assertEqual(format_duration(None), "--")
+        self.assertEqual(format_duration(0), "0s")
+        self.assertEqual(format_duration(0, allow_decimal=True), "0.0s")
+        self.assertEqual(format_duration(23), "23s")
+        self.assertEqual(format_duration(4.7, allow_decimal=True), "4.7s")
+        # 5m 58s -> 358s
+        self.assertEqual(format_duration(5 * 60 + 58), "5m 58s")
+        # 48m 33s -> 2913s
+        self.assertEqual(format_duration(48 * 60 + 33), "48m 33s")
+        # 1h 32m -> 5520s
+        self.assertEqual(format_duration(1 * 3600 + 32 * 60), "1h 32m")
+        # 1h 31m 52s -> trimmed to two units: "1h 31m"
+        self.assertEqual(format_duration(1 * 3600 + 31 * 60 + 52), "1h 31m")
+        # Exact hours
+        self.assertEqual(format_duration(3600), "1h")
+        # Days
+        self.assertEqual(format_duration(86400 + 3600), "1d 1h")
+
+    def test_format_left_duration(self):
+        """
+        Verify header LEFT formatter:
+        '1h 38m', '2h 54m' at or above an hour.
+        '54m', '5m' under an hour.
+        """
+        self.assertEqual(format_left_duration(None), "--")
+        self.assertEqual(format_left_duration(0), "--")
+        self.assertEqual(format_left_duration(-10), "--")
+        # 2h 54m: (2 * 60 + 54) * 60 = 10440s
+        self.assertEqual(format_left_duration(10440), "2h 54m")
+        # 1h 38m: (1 * 60 + 38) * 60 = 5880s
+        self.assertEqual(format_left_duration(5880), "1h 38m")
+        # 54m: 54 * 60 = 3240s
+        self.assertEqual(format_left_duration(3240), "54m")
+        # 5m: 300s
+        self.assertEqual(format_left_duration(300), "5m")
+
+    def test_calculate_run_progress_percent(self):
+        """
+        Percent = games completed / total planned games for the run (not elapsed / (elapsed + ETA)).
+        """
+        self.assertEqual(calculate_run_progress_percent(0, 800), 0.0)
+        self.assertEqual(calculate_run_progress_percent(300, 800), 37.5)
+        self.assertEqual(calculate_run_progress_percent(200, 200), 100.0)
+        self.assertEqual(calculate_run_progress_percent(100, 0), 0.0)
+
+    def test_format_history_time(self):
+        """
+        Shorten date to short form month (Jan, Feb, Mar, etc.) and day and time, no year.
+        """
+        self.assertEqual(format_history_time("2026-10-21 06:05:04"), "Oct 21 06:05:04")
+        self.assertEqual(format_history_time("2026-10-20 19:08:15"), "Oct 20 19:08:15")
+        self.assertEqual(format_history_time("2026-01-05 12:30:00"), "Jan 5 12:30:00")
+        self.assertEqual(format_history_time("2026-12-31 23:59:59"), "Dec 31 23:59:59")
+        self.assertEqual(format_history_time("-"), "-")
+        self.assertEqual(format_history_time(None), "-")
+
+
+    def test_full_suite_eta_during_depth_benchmark(self):
+        """
+        Verify that during Stage 2 depth benchmark, total ETA is a FULL SUITE estimate
+        combining remaining depth fixtures AND queued matrix modes (not just the depth fixtures in isolation).
+        """
+        depth_data = {
+            "total_positions": 12,
+            "completed_positions": 6,
+            "time_ms": 450,
+            "repeats": 5,
+        }
+        # 4 matrix modes: 200 games each
+        matrix_progress = [
+            {"mode": "constrictor", "status": "PENDING", "games": 0, "max_games": 200},
+            {"mode": "royale", "status": "PENDING", "games": 0, "max_games": 200},
+            {"mode": "duel", "status": "PENDING", "games": 0, "max_games": 200},
+            {"mode": "standard", "status": "PENDING", "games": 0, "max_games": 200},
+        ]
+        synthetic_timings = [
+            {"mode": "constrictor", "run_type": "self", "games": 200, "elapsed_seconds": 360.0},   # 1.8 s/game (6 min)
+            {"mode": "royale", "run_type": "self", "games": 200, "elapsed_seconds": 2900.0},       # 14.5 s/game (48 min)
+            {"mode": "duel", "run_type": "self", "games": 200, "elapsed_seconds": 2000.0},         # 10.0 s/game (33 min)
+            {"mode": "standard", "run_type": "self", "games": 200, "elapsed_seconds": 5300.0},     # 26.5 s/game (88 min)
+        ]
+
+        # 6 positions completed in 12.0s -> 2.0s/pos live rate -> 6 remaining * 2.0s = 12.0s depth remaining
+        # Matrix modes: 360 + 2900 + 2000 + 5300 = 10,560s
+        # Total suite ETA = 12.0 + 10,560.0 = 10,572.0s (~2h 56m)
+        eta_res = calculate_eta(
+            matrix_progress=matrix_progress,
+            current_mode="depth",
+            current_played=6,
+            current_max_games=12,
+            current_mode_elapsed=12.0,
+            run_type="depth",
+            depth_data=depth_data,
+            mode_timings=synthetic_timings,
+        )
+
+        self.assertAlmostEqual(eta_res["total_eta_seconds"], 10572.0, places=1)
+        self.assertAlmostEqual(eta_res["stage_etas"]["depth"], 12.0, places=1)
+        self.assertAlmostEqual(eta_res["stage_etas"]["self"], 10560.0, places=1)
+
+        # Check breakdown: depth_fixtures + all 4 matrix modes present
+        modes_in_breakdown = {b["mode"]: b["eta_seconds"] for b in eta_res["breakdown"]}
+        self.assertAlmostEqual(modes_in_breakdown["depth_fixtures"], 12.0, places=1)
+        self.assertAlmostEqual(modes_in_breakdown["constrictor"], 360.0, places=1)
+        self.assertAlmostEqual(modes_in_breakdown["royale"], 2900.0, places=1)
+        self.assertAlmostEqual(modes_in_breakdown["duel"], 2000.0, places=1)
+        self.assertAlmostEqual(modes_in_breakdown["standard"], 5300.0, places=1)
+
+    def test_full_suite_eta_mode_by_mode_burn_down(self):
+        """
+        Verify that as modes complete, their ETA drops to 0 and the full suite ETA
+        smoothly burns down from all modes -> remaining modes -> 0.
+        """
+        synthetic_timings = [
+            {"mode": "constrictor", "run_type": "self", "games": 200, "elapsed_seconds": 360.0},
+            {"mode": "royale", "run_type": "self", "games": 200, "elapsed_seconds": 2900.0},
+            {"mode": "duel", "run_type": "self", "games": 200, "elapsed_seconds": 2000.0},
+            {"mode": "standard", "run_type": "self", "games": 200, "elapsed_seconds": 5300.0},
+        ]
+
+        # Case 1: Constrictor running with 100 games left (100 * 1.8s = 180s)
+        matrix_p1 = [
+            {"mode": "constrictor", "status": "RUNNING", "games": 100, "max_games": 200},
+            {"mode": "royale", "status": "PENDING", "games": 0, "max_games": 200},
+            {"mode": "duel", "status": "PENDING", "games": 0, "max_games": 200},
+            {"mode": "standard", "status": "PENDING", "games": 0, "max_games": 200},
+        ]
+        eta_p1 = calculate_eta(
+            matrix_progress=matrix_p1,
+            current_mode="constrictor",
+            current_played=100,
+            current_max_games=200,
+            current_mode_elapsed=180.0,
+            run_type="self",
+            mode_timings=synthetic_timings,
+        )
+        # 180 (constrictor) + 2900 + 2000 + 5300 = 10,380s
+        self.assertAlmostEqual(eta_p1["total_eta_seconds"], 10380.0, places=1)
+
+        # Case 2: Constrictor done, Royale running with 100 games left (100 * 14.5s = 1450s)
+        matrix_p2 = [
+            {"mode": "constrictor", "status": "PARITY", "games": 200, "max_games": 200},
+            {"mode": "royale", "status": "RUNNING", "games": 100, "max_games": 200},
+            {"mode": "duel", "status": "PENDING", "games": 0, "max_games": 200},
+            {"mode": "standard", "status": "PENDING", "games": 0, "max_games": 200},
+        ]
+        eta_p2 = calculate_eta(
+            matrix_progress=matrix_p2,
+            current_mode="royale",
+            current_played=100,
+            current_max_games=200,
+            current_mode_elapsed=1450.0,
+            run_type="self",
+            mode_timings=synthetic_timings,
+        )
+        # 0 (constrictor done) + 1450 (royale left) + 2000 (duel) + 5300 (standard) = 8750s
+        self.assertAlmostEqual(eta_p2["total_eta_seconds"], 8750.0, places=1)
+
+        # Case 3: Only Standard left with 50 games (50 * 26.5s = 1325s)
+        matrix_p3 = [
+            {"mode": "constrictor", "status": "PARITY", "games": 200, "max_games": 200},
+            {"mode": "royale", "status": "PARITY", "games": 200, "max_games": 200},
+            {"mode": "duel", "status": "PARITY", "games": 200, "max_games": 200},
+            {"mode": "standard", "status": "RUNNING", "games": 150, "max_games": 200},
+        ]
+        eta_p3 = calculate_eta(
+            matrix_progress=matrix_p3,
+            current_mode="standard",
+            current_played=150,
+            current_max_games=200,
+            current_mode_elapsed=3975.0,
+            run_type="self",
+            mode_timings=synthetic_timings,
+        )
+        # 50 games * 26.5s = 1325s
+        self.assertAlmostEqual(eta_p3["total_eta_seconds"], 1325.0, places=1)
 
 
 if __name__ == "__main__":

@@ -2360,6 +2360,41 @@ def run_ab_test_engine(
 
     t_suite_start = time.time()
 
+    if dash_client is not None:
+        init_matrix_progress = [
+            {
+                "mode": m["mode"],
+                "name": m["name"],
+                "num_snakes": m["num_snakes"],
+                "status": "PENDING",
+                "win_share": 0.0,
+                "games": 0,
+                "max_games": max_games,
+                "target_share": m["target_share"],
+                "decision": "PENDING",
+                "reason": "",
+                "z_score": None,
+            }
+            for m in active_matrix
+        ]
+        dash_client.init_test(
+            strategy_baseline=_baseline_module_name,
+            strategy_variant=_variant_module_name,
+            min_games=min_games,
+            max_games=max_games,
+            check_interval=check_interval,
+            early_stop_high=EARLY_STOP_HIGH,
+            early_stop_low=EARLY_STOP_LOW,
+            threads=threads,
+            experiment_desc=desc,
+            game_mode=active_matrix[0]["mode"] if active_matrix else "standard",
+            num_snakes=active_matrix[0]["num_snakes"] if active_matrix else 4,
+            target_win_share=active_matrix[0]["target_share"] if active_matrix else 25.0,
+            matrix_progress=init_matrix_progress,
+            suite_start_time=t_suite_start,
+            run_type="self",
+        )
+
     # ── Step 1: Tactical Unit Tests ──
     print("[1/3] Running strategy safety unit tests on variant...")
     test_strategy = None
@@ -2480,31 +2515,29 @@ def run_ab_test_engine(
     else:
         print("[2/3] Executing Stage 2 Fixed-Position Depth Benchmark Suite...")
         print("      Testing 12 standard position fixtures (450ms, 5 interleaved repeats per side)...")
-        try:
-            from harness.depth_test import run_depth_test, format_depth_markdown_table, DEFAULT_FIXTURES_DIR
-            depth_budget_sec = getattr(strat_baseline, "TIME_BUDGET_SEC", 0.450)
-            depth_time_ms = int(depth_budget_sec * 1000)
-            depth_ok, depth_results = run_depth_test(
-                baseline_strat=_baseline_module_name,
-                variant_strat=_variant_module_name,
-                time_ms=depth_time_ms,
-                repeats=5,
-                fixtures_dir=DEFAULT_FIXTURES_DIR,
-                modes=["standard", "constrictor", "royale", "duel"],
-                turns=[25, 50, 75],
-                dashboard_port=dashboard_port,
-                enable_dashboard=(dash_client is not None),
-                dash_client=dash_client,
-                is_stage=True,
-            )
-            checkpoint_data["depth_results"] = depth_results
-            save_checkpoint(results_dir, checkpoint_data)
-            if depth_results:
-                print("\n  [✓] Depth benchmark table formatted for PR body:")
-                print(format_depth_markdown_table(depth_results))
-                print()
-        except Exception as e:
-            print(f"  [⚠️] Warning: Depth benchmark suite encountered an issue: {e}\n")
+        from harness.depth_test import run_depth_test, format_depth_markdown_table, DEFAULT_FIXTURES_DIR
+        depth_budget_sec = getattr(_strategy_baseline, "TIME_BUDGET_SEC", 0.450)
+        depth_time_ms = int(depth_budget_sec * 1000)
+        depth_ok, depth_results = run_depth_test(
+            baseline_strat=_baseline_module_name,
+            variant_strat=_variant_module_name,
+            time_ms=depth_time_ms,
+            repeats=5,
+            fixtures_dir=DEFAULT_FIXTURES_DIR,
+            modes=["standard", "constrictor", "royale", "duel"],
+            turns=[25, 50, 75],
+            dashboard_port=dashboard_port,
+            enable_dashboard=(dash_client is not None),
+            dash_client=dash_client,
+            is_stage=True,
+        )
+        if not depth_results:
+            raise RuntimeError("CRITICAL: Depth benchmark suite failed to produce results.")
+        checkpoint_data["depth_results"] = depth_results
+        save_checkpoint(results_dir, checkpoint_data)
+        print("\n  [✓] Depth benchmark table formatted for PR body:")
+        print(format_depth_markdown_table(depth_results))
+        print()
 
     print(f"[3/3] Executing {matrix_title}...")
     matrix_progress = [
@@ -2878,7 +2911,7 @@ def run_pool_benchmark(
         print("  [i] Pre-flight unit tests skipped via --skip-smoke.\n")
 
     print("[2/2] Executing External Pool Evaluation Suite...")
-    t_suite_start = time.perf_counter()
+    t_suite_start = time.time()
     all_mode_stats = []
 
     if dash_client is not None:
@@ -3116,7 +3149,7 @@ def run_pool_benchmark(
         overall_decision = "PARITY"
         overall_reason = "All tested modes performed at parity with no regression detected."
 
-    total_wall_sec = time.perf_counter() - t_suite_start
+    total_wall_sec = time.time() - t_suite_start
     print("\n" + "=" * 80)
     print("                         POOL EVALUATION SUMMARY")
     print("=" * 80)

@@ -64,6 +64,38 @@ DEFAULT_MODES = ["standard", "constrictor", "royale", "duel"]
 DEFAULT_TURNS = [25, 50, 75]
 DEFAULT_TIME_MS = 450
 DEFAULT_REPEATS = 5
+DEFAULT_WORKERS = min(os.cpu_count() or 4, 7)
+
+MODE_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "standard": {
+        "game_num": 1,
+        "num_snakes": 4,
+        "seed": 1,
+        "turns": [20, 40, 60],
+        "phases": ["Early", "Mid", "Late"],
+    },
+    "constrictor": {
+        "game_num": 2,
+        "num_snakes": 4,
+        "seed": 2,
+        "turns": [4, 7, 8],
+        "phases": ["Early", "Mid", "Late"],
+    },
+    "royale": {
+        "game_num": 2,
+        "num_snakes": 4,
+        "seed": 2,
+        "turns": [15, 35, 55],
+        "phases": ["Early", "Mid", "Late"],
+    },
+    "duel": {
+        "game_num": 1,
+        "num_snakes": 2,
+        "seed": 1,
+        "turns": [20, 45, 60],
+        "phases": ["Early", "Mid", "Late"],
+    },
+}
 
 
 # ── Strategy Resolution Helper ───────────────────────────────────────────────
@@ -82,36 +114,36 @@ def resolve_strategy_name(name_or_path: str) -> str:
 def generate_fixtures(
     output_dir: Path = DEFAULT_FIXTURES_DIR,
     modes: Sequence[str] = DEFAULT_MODES,
-    turns: Sequence[int] = DEFAULT_TURNS,
+    turns: Optional[Sequence[int]] = None,
 ) -> None:
     """
     Simulates seeded baseline-vs-baseline games and snapshots full game states
-    at turns 25, 50, and 75 into output_dir. Fixtures are commit-worthy and
-    remain deterministic unless regenerated.
+    for early, mid, and late game positions into output_dir. Fixtures are commit-worthy
+    and remain deterministic unless regenerated.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"[GENERATE] Generating deterministic fixtures into {output_dir}...")
 
-    # Load baseline strategy for generation with 50ms moves (accurate survival path)
+    # Load baseline strategy for generation with 35ms moves (accurate survival path)
     base_mod = load_strategy_module("strategies.strategy_baseline")
     orig_budget = getattr(base_mod, "TIME_BUDGET_SEC", 0.450)
-    base_mod.TIME_BUDGET_SEC = 0.050
-
-    target_turns = set(turns)
-    max_turn = max(turns)
-
-    mode_configs = {
-        # mode: (game_num, num_snakes, seed)
-        # In constrictor, game_num=5 selects cardinal spawn layout which survives past turn 78
-        "standard": (1, 4, 1),
-        "constrictor": (5, 4, 1),
-        "royale": (1, 4, 1),
-        "duel": (1, 2, 1),
-    }
+    base_mod.TIME_BUDGET_SEC = 0.035
 
     try:
         for mode in modes:
-            game_num, num_snakes, seed = mode_configs.get(mode, (1, 4, 1))
+            cfg = MODE_CONFIGS.get(mode, {
+                "game_num": 1,
+                "num_snakes": 2 if mode == "duel" else 4,
+                "seed": 1,
+                "turns": list(turns) if turns else [25, 50, 75],
+                "phases": ["Early", "Mid", "Late"],
+            })
+            mode_turns = cfg["turns"] if (turns is None or list(turns) == DEFAULT_TURNS) else list(turns)
+            mode_phases = cfg.get("phases", ["Early", "Mid", "Late"])
+            game_num = cfg.get("game_num", 1)
+            num_snakes = cfg.get("num_snakes", 2 if mode == "duel" else 4)
+            seed = cfg.get("seed", 1)
+
             wrap = mode in ("wrapped", "wrapped-constrictor", "spicy-meteors")
             constrictor = mode in ("constrictor", "wrapped-constrictor")
 
@@ -125,11 +157,16 @@ def generate_fixtures(
             print(f"  [GENERATE] Simulating {mode} game (game_num={game_num}, snakes={num_snakes}, seed={seed})...")
 
             game_id = f"game_{mode}_{seed}"
+            max_turn = max(mode_turns)
             for turn in range(max_turn + 1):
                 if len(snakes) == 0:
                     raise RuntimeError(f"All snakes died prematurely at turn {turn} in mode {mode}!")
 
-                if turn in target_turns:
+                if turn in mode_turns:
+                    idx = mode_turns.index(turn)
+                    phase = mode_phases[idx] if idx < len(mode_phases) else f"Turn {turn}"
+                    title = f"{mode.capitalize()} {phase}"
+
                     # Construct full Battlesnake game state from the perspective of the primary snake (snakes[0])
                     primary_snake = snakes[0]
                     game_state = _build_game_state(
@@ -143,13 +180,15 @@ def generate_fixtures(
                         mode=mode,
                         hazards=board.get("hazards", []),
                     )
+                    game_state["phase"] = phase
+                    game_state["title"] = title
 
                     fixture_path = output_dir / f"{mode}_turn{turn}.json"
                     with open(fixture_path, "w", encoding="utf-8") as f:
                         json.dump(game_state, f, indent=2)
 
                     print(
-                        f"    -> Saved {fixture_path.name} "
+                        f"    -> Saved {fixture_path.name}: {title} "
                         f"(snakes={len(snakes)}, food={len(board.get('food', []))}, "
                         f"hazards={len(board.get('hazards', []))})"
                     )
@@ -348,6 +387,24 @@ def evaluate_position(
     }
 
 
+def _evaluate_position_worker(args: Tuple[str, str, str, int, int, str, int, str, str]) -> Dict[str, Any]:
+    fpath_str, baseline_strat, variant_strat, time_ms, repeats, mode, turn, phase, title = args
+    base_mod = load_strategy_module(resolve_strategy_name(baseline_strat))
+    var_mod = load_strategy_module(resolve_strategy_name(variant_strat))
+    res = evaluate_position(
+        baseline_mod=base_mod,
+        variant_mod=var_mod,
+        fixture_path=Path(fpath_str),
+        time_ms=time_ms,
+        repeats=repeats,
+    )
+    res["mode"] = mode
+    res["turn"] = turn
+    res["phase"] = phase
+    res["title"] = title
+    return res
+
+
 # ── Full Benchmark Suite ─────────────────────────────────────────────────────
 
 def run_depth_test(
@@ -357,34 +414,40 @@ def run_depth_test(
     repeats: int = DEFAULT_REPEATS,
     fixtures_dir: Path = DEFAULT_FIXTURES_DIR,
     modes: Sequence[str] = DEFAULT_MODES,
-    turns: Sequence[int] = DEFAULT_TURNS,
+    turns: Optional[Sequence[int]] = None,
     dashboard_port: int = 8888,
     enable_dashboard: bool = True,
     dash_client: Optional[Any] = None,
     is_stage: bool = False,
+    workers: int = DEFAULT_WORKERS,
 ) -> Tuple[bool, Dict[str, Any]]:
     """
-    Executes fixed-position depth test suite across all requested modes.
+    Executes fixed-position depth test suite across all requested modes in parallel across CPU workers.
     Returns (all_passed, results_dict).
     """
-    baseline_mod = load_strategy_module(resolve_strategy_name(baseline_strat))
-    variant_mod = load_strategy_module(resolve_strategy_name(variant_strat))
-
     print("=" * 86)
     print(f" Battlesnake Fixed-Position Depth Tester")
     print(f" Baseline: {baseline_strat}")
     print(f" Variant:  {variant_strat}")
-    print(f" Budget:   {time_ms} ms | Repeats: {repeats} per position")
+    print(f" Budget:   {time_ms} ms | Repeats: {repeats} per position | Workers: {workers}")
     print(f" Fixtures: {fixtures_dir}")
     print("=" * 86)
 
     # Verify fixtures exist
     missing_fixtures = []
+    fixture_items = []
     for mode in modes:
-        for turn in turns:
+        cfg = MODE_CONFIGS.get(mode, {})
+        mode_turns = cfg.get("turns", turns) if (turns is None or list(turns) == DEFAULT_TURNS) else list(turns)
+        mode_phases = cfg.get("phases", ["Early", "Mid", "Late"])
+        for idx, turn in enumerate(mode_turns):
             expected = fixtures_dir / f"{mode}_turn{turn}.json"
             if not expected.is_file():
                 missing_fixtures.append(expected)
+            else:
+                phase = mode_phases[idx] if idx < len(mode_phases) else f"Turn {turn}"
+                title = f"{mode.capitalize()} {phase}"
+                fixture_items.append((str(expected), mode, turn, phase, title))
 
     if missing_fixtures:
         print(f"\n[ERROR] Missing {len(missing_fixtures)} fixture files. Run with --generate first:")
@@ -398,7 +461,7 @@ def run_depth_test(
         except Exception:
             dash_client = None
 
-    total_positions = len(modes) * len(turns)
+    total_positions = len(fixture_items)
     completed_positions = 0
     t_suite_start = time.time()
 
@@ -427,8 +490,8 @@ def run_depth_test(
                 check_interval=total_positions,
                 early_stop_high=100.0,
                 early_stop_low=0.0,
-                threads=1,
-                experiment_desc=f"Depth Benchmark: {variant_strat} vs {baseline_strat} ({time_ms}ms, {repeats} reps)",
+                threads=workers,
+                experiment_desc=f"Depth Benchmark: {variant_strat} vs {baseline_strat} ({time_ms}ms, {repeats} reps, {workers} workers)",
                 game_mode=modes[0] if modes else "standard",
                 num_snakes=4,
                 target_win_share=50.0,
@@ -446,39 +509,58 @@ def run_depth_test(
     mode_summaries: Dict[str, Dict[str, Any]] = {}
     flagged_regressions: List[str] = []
 
-    for idx, mode in enumerate(modes):
-        matrix_progress[idx]["status"] = "running"
-        if dash_client is not None and not is_stage:
-            dash_client.init_test(
-                strategy_baseline=baseline_strat,
-                strategy_variant=variant_strat,
-                min_games=total_positions,
-                max_games=total_positions,
-                check_interval=total_positions,
-                early_stop_high=100.0,
-                early_stop_low=0.0,
-                threads=1,
-                experiment_desc=f"Depth Benchmark: {variant_strat} vs {baseline_strat} ({time_ms}ms, {repeats} reps)",
-                game_mode=mode,
-                num_snakes=2 if mode == "duel" else 4,
-                target_win_share=50.0,
-                matrix_progress=matrix_progress,
-                suite_start_time=t_suite_start,
-                run_type="depth",
-            )
-            dash_client.update_matrix(matrix_progress)
+    tasks = [
+        (fpath_str, baseline_strat, variant_strat, time_ms, repeats, mode, turn, phase, title)
+        for fpath_str, mode, turn, phase, title in fixture_items
+    ]
 
-        print(f"\nEvaluating mode: {mode.upper()}...")
-        for turn in turns:
-            fpath = fixtures_dir / f"{mode}_turn{turn}.json"
-            res = evaluate_position(
-                baseline_mod=baseline_mod,
-                variant_mod=variant_mod,
-                fixture_path=fpath,
-                time_ms=time_ms,
-                repeats=repeats,
-            )
-            res["turn"] = turn
+    print(f"\nEvaluating {total_positions} positions across {workers} parallel worker processes...")
+
+    if workers > 1 and len(tasks) > 1:
+        import concurrent.futures
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_evaluate_position_worker, t): t
+                for t in tasks
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                res = fut.result()
+                mode = res["mode"]
+                turn = res["turn"]
+                title = res.get("title", f"{mode.capitalize()} Turn {turn}")
+                mode_results[mode].append(res)
+                completed_positions += 1
+
+                if dash_client is not None:
+                    dash_client.update_depth_position(
+                        completed_positions=completed_positions,
+                        total_positions=total_positions,
+                        mode=mode,
+                        turn=turn,
+                        base_med_depth=res["base_med_depth"],
+                        var_med_depth=res["var_med_depth"],
+                        delta_depth=res["delta_depth"],
+                        base_med_nps=res["base_med_nps"],
+                        var_med_nps=res["var_med_nps"],
+                        nps_ratio=res["nps_ratio"],
+                        agreement_pct=res["agreement_pct"],
+                        passed=not (res["var_med_depth"] < res["base_med_depth"]),
+                        title=title,
+                    )
+
+                print(
+                    f"  [{completed_positions:2d}/{total_positions:2d}] {title:20s}: Base Depth={res['base_med_depth']:4.1f} | "
+                    f"Var Depth={res['var_med_depth']:4.1f} (Δ {res['delta_depth']:+4.1f}) | "
+                    f"NPS Ratio={res['nps_ratio']:5.2f}x | "
+                    f"Agree={res['agreement_pct']:5.1f}% | "
+                    f"Moves: {res['base_move']} / {res['var_move']}"
+                )
+    else:
+        for t in tasks:
+            res = _evaluate_position_worker(t)
+            mode = res["mode"]
+            turn = res["turn"]
+            title = res.get("title", f"{mode.capitalize()} Turn {turn}")
             mode_results[mode].append(res)
             completed_positions += 1
 
@@ -496,26 +578,32 @@ def run_depth_test(
                     nps_ratio=res["nps_ratio"],
                     agreement_pct=res["agreement_pct"],
                     passed=not (res["var_med_depth"] < res["base_med_depth"]),
+                    title=title,
                 )
 
             print(
-                f"  Turn {turn:2d}: Base Depth={res['base_med_depth']:4.1f} | "
+                f"  [{completed_positions:2d}/{total_positions:2d}] {title:20s}: Base Depth={res['base_med_depth']:4.1f} | "
                 f"Var Depth={res['var_med_depth']:4.1f} (Δ {res['delta_depth']:+4.1f}) | "
                 f"NPS Ratio={res['nps_ratio']:5.2f}x | "
                 f"Agree={res['agreement_pct']:5.1f}% | "
                 f"Moves: {res['base_move']} / {res['var_move']}"
             )
 
-        # Mode medians
+    for idx, mode in enumerate(modes):
+        cfg = MODE_CONFIGS.get(mode, {})
+        mode_turns = cfg.get("turns", turns) if (turns is None or list(turns) == DEFAULT_TURNS) else list(turns)
+        turn_order = {t: i for i, t in enumerate(mode_turns)}
+        mode_results[mode].sort(key=lambda r: turn_order.get(r.get("turn", 0), r.get("turn", 0)))
+
         m_base_depths = [r["base_med_depth"] for r in mode_results[mode]]
         m_var_depths = [r["var_med_depth"] for r in mode_results[mode]]
         m_nps_ratios = [r["nps_ratio"] for r in mode_results[mode]]
         m_agrees = [r["agreement_pct"] for r in mode_results[mode]]
 
-        med_base_d = statistics.median(m_base_depths)
-        med_var_d = statistics.median(m_var_depths)
-        med_nps_r = statistics.median(m_nps_ratios)
-        mean_agree = statistics.mean(m_agrees)
+        med_base_d = statistics.median(m_base_depths) if m_base_depths else 0.0
+        med_var_d = statistics.median(m_var_depths) if m_var_depths else 0.0
+        med_nps_r = statistics.median(m_nps_ratios) if m_nps_ratios else 1.0
+        mean_agree = statistics.mean(m_agrees) if m_agrees else 100.0
         delta_d = med_var_d - med_base_d
 
         is_regression = med_var_d < med_base_d
@@ -548,11 +636,12 @@ def run_depth_test(
         status_str = "PASS" if not summary["regression"] else "FLAG: DEPTH REGRESSION"
 
         print(f"\n[MODE: {mode.upper()}]  Status: {status_str}")
-        print(f"{'Turn':>5} | {'Base Depth':>10} | {'Var Depth':>10} | {'Base NPS':>10} | {'Var NPS':>10} | {'NPS Ratio':>9} | {'Base Move':>9} | {'Var Move':>9} | {'Agree %':>8}")
-        print("-" * 5 + "-+-" + "-" * 10 + "-+-" + "-" * 10 + "-+-" + "-" * 10 + "-+-" + "-" * 10 + "-+-" + "-" * 9 + "-+-" + "-" * 9 + "-+-" + "-" * 9 + "-+-" + "-" * 8)
+        print(f"{'Title':<20} | {'Base Depth':>10} | {'Var Depth':>10} | {'Base NPS':>10} | {'Var NPS':>10} | {'NPS Ratio':>9} | {'Base Move':>9} | {'Var Move':>9} | {'Agree %':>8}")
+        print("-" * 20 + "-+-" + "-" * 10 + "-+-" + "-" * 10 + "-+-" + "-" * 10 + "-+-" + "-" * 10 + "-+-" + "-" * 9 + "-+-" + "-" * 9 + "-+-" + "-" * 9 + "-+-" + "-" * 8)
         for r in rows:
+            title_str = r.get("title", f"Turn {r['turn']}")
             print(
-                f"{r['turn']:5d} | "
+                f"{title_str:<20} | "
                 f"{r['base_med_depth']:10.1f} | "
                 f"{r['var_med_depth']:10.1f} | "
                 f"{int(r['base_med_nps']):10,d} | "
@@ -562,7 +651,7 @@ def run_depth_test(
                 f"{r['var_move']:>9} | "
                 f"{r['agreement_pct']:7.1f}%"
             )
-        print("-" * 5 + "-+-" + "-" * 10 + "-+-" + "-" * 10 + "-+-" + "-" * 10 + "-+-" + "-" * 10 + "-+-" + "-" * 9 + "-+-" + "-" * 9 + "-+-" + "-" * 9 + "-+-" + "-" * 8)
+        print("-" * 20 + "-+-" + "-" * 10 + "-+-" + "-" * 10 + "-+-" + "-" * 10 + "-+-" + "-" * 10 + "-+-" + "-" * 9 + "-+-" + "-" * 9 + "-+-" + "-" * 9 + "-+-" + "-" * 8)
         print(
             f"Mode Summary: Base Median Depth = {summary['base_med_depth']:.1f} | "
             f"Var Median Depth = {summary['var_med_depth']:.1f} (Δ {summary['delta_depth']:+.1f}) | "
@@ -626,6 +715,8 @@ def run_depth_test(
     if dash_client is not None:
         t_depth_duration = time.time() - t_suite_start
         dash_client.finish_depth(
+            completed_positions=total_positions,
+            total_positions=total_positions,
             overall_base_d=overall_base_d,
             overall_var_d=overall_var_d,
             overall_delta_d=overall_delta_d,
@@ -740,6 +831,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable automatic dashboard connection and telemetry.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help="Number of worker processes for parallel position benchmarking (default: min(cores, 7)).",
+    )
     return parser.parse_args()
 
 
@@ -761,6 +858,7 @@ def main() -> None:
         modes=modes,
         dashboard_port=args.dashboard_port,
         enable_dashboard=not args.no_dashboard,
+        workers=args.workers,
     )
 
     sys.exit(0 if passed else 1)
