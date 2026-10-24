@@ -2115,6 +2115,9 @@ def _run_single_mode_simulation(
         writer.writeheader()
         writer.writerows(rows)
 
+    if total_played == 0 and stop_type != "USER_SKIPPED":
+        raise RuntimeError(f"FATAL: Simulation failed for mode '{mode_name}': 0 games were played! Simulation aborted.")
+
     draw_share = 0.25 if num_snakes == 4 else 0.5
     var_w = snakes_stats[STRATEGY_VARIANT]["wins"]
     var_d = snakes_stats[STRATEGY_VARIANT]["draws"]
@@ -2431,7 +2434,7 @@ def run_ab_test_engine(
                 stop_type, stop_reason, recommendation, experiment_desc=desc,
                 unit_tests_data=unit_tests_result,
             )
-            dash_client.set_finished(stop_type, stop_reason, recommendation, str(history_path))
+            dash_client.set_finished(stop_type, stop_reason, recommendation, str(history_path), duration_sec=unit_dur)
             print_summary(0, results, stop_type, stop_reason, history_path, experiment_desc=desc, recommendation=recommendation)
             return
         if dash_client is not None:
@@ -2747,7 +2750,7 @@ def run_ab_test_engine(
         unit_tests_data=unit_tests_result,
     )
 
-    dash_client.set_finished(overall_stop_type, overall_stop_reason, overall_recommendation, str(history_path))
+    dash_client.set_finished(overall_stop_type, overall_stop_reason, overall_recommendation, str(history_path), duration_sec=total_wall_sec)
     time.sleep(0.3)
 
     print_matrix_summary(
@@ -2917,6 +2920,7 @@ def run_pool_benchmark(
     print("[2/2] Executing External Pool Evaluation Suite...")
     t_suite_start = time.time()
     all_mode_stats = []
+    all_games = []
 
     if dash_client is not None:
         dash_client.init_test(
@@ -3045,6 +3049,10 @@ def run_pool_benchmark(
 
         mode_results.sort(key=lambda r: r["game_num"])
         N = len(mode_results)
+        if N == 0:
+            raise RuntimeError(f"FATAL: Pool evaluation failed for mode '{m_name}': 0 games were completed! Simulation aborted.")
+        if N < pool_games:
+            raise RuntimeError(f"FATAL: Pool evaluation failed for mode '{m_name}': only {N}/{pool_games} games completed! Simulation aborted.")
         cand_total = sum(r["cand"]["score"] for r in mode_results)
         base_total = sum(r["base"]["score"] for r in mode_results)
         cand_win_share = (cand_total / N) * 100.0 if N > 0 else 0.0
@@ -3112,6 +3120,18 @@ def run_pool_benchmark(
             d_pct = c_pct - b_pct
             print(f"  {opp:<24s} {g_cnt:5d} {c_pct:14.1f}% {b_pct:14.1f}% {d_pct:+9.1f}%")
 
+        mode_opp_list = [
+            {
+                "opponent": opp,
+                "games": s["games"],
+                "cand_win_pct": round((s["cand_score"] / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
+                "base_win_pct": round((s["base_score"] / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
+                "delta": round(((s["cand_score"] - s["base_score"]) / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
+            }
+            for opp, s in sorted(opp_stats.items())
+        ]
+        all_games.extend(mode_results)
+
         all_mode_stats.append({
             "mode": m_mode,
             "name": m_name,
@@ -3152,8 +3172,12 @@ def run_pool_benchmark(
                 cand_games=N,
                 base_games=N,
                 duration_sec=t_mode_elapsed,
+                opponents=mode_opp_list,
             )
             dash_client.update_matrix(matrix_progress)
+
+    if not all_mode_stats:
+        raise RuntimeError("FATAL: Pool evaluation failed: no mode stats were generated! Simulation aborted.")
 
     reverts = [m for m in all_mode_stats if m["decision"] == "REVERT"]
     keeps = [m for m in all_mode_stats if m["decision"] == "KEEP"]
@@ -3208,12 +3232,34 @@ def run_pool_benchmark(
         pool_data=all_mode_stats,
     )
 
+    all_opp_stats: Dict[str, Dict[str, Any]] = {}
+    for r in all_games:
+        for opp in r.get("opponents", []):
+            if opp not in all_opp_stats:
+                all_opp_stats[opp] = {"games": 0, "cand_score": 0.0, "base_score": 0.0}
+            all_opp_stats[opp]["games"] += 1
+            all_opp_stats[opp]["cand_score"] += r["cand"]["score"]
+            all_opp_stats[opp]["base_score"] += r["base"]["score"]
+    overall_opp_list = [
+        {
+            "opponent": opp,
+            "games": s["games"],
+            "cand_win_pct": round((s["cand_score"] / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
+            "base_win_pct": round((s["base_score"] / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
+            "delta": round(((s["cand_score"] - s["base_score"]) / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
+        }
+        for opp, s in sorted(all_opp_stats.items())
+    ]
+
     if dash_client is not None:
         dash_client.set_finished(
             stop_type=overall_decision,
             stop_reason=overall_reason,
             recommendation=overall_decision,
             csv_path=str(ledger_path.resolve()),
+            duration_sec=total_wall_sec,
+            pool_modes=all_mode_stats,
+            opponents=overall_opp_list,
         )
 
     return {

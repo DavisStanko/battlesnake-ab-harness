@@ -550,6 +550,148 @@ class TestDashboardSkip(unittest.TestCase):
         self.assertIn('<span class="matrix-col-status matrix-status-skipped">SKIPPED</span>', rendered)
         self.assertNotIn('<span class="matrix-col-status matrix-status-pending">PENDING</span>', rendered)
 
+    def test_stage_durations_frozen_on_finish(self):
+        # 1. Self-play matrix run
+        self.state.handle_update({
+            "action": "init",
+            "run_type": "self",
+            "experiment_desc": "Test Freeze Stages",
+        })
+        self.state.handle_update({
+            "action": "update_unit_tests",
+            "duration_sec": 5.0,
+            "status": "PASSED",
+        })
+        # Finish self-play with 305.0 wall seconds (5.0s unit test -> 300.0s matrix)
+        self.state.handle_update({
+            "action": "set_finished",
+            "stop_type": "MATRIX_COMPLETE",
+            "recommendation": "PARITY",
+            "duration_sec": 305.0,
+        })
+        d = self.state.to_dict()
+        self.assertEqual(d["matrix_duration_sec"], 300.0)
+        self.assertEqual(d["matrix_elapsed_seconds"], 300.0)
+
+        # 2. Transition to Pool within same experiment
+        self.state.handle_update({
+            "action": "init",
+            "run_type": "pool",
+            "experiment_desc": "Test Freeze Stages",
+        })
+        d_pool_init = self.state.to_dict()
+        # Self-play duration must stay frozen, not reset to None or 0!
+        self.assertEqual(d_pool_init["matrix_duration_sec"], 300.0)
+
+        # Finish pool with 605.0 wall seconds (5.0s unit test -> 600.0s pool)
+        self.state.handle_update({
+            "action": "set_finished",
+            "stop_type": "PARITY",
+            "recommendation": "PARITY",
+            "duration_sec": 605.0,
+        })
+        d_pool_finish = self.state.to_dict()
+        self.assertEqual(d_pool_finish["matrix_duration_sec"], 300.0)
+        self.assertEqual(d_pool_finish["pool_duration_sec"], 600.0)
+
+    def test_standalone_pool_run_skips_self_play(self):
+        from ab_dashboard import render_html_with_state, DASHBOARD_HTML
+        data = {
+            "status": "FINISHED",
+            "recommendation": "PARITY",
+            "run_type": "pool",
+            "experiment_desc": "Standalone Pool Test",
+            "unit_tests_data": {"status": "PASSED", "duration_sec": 4.7},
+            "matrix_duration_sec": None,
+            "pool_duration_sec": 892.0,  # 14m 52s
+            "pool_data": {
+                "duration_sec": 892.0,
+                "modes": {
+                    "constrictor": {"cand_share": 25.0, "base_share": 25.0, "decision": "PARITY"},
+                    "royale": {"cand_share": 25.0, "base_share": 25.0, "decision": "PARITY"},
+                    "standard": {"cand_share": 25.0, "base_share": 25.0, "decision": "PARITY"},
+                }
+            }
+        }
+        rendered = render_html_with_state(DASHBOARD_HTML, data)
+        # Stage 3 (Self-play) must be SKIPPED with '--', NOT DONE 14m 52s
+        self.assertIn('id="railSegment-self"', rendered)
+        self.assertIn('<span class="stage-seg-status matrix-status-skipped" id="railStatus-self">SKIPPED</span>', rendered)
+        self.assertIn('<span class="stage-seg-duration" id="railDuration-self">--</span>', rendered)
+        # Stage 4 (Pool) must be PARITY with 14m 52s
+        self.assertIn('id="railSegment-pool"', rendered)
+        self.assertIn('<span class="stage-seg-status matrix-status-parity" id="railStatus-pool">PARITY</span>', rendered)
+        self.assertIn('<span class="stage-seg-duration" id="railDuration-pool">14m 52s</span>', rendered)
+
+    def test_pool_modes_and_opponents_in_set_finished(self):
+        self.state.handle_update({
+            "action": "init",
+            "run_type": "pool",
+            "experiment_desc": "Pool Finished Test",
+        })
+        pool_modes = [
+            {"mode": "constrictor", "name": "Constrictor 4P", "games": 40, "max_games": 40, "cand_games": 40, "base_games": 40, "cand_win_share": 75.0, "base_win_share": 75.0, "delta": 0.0, "z_score": 0.0, "decision": "PARITY"},
+            {"mode": "royale", "name": "Royale 4P", "games": 40, "max_games": 40, "cand_games": 40, "base_games": 40, "cand_win_share": 60.0, "base_win_share": 60.0, "delta": 0.0, "z_score": 0.0, "decision": "PARITY"},
+        ]
+        opponents = [
+            {"opponent": "snork", "games": 20, "cand_win_pct": 50.0, "base_win_pct": 50.0, "delta": 0.0},
+        ]
+        self.state.handle_update({
+            "action": "set_finished",
+            "stop_type": "PARITY",
+            "recommendation": "PARITY",
+            "duration_sec": 300.0,
+            "pool_modes": pool_modes,
+            "opponents": opponents,
+        })
+        d = self.state.to_dict()
+        p_data = d["pool_data"]
+        self.assertIsNotNone(p_data)
+        self.assertEqual(len(p_data.get("opponents", [])), 1)
+        self.assertEqual(p_data["opponents"][0]["opponent"], "snork")
+        self.assertIn("constrictor", p_data.get("modes", {}))
+        self.assertEqual(p_data["modes"]["constrictor"]["games"], 40)
+
+    def test_zero_games_never_renders_parity_or_passed(self):
+        from ab_dashboard import render_html_with_state, DASHBOARD_HTML
+        data = {
+            "status": "FINISHED",
+            "recommendation": "PARITY",
+            "run_type": "pool",
+            "experiment_desc": "Zero Games Test",
+            "pool_data": {
+                "modes": {
+                    "constrictor": {"cand_share": 0.0, "base_share": 0.0, "delta": 0.0, "decision": "PARITY", "games": 0, "max_games": 40},
+                }
+            }
+        }
+        rendered = render_html_with_state(DASHBOARD_HTML, data)
+        # Constrictor had 0 games completed; must NEVER render PARITY
+        self.assertNotIn('<span class="matrix-col-status matrix-status-parity">PARITY</span>', rendered)
+        self.assertIn('<span class="matrix-col-status matrix-status-failed">FAILED</span>', rendered)
+
+    def test_restore_state_preserves_pool_data_and_stage_durations(self):
+        saved_state = {
+            "status": "FINISHED",
+            "stop_type": "PARITY",
+            "recommendation": "PARITY",
+            "run_type": "pool",
+            "experiment_desc": "Restore Pool Test",
+            "matrix_duration_sec": 300.0,
+            "pool_duration_sec": 600.0,
+            "pool_data": [
+                {"mode": "constrictor", "name": "Constrictor 4P", "games": 40, "decision": "PARITY"},
+                {"mode": "standard", "name": "Standard 4P", "games": 40, "decision": "PARITY"},
+            ]
+        }
+        self.state.handle_update({"action": "restore", "data": saved_state})
+        d = self.state.to_dict()
+        self.assertEqual(d["matrix_duration_sec"], 300.0)
+        self.assertEqual(d["pool_duration_sec"], 600.0)
+        p_data = d["pool_data"]
+        self.assertIn("constrictor", p_data.get("modes", {}))
+        self.assertEqual(p_data["modes"]["constrictor"]["games"], 40)
+
 
 if __name__ == "__main__":
     unittest.main()

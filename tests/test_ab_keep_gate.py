@@ -204,6 +204,33 @@ class TestABKeepGate(unittest.TestCase):
         self.assertEqual(dec_above, "PARITY")
         self.assertTrue(passed_above)
 
+    def test_single_mode_simulation_fails_loudly_on_zero_games(self):
+        """
+        Confirms _run_single_mode_simulation raises RuntimeError instead of papering over
+        zero-game crashes with a PARITY verdict.
+        """
+        from unittest.mock import MagicMock
+        from ab_test import _run_single_mode_simulation
+        dash_mock = MagicMock()
+        with self.assertRaises(RuntimeError) as ctx:
+            _run_single_mode_simulation(
+                mode="duel",
+                mode_name="Duel 1v1",
+                num_snakes=2,
+                target_share=50.0,
+                high_stop=70.0,
+                low_stop=30.0,
+                min_games=10,
+                max_games=0,  # 0 games to trigger total_played == 0
+                check_interval=10,
+                dash_client=dash_mock,
+                desc="Loud Fail Test",
+                is_bug_fix=False,
+                keep_threshold=51.5,
+                threads=1,
+            )
+        self.assertIn("0 games were played! Simulation aborted", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

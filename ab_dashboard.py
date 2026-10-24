@@ -726,6 +726,9 @@ class DashboardState:
         self._last_desc: str = experiment_desc
         self.start_time: Optional[float] = time.time() if status == "RUNNING" else None
         self.end_time: Optional[float] = None
+        self.matrix_duration_sec: Optional[float] = None
+        self.pool_duration_sec: Optional[float] = None
+        self.self_play_matrix: Optional[List[Dict[str, Any]]] = None
         self.csv_path = ""
         self.recommendation = "PENDING"
         self.skip_requested: bool = False
@@ -759,7 +762,25 @@ class DashboardState:
                         games=self.total_played,
                         elapsed_seconds=prev_elapsed,
                     )
-                self.run_type = payload.get("run_type", getattr(self, "run_type", "self"))
+                new_run_type = payload.get("run_type", getattr(self, "run_type", "self"))
+                new_desc = payload.get("experiment_desc", "Unspecified Experiment")
+                is_same_experiment = (getattr(self, "_last_desc", None) == new_desc)
+
+                if getattr(self, "run_type", "self") == "self" and new_run_type == "pool":
+                    # Transitioning from self-play to pool: freeze self-play duration and matrix progress!
+                    if getattr(self, "matrix_duration_sec", None) is None and self.start_time:
+                        prev_elapsed = (self.end_time or time.time()) - (self.suite_start_time or self.start_time)
+                        unit_dur = float((getattr(self, "unit_tests_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
+                        depth_dur = float((getattr(self, "depth_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
+                        self.matrix_duration_sec = max(0.0, round(prev_elapsed - unit_dur - depth_dur, 1))
+                    if self.matrix_progress:
+                        self.self_play_matrix = list(self.matrix_progress)
+                elif not is_same_experiment:
+                    self.matrix_duration_sec = None
+                    self.pool_duration_sec = None
+                    self.self_play_matrix = None
+
+                self.run_type = new_run_type
                 self.active_pid = payload.get("pid", self.active_pid)
                 self.strategy_baseline = payload.get("strategy_baseline", "baseline")
                 self.strategy_variant = payload.get("strategy_variant", "variant")
@@ -770,7 +791,6 @@ class DashboardState:
                 self.early_stop_high = payload.get("early_stop_high", 35.0)
                 self.early_stop_low = payload.get("early_stop_low", 18.0)
                 self.threads = payload.get("threads", self.threads)
-                new_desc = payload.get("experiment_desc", "Unspecified Experiment")
                 self.experiment_desc = new_desc
                 self.game_mode = payload.get("game_mode", "standard")
                 self.num_snakes = payload.get("num_snakes", 4)
@@ -790,20 +810,22 @@ class DashboardState:
                 self.wins_variant = 0
                 self.losses_variant = 0
                 self.draws_variant = 0
-                self.pool_data = {
-                    "cand_score": 0.0,
-                    "base_score": 0.0,
-                    "cand_wins": 0,
-                    "base_wins": 0,
-                    "total_games": 0,
-                    "cand_share": 0.0,
-                    "base_share": 0.0,
-                    "delta": 0.0,
-                    "z_score": 0.0,
-                    "opponents": [],
-                    "opponents_map": {},
-                    "mode_stats": {},
-                }
+                if not getattr(self, "pool_data", None) or not is_same_experiment:
+                    self.pool_data = {
+                        "cand_score": 0.0,
+                        "base_score": 0.0,
+                        "cand_wins": 0,
+                        "base_wins": 0,
+                        "total_games": 0,
+                        "cand_share": 0.0,
+                        "base_share": 0.0,
+                        "delta": 0.0,
+                        "z_score": 0.0,
+                        "opponents": [],
+                        "opponents_map": {},
+                        "mode_stats": {},
+                        "modes": {},
+                    }
                 if not getattr(self, "depth_data", None) or not self.depth_data.get("completed_positions"):
                     self.depth_data = {
                         "completed_positions": 0,
@@ -1125,7 +1147,7 @@ class DashboardState:
                     "early_stop_low", "threads", "strategy_baseline", "strategy_variant",
                     "experiment_desc", "recommendation", "csv_path",
                     "game_mode", "num_snakes", "target_win_share", "matrix_progress", "active_pid",
-                    "run_type"
+                    "run_type", "matrix_duration_sec", "pool_duration_sec", "self_play_matrix"
                 ]:
                     if attr in d:
                         setattr(self, attr, d[attr])
@@ -1143,8 +1165,18 @@ class DashboardState:
                     self.unit_tests_data = d["unit_tests_data"]
                 if "depth_data" in d and isinstance(d["depth_data"], dict):
                     self.depth_data = d["depth_data"]
-                if "pool_data" in d and isinstance(d["pool_data"], dict):
-                    self.pool_data = d["pool_data"]
+                if "pool_data" in d and d["pool_data"] is not None:
+                    if isinstance(d["pool_data"], dict):
+                        self.pool_data = d["pool_data"]
+                    elif isinstance(d["pool_data"], list):
+                        self.pool_data = {
+                            "modes": {
+                                item["mode"].lower(): item
+                                for item in d["pool_data"]
+                                if isinstance(item, dict) and item.get("mode")
+                            },
+                            "mode_results": d["pool_data"],
+                        }
 
                 if "last_game_time" in d:
                     self.last_game_time = float(d["last_game_time"])
@@ -1181,6 +1213,45 @@ class DashboardState:
                 self.csv_path = str(payload.get("csv_path", ""))
                 self.end_time = time.time()
                 self.active_pid = None
+                dur = payload.get("duration_sec")
+                if dur is None and self.start_time:
+                    dur = max(0.0, self.end_time - (self.suite_start_time or self.start_time))
+                else:
+                    dur = float(dur) if dur is not None else 0.0
+
+                unit_dur = float((getattr(self, "unit_tests_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
+                depth_dur = float((getattr(self, "depth_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
+
+                if getattr(self, "run_type", "self") == "self":
+                    self.matrix_duration_sec = max(0.0, round(dur - unit_dur - depth_dur, 1)) if dur > 0 else 0.0
+                    self.self_play_matrix = list(self.matrix_progress or [])
+                elif getattr(self, "run_type", "self") == "pool":
+                    self.pool_duration_sec = max(0.0, round(dur - unit_dur - depth_dur, 1)) if dur > 0 else 0.0
+                    if not getattr(self, "pool_data", None) or not isinstance(self.pool_data, dict):
+                        self.pool_data = {}
+                    self.pool_data["duration_sec"] = self.pool_duration_sec
+                    p_modes = payload.get("pool_modes")
+                    if p_modes:
+                        self.pool_modes = p_modes
+                        self.pool_data["mode_results"] = p_modes
+                        modes_dict = self.pool_data.setdefault("modes", {})
+                        for pm in p_modes:
+                            if isinstance(pm, dict) and pm.get("mode"):
+                                modes_dict[pm["mode"].lower()] = dict(pm)
+                    elif self.matrix_progress:
+                        modes_dict = self.pool_data.setdefault("modes", {})
+                        for mm in self.matrix_progress:
+                            if isinstance(mm, dict) and mm.get("mode"):
+                                m_key = mm["mode"].lower()
+                                if m_key not in modes_dict:
+                                    modes_dict[m_key] = dict(mm)
+                                else:
+                                    for k, v in mm.items():
+                                        if k not in modes_dict[m_key] or modes_dict[m_key][k] is None:
+                                            modes_dict[m_key][k] = v
+                    if payload.get("opponents"):
+                        self.pool_data["opponents"] = payload.get("opponents")
+
                 if self.total_played > 0 and self.start_time:
                     mode_elapsed = self.end_time - self.start_time
                     append_mode_timing(
@@ -1245,7 +1316,16 @@ class DashboardState:
                     if self.strategy_baseline in self.snakes_stats:
                         self.snakes_stats[self.strategy_baseline]["losses"] += 1
 
-    def set_finished(self, stop_type: str, stop_reason: str, recommendation: str, csv_path: Any):
+    def set_finished(
+        self,
+        stop_type: str,
+        stop_reason: str,
+        recommendation: str,
+        csv_path: Any,
+        duration_sec: Optional[float] = None,
+        pool_modes: Optional[List[Dict[str, Any]]] = None,
+        opponents: Optional[List[Dict[str, Any]]] = None,
+    ):
         with self.lock:
             self.last_activity_time = time.time()
             self.status = "FINISHED" if stop_type != "TEST_FAILURE" else "TEST_FAILURE"
@@ -1255,6 +1335,43 @@ class DashboardState:
             self.csv_path = str(csv_path)
             self.end_time = time.time()
             self.active_pid = None
+            dur = duration_sec
+            if dur is None and self.start_time:
+                dur = max(0.0, self.end_time - (self.suite_start_time or self.start_time))
+            else:
+                dur = float(dur) if dur is not None else 0.0
+
+            unit_dur = float((getattr(self, "unit_tests_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
+            depth_dur = float((getattr(self, "depth_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
+
+            if getattr(self, "run_type", "self") == "self":
+                self.matrix_duration_sec = max(0.0, round(dur - unit_dur - depth_dur, 1)) if dur > 0 else 0.0
+                self.self_play_matrix = list(self.matrix_progress or [])
+            elif getattr(self, "run_type", "self") == "pool":
+                self.pool_duration_sec = max(0.0, round(dur - unit_dur - depth_dur, 1)) if dur > 0 else 0.0
+                if not getattr(self, "pool_data", None) or not isinstance(self.pool_data, dict):
+                    self.pool_data = {}
+                self.pool_data["duration_sec"] = self.pool_duration_sec
+                if pool_modes:
+                    self.pool_modes = pool_modes
+                    self.pool_data["mode_results"] = pool_modes
+                    modes_dict = self.pool_data.setdefault("modes", {})
+                    for pm in pool_modes:
+                        if isinstance(pm, dict) and pm.get("mode"):
+                            modes_dict[pm["mode"].lower()] = dict(pm)
+                elif self.matrix_progress:
+                    modes_dict = self.pool_data.setdefault("modes", {})
+                    for mm in self.matrix_progress:
+                        if isinstance(mm, dict) and mm.get("mode"):
+                            m_key = mm["mode"].lower()
+                            if m_key not in modes_dict:
+                                modes_dict[m_key] = dict(mm)
+                            else:
+                                for k, v in mm.items():
+                                    if k not in modes_dict[m_key] or modes_dict[m_key][k] is None:
+                                        modes_dict[m_key][k] = v
+                if opponents:
+                    self.pool_data["opponents"] = opponents
 
     def to_dict(self) -> Dict[str, Any]:
         with self.lock:
@@ -1384,7 +1501,10 @@ class DashboardState:
                 mode_elapsed = max(0.0, now - mode_start)
                 unit_dur = float((getattr(self, "unit_tests_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
                 depth_dur = float((getattr(self, "depth_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
-                matrix_elapsed = max(0.0, suite_elapsed - unit_dur - depth_dur)
+                if getattr(self, "matrix_duration_sec", None) is not None:
+                    matrix_elapsed = float(self.matrix_duration_sec)
+                else:
+                    matrix_elapsed = max(0.0, suite_elapsed - unit_dur - depth_dur)
 
                 if self.status == "RUNNING" and (self.total_played > 0 or self.active_pid is not None or getattr(self, "run_type", "self") in ("depth", "self", "unit", "pool")):
                     eta_info = calculate_eta(
@@ -1408,6 +1528,18 @@ class DashboardState:
                     unit_d_copy["tests"] = get_default_unit_tests(status="PASSED", total_duration=float(unit_d_copy.get("duration_sec", 4.7)))
             else:
                 unit_d_copy = unit_d
+
+            pool_d = getattr(self, "pool_data", None)
+            if pool_d and isinstance(pool_d, dict):
+                pool_d = dict(pool_d)
+                if getattr(self, "pool_duration_sec", None) is not None:
+                    pool_d["duration_sec"] = float(self.pool_duration_sec)
+                if not pool_d.get("modes") and self.matrix_progress and getattr(self, "run_type", "self") == "pool":
+                    pool_d["modes"] = {
+                        item["mode"].lower(): dict(item)
+                        for item in self.matrix_progress
+                        if isinstance(item, dict) and item.get("mode")
+                    }
 
             res = {
                 "status": self.status,
@@ -1465,10 +1597,13 @@ class DashboardState:
                 "mode_elapsed_seconds": round(mode_elapsed, 1),
                 "suite_elapsed_seconds": round(suite_elapsed, 1),
                 "matrix_elapsed_seconds": round(matrix_elapsed, 1),
+                "matrix_duration_sec": getattr(self, "matrix_duration_sec", None),
+                "pool_duration_sec": getattr(self, "pool_duration_sec", None),
+                "self_play_matrix": getattr(self, "self_play_matrix", None),
                 "eta_seconds": eta_info.get("total_eta_seconds"),
                 "eta_breakdown": eta_info.get("breakdown", []),
                 "run_type": getattr(self, "run_type", "self"),
-                "pool_data": getattr(self, "pool_data", None),
+                "pool_data": pool_d,
                 "depth_data": getattr(self, "depth_data", None),
                 "unit_tests_data": unit_d_copy,
                 "snakes_stats": self.snakes_stats,
@@ -3354,12 +3489,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const unitSec = (unitData.duration_sec && unitData.duration_sec > 0) ? Number(unitData.duration_sec) : (data.total_played > 0 ? 8.3 : 0);
       const depthSec = (depthData.duration_sec && depthData.duration_sec > 0) ? Number(depthData.duration_sec) : 0;
 
-      const rawMatrixSec = (data.matrix_elapsed_seconds != null)
-        ? Math.max(0, Number(data.matrix_elapsed_seconds))
-        : Math.max(0, rawSuiteSec - unitSec - depthSec);
+      const rawMatrixSec = (data.matrix_duration_sec != null)
+        ? Math.max(0, Number(data.matrix_duration_sec))
+        : ((data.matrix_elapsed_seconds != null)
+            ? Math.max(0, Number(data.matrix_elapsed_seconds))
+            : Math.max(0, rawSuiteSec - unitSec - depthSec));
 
       const poolData = data.pool_data || {};
-      const rawPoolSec = poolData.duration_sec ? Number(poolData.duration_sec) : Math.max(0, rawSuiteSec - unitSec - depthSec);
+      const rawPoolSec = (data.pool_duration_sec != null)
+        ? Math.max(0, Number(data.pool_duration_sec))
+        : (poolData.duration_sec ? Number(poolData.duration_sec) : Math.max(0, rawSuiteSec - unitSec - depthSec));
 
       this.staticDurations = {
         suiteSec: Math.round(rawSuiteSec),
@@ -3753,9 +3892,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const delta = isOmitted ? null : (md.delta != null ? md.delta : (m.delta != null ? m.delta : (candShare != null && baseShare != null ? (candShare - baseShare) : null)));
         const z = isOmitted ? null : (md.z_score != null ? md.z_score : (m.z_score != null ? m.z_score : (isCurrentActive ? overallZ : null)));
 
-        const maxGames = md.max_games || m.max_games || bm.max_games || 200;
-        const candGames = md.cand_games != null ? md.cand_games : (isCurrentActive ? (pool.cand_games || data.total_played || 0) : (md.games || m.games || 0));
-        const baseGames = md.base_games != null ? md.base_games : (isCurrentActive ? (pool.base_games || data.total_played || 0) : (md.games || m.games || 0));
+        const defaultPoolMax = pool.max_games || (data.run_type === 'pool' ? (data.target_games || 40) : 200);
+        const maxGames = md.max_games || m.max_games || defaultPoolMax;
+        const candGames = md.cand_games != null ? md.cand_games : (isCurrentActive ? (pool.cand_games || data.total_played || 0) : (md.games != null ? md.games : (m.cand_games != null ? m.cand_games : (m.games != null ? m.games : 0))));
+        const baseGames = md.base_games != null ? md.base_games : (isCurrentActive ? (pool.base_games || data.total_played || 0) : (md.games != null ? md.games : (m.base_games != null ? m.base_games : (m.games != null ? m.games : 0))));
         const gamesActive = Math.max(candGames, baseGames);
 
         let statusClass = 'pending';
@@ -3769,12 +3909,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           completedPoolModes++;
         } else if (md.decision || m.decision) {
           const dec = md.decision || m.decision;
-          statusText = dec;
-          statusClass = dec.toLowerCase();
+          if (gamesActive === 0) {
+            statusText = 'FAILED';
+            statusClass = 'failed';
+          } else {
+            statusText = dec;
+            statusClass = dec.toLowerCase();
+          }
           completedPoolModes++;
         } else if (candShare != null) {
-          statusClass = delta >= 0 ? 'passed' : 'failed';
-          statusText = delta >= 0 ? 'PASSED' : 'FAILED';
+          if (gamesActive === 0) {
+            statusText = 'FAILED';
+            statusClass = 'failed';
+          } else {
+            statusClass = delta >= 0 ? 'passed' : 'failed';
+            statusText = delta >= 0 ? 'PASSED' : 'FAILED';
+          }
           completedPoolModes++;
         }
 
@@ -3996,14 +4146,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     // Stage 3: Self-Play Matrix
     let selfStatus = 'PENDING';
-    const matrixList = data.matrix_progress || [];
+    const matrixList = (runType === 'pool') ? (data.self_play_matrix || []) : (data.matrix_progress || []);
+    const hasSelfProgress = (data.self_play_matrix && data.self_play_matrix.length > 0) || (runType === 'self' && (data.matrix_progress && data.matrix_progress.length > 0));
     const completedModes = matrixList.filter(m => ['PASSED', 'PARITY', 'FAILED', 'SKIPPED'].includes(m.status)).length;
     let selfDur = '--';
     const sumMatrixSec = matrixList.reduce((acc, m) => acc + (m.duration_sec || 0), 0);
 
     const unitTestSec = (unitData && unitData.duration_sec && unitData.duration_sec > 0) ? unitData.duration_sec : (unitStatus === 'DONE' ? 8.3 : 0);
     const depthSec = (depth && depth.duration_sec && depth.duration_sec > 0) ? depth.duration_sec : 0;
-    const computedMatrixElapsed = data.matrix_elapsed_seconds != null ? data.matrix_elapsed_seconds : Math.max(0, (data.elapsed_seconds || 0) - unitTestSec - depthSec);
+    const computedMatrixElapsed = (data.matrix_duration_sec != null && data.matrix_duration_sec > 0)
+      ? data.matrix_duration_sec
+      : (data.matrix_elapsed_seconds != null ? data.matrix_elapsed_seconds : Math.max(0, (data.elapsed_seconds || 0) - unitTestSec - depthSec));
 
     if (runType === 'self') {
       if (isRunning) {
@@ -4015,12 +4168,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         else if (rec === 'PARITY') selfStatus = 'PARITY';
         else if (rec === 'REVERT') selfStatus = 'FAILED';
         else selfStatus = 'DONE';
-        selfDur = formatSeconds(sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed);
+        const finalSec = (data.matrix_duration_sec != null && data.matrix_duration_sec > 0)
+          ? data.matrix_duration_sec
+          : (sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed);
+        selfDur = formatSeconds(finalSec);
         autoSelectStage('self');
       }
-    } else if ((runType === 'pool' || isFinished) && completedModes > 0) {
+    } else if (runType === 'pool') {
+      if (data.matrix_duration_sec != null && data.matrix_duration_sec > 0) {
+        selfStatus = 'DONE';
+        selfDur = formatSeconds(data.matrix_duration_sec);
+      } else if (hasSelfProgress && sumMatrixSec > 0) {
+        selfStatus = 'DONE';
+        selfDur = formatSeconds(sumMatrixSec);
+      } else {
+        selfStatus = 'SKIPPED';
+        selfDur = '--';
+      }
+    } else if (isFinished && completedModes > 0) {
       selfStatus = 'DONE';
-      selfDur = formatSeconds(sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed);
+      selfDur = formatSeconds(data.matrix_duration_sec != null ? data.matrix_duration_sec : (sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed));
     } else {
       selfStatus = 'PENDING';
       selfDur = '--';
@@ -4030,24 +4197,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     // Stage 4: Zoo Pool Gate
     const pool = data.pool_data || {};
     let poolStatus = 'PENDING';
-    let poolDur = pool.duration_sec ? formatSeconds(pool.duration_sec) : '--';
+    const poolDurSec = (data.pool_duration_sec != null && data.pool_duration_sec > 0)
+      ? data.pool_duration_sec
+      : (pool.duration_sec && pool.duration_sec > 0 ? pool.duration_sec : null);
+    let poolDur = poolDurSec ? formatSeconds(poolDurSec) : '--';
 
     if (runType === 'pool') {
       if (isRunning) {
         poolStatus = 'RUNNING';
-        const poolElapsed = pool.duration_sec ? pool.duration_sec : Math.max(0, (data.elapsed_seconds || 0) - unitTestSec - depthSec);
+        const poolElapsed = poolDurSec || Math.max(0, (data.elapsed_seconds || 0) - unitTestSec - depthSec);
         poolDur = formatSeconds(poolElapsed);
         autoSelectStage('pool');
       } else if (isFinished) {
         if (rec === 'KEEP') poolStatus = 'DONE';
         else if (rec === 'PARITY') poolStatus = 'PARITY';
         else poolStatus = 'FAILED';
-        poolDur = pool.duration_sec ? formatSeconds(pool.duration_sec) : formatSeconds(Math.max(0, (data.elapsed_seconds || 0) - unitTestSec - depthSec));
+        const finishedPoolSec = poolDurSec || Math.max(0, (data.elapsed_seconds || 0) - unitTestSec - depthSec);
+        poolDur = formatSeconds(finishedPoolSec);
         autoSelectStage('pool');
       }
     } else if (pool.total_games && pool.total_games > 0) {
       poolStatus = (pool.delta || 0) >= 0 ? 'DONE' : 'FAILED';
-      poolDur = pool.duration_sec ? formatSeconds(pool.duration_sec) : '--';
+      poolDur = poolDurSec ? formatSeconds(poolDurSec) : '--';
+    } else if (isFinished && runType === 'self') {
+      poolStatus = 'SKIPPED';
+      poolDur = '--';
     }
     setRailSeg('pool', poolStatus, poolDur);
 
@@ -4116,7 +4290,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       { mode: 'standard', name: 'Standard 4P', target_share: 25.0, max_games: 200, num_snakes: 4 },
     ];
 
-    const matrixList = (data.matrix_progress && data.matrix_progress.length > 0) ? data.matrix_progress : [];
+    const matrixList = (data.run_type === 'pool')
+      ? (data.self_play_matrix || [])
+      : ((data.matrix_progress && data.matrix_progress.length > 0) ? data.matrix_progress : []);
     const modeMap = {};
     matrixList.forEach(m => { if (m.mode) modeMap[m.mode.toLowerCase()] = m; });
 
@@ -4144,7 +4320,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const m = modeMap[modeKey] || {};
       const isCurrentActive = isSelfRunning && (activeModeClean === modeKey);
 
-      const isOmitted = (matrixList.length > 0 && !modeMap[modeKey]);
+      const isOmitted = (data.run_type === 'pool' && !data.self_play_matrix) || (matrixList.length > 0 && !modeMap[modeKey]);
       const isExplicitSkipped = (m.status === 'SKIPPED' || m.decision === 'SKIPPED');
       const isSkipped = isOmitted || isExplicitSkipped;
 
@@ -4266,7 +4442,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     baseModes.forEach((bm) => {
       const modeKey = bm.mode;
       const m = modeMap[modeKey] || {};
-      const isOmitted = (matrixList.length > 0 && !modeMap[modeKey]);
+      const isOmitted = (data.run_type === 'pool' && !data.self_play_matrix) || (matrixList.length > 0 && !modeMap[modeKey]);
       const isSkipped = isOmitted || (m.status === 'SKIPPED' || m.decision === 'SKIPPED');
       if (!isSkipped) {
         const isCurrentActive = isSelfRunning && (activeModeClean === modeKey);
@@ -5403,9 +5579,9 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         p_delta = None if is_omitted else (pm.get("delta") if pm.get("delta") is not None else (mm.get("delta") if mm.get("delta") is not None else ((float(cand_s) - float(base_s)) if (cand_s is not None and base_s is not None) else None)))
         pz = None if is_omitted else (pm.get("z_score") if pm.get("z_score") is not None else (mm.get("z_score") if mm.get("z_score") is not None else (pool_overall_z if is_curr_pool else None)))
 
-        p_max = pm.get("max_games") or mm.get("max_games") or bm["max_games"] or 200
-        cand_g = pm.get("cand_games") if pm.get("cand_games") is not None else (played if is_curr_pool else (pm.get("games") or mm.get("games") or 0))
-        base_g = pm.get("base_games") if pm.get("base_games") is not None else (played if is_curr_pool else (pm.get("games") or mm.get("games") or 0))
+        p_max = pm.get("max_games") or mm.get("max_games") or (40 if run_type == "pool" else 200)
+        cand_g = pm.get("cand_games") if pm.get("cand_games") is not None else (played if is_curr_pool else (pm.get("games") or mm.get("cand_games") or mm.get("games") or 0))
+        base_g = pm.get("base_games") if pm.get("base_games") is not None else (played if is_curr_pool else (pm.get("games") or mm.get("base_games") or mm.get("games") or 0))
         active_g = max(cand_g, base_g)
 
         p_dec = pm.get("decision") or mm.get("decision")
@@ -5417,12 +5593,20 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
             p_status_text = "SKIPPED"
             completed_pool_count += 1
         elif p_dec:
-            p_status_text = p_dec
-            p_status_class = p_dec.lower()
+            if active_g == 0:
+                p_status_text = "FAILED"
+                p_status_class = "failed"
+            else:
+                p_status_text = p_dec
+                p_status_class = p_dec.lower()
             completed_pool_count += 1
         elif cand_s is not None:
-            p_status_text = "PASSED" if (p_delta or 0) >= 0 else "FAILED"
-            p_status_class = p_status_text.lower()
+            if active_g == 0:
+                p_status_text = "FAILED"
+                p_status_class = "failed"
+            else:
+                p_status_text = "PASSED" if (p_delta or 0) >= 0 else "FAILED"
+                p_status_class = p_status_text.lower()
             completed_pool_count += 1
         else:
             p_status_class = "pending"
@@ -5595,6 +5779,10 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
     depth_dur_str = format_duration(float(depth_dur)) if depth_dur else ("48.2s" if is_running else "--")
 
     run_type = data.get("run_type", "self")
+    matrix_dur_val = data.get("matrix_duration_sec")
+    pool_dur_val = data.get("pool_duration_sec") or (data.get("pool_data") or {}).get("duration_sec")
+    rec = str(data.get("recommendation") or "").upper()
+
     if is_running:
         if run_type == "depth":
             depth_status_clean = "running"
@@ -5602,21 +5790,66 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
             depth_dur_str = elapsed_str
             matrix_rail_class = "pending"
             matrix_rail_status = "PENDING"
+            matrix_dur_str = "--"
+            pool_rail_class = "pending"
+            pool_rail_status = "PENDING"
+            pool_dur_str = "--"
         elif run_type == "pool":
             depth_status_clean = "done"
             depth_status_text = "PASSED"
-            matrix_rail_class = "done"
-            matrix_rail_status = "PASSED"
+            if matrix_dur_val or data.get("self_play_matrix"):
+                matrix_rail_class = "done"
+                matrix_rail_status = "DONE"
+                matrix_dur_str = format_duration(float(matrix_dur_val)) if matrix_dur_val else "--"
+            else:
+                matrix_rail_class = "skipped"
+                matrix_rail_status = "SKIPPED"
+                matrix_dur_str = "--"
+            pool_rail_class = "active running"
+            pool_rail_status = "RUNNING"
+            pool_dur_str = elapsed_str
         else:
             depth_status_clean = "done"
             depth_status_text = "PASSED"
             matrix_rail_class = "active running"
             matrix_rail_status = "RUNNING"
+            matrix_dur_str = elapsed_str
+            pool_rail_class = "pending"
+            pool_rail_status = "PENDING"
+            pool_dur_str = "--"
+    elif status in ("FINISHED", "TEST_FAILURE"):
+        depth_status_clean = "done" if depth_dur else "pending"
+        depth_status_text = "PASSED" if depth_dur else "PENDING"
+        if run_type == "pool":
+            if matrix_dur_val or data.get("self_play_matrix"):
+                matrix_rail_class = "done"
+                matrix_rail_status = "DONE"
+                matrix_dur_str = format_duration(float(matrix_dur_val)) if matrix_dur_val else "--"
+            else:
+                matrix_rail_class = "skipped"
+                matrix_rail_status = "SKIPPED"
+                matrix_dur_str = "--"
+            pool_stat = "DONE" if rec == "KEEP" else ("PARITY" if rec == "PARITY" else "FAILED")
+            pool_rail_class = pool_stat.lower()
+            pool_rail_status = pool_stat
+            pool_dur_str = format_duration(float(pool_dur_val)) if pool_dur_val else elapsed_str
+        else:
+            self_stat = "DONE" if rec == "KEEP" else ("PARITY" if rec == "PARITY" else ("FAILED" if rec == "REVERT" else "DONE"))
+            matrix_rail_class = self_stat.lower()
+            matrix_rail_status = self_stat
+            matrix_dur_str = format_duration(float(matrix_dur_val)) if matrix_dur_val else elapsed_str
+            pool_rail_class = "skipped"
+            pool_rail_status = "SKIPPED"
+            pool_dur_str = "--"
     else:
         depth_status_clean = "pending"
         depth_status_text = "PENDING"
         matrix_rail_class = "pending"
         matrix_rail_status = "PENDING"
+        matrix_dur_str = "--"
+        pool_rail_class = "pending"
+        pool_rail_status = "PENDING"
+        pool_dur_str = "--"
 
     out = out.replace(
         '<div class="stage-segment pending" id="railSegment-depth">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">2</span>\n          <span class="stage-seg-name">Depth Benchmark</span>\n          <span class="stage-seg-status matrix-status-pending" id="railStatus-depth">PENDING</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>Fixed Search</span>\n          <span class="stage-seg-duration" id="railDuration-depth">--</span>\n        </div>\n      </div>',
@@ -5624,7 +5857,11 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
     )
     out = out.replace(
         '<div class="stage-segment active pending" id="railSegment-self">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">3</span>\n          <span class="stage-seg-name">Self-Play Matrix</span>\n          <span class="stage-seg-status matrix-status-pending" id="railStatus-self">PENDING</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>4 Modes Matrix</span>\n          <span class="stage-seg-duration" id="railDuration-self">--</span>\n        </div>\n      </div>',
-        f'<div class="stage-segment {matrix_rail_class}" id="railSegment-self">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">3</span>\n          <span class="stage-seg-name">Self-Play Matrix</span>\n          <span class="stage-seg-status matrix-status-{matrix_rail_status.lower()}" id="railStatus-self">{matrix_rail_status}</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>4 Modes Matrix</span>\n          <span class="stage-seg-duration" id="railDuration-self">{elapsed_str}</span>\n        </div>\n      </div>'
+        f'<div class="stage-segment {matrix_rail_class}" id="railSegment-self">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">3</span>\n          <span class="stage-seg-name">Self-Play Matrix</span>\n          <span class="stage-seg-status matrix-status-{matrix_rail_status.lower()}" id="railStatus-self">{matrix_rail_status}</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>4 Modes Matrix</span>\n          <span class="stage-seg-duration" id="railDuration-self">{matrix_dur_str}</span>\n        </div>\n      </div>'
+    )
+    out = out.replace(
+        '<div class="stage-segment pending" id="railSegment-pool">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">4</span>\n          <span class="stage-seg-name">Zoo Pool Gate</span>\n          <span class="stage-seg-status matrix-status-pending" id="railStatus-pool">PENDING</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>Opponent Pool</span>\n          <span class="stage-seg-duration" id="railDuration-pool">--</span>\n        </div>\n      </div>',
+        f'<div class="stage-segment {pool_rail_class}" id="railSegment-pool">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">4</span>\n          <span class="stage-seg-name">Zoo Pool Gate</span>\n          <span class="stage-seg-status matrix-status-{pool_rail_status.lower()}" id="railStatus-pool">{pool_rail_status}</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>Opponent Pool</span>\n          <span class="stage-seg-duration" id="railDuration-pool">{pool_dur_str}</span>\n        </div>\n      </div>'
     )
 
     # Pre-render depth benchmark summary and fixtures
@@ -6170,14 +6407,30 @@ class DashboardClient:
             "turns": turns,
         })
 
-    def set_finished(self, stop_type: str, stop_reason: str, recommendation: str, csv_path: str):
-        self.post_update({
+    def set_finished(
+        self,
+        stop_type: str,
+        stop_reason: str,
+        recommendation: str,
+        csv_path: str,
+        duration_sec: Optional[float] = None,
+        pool_modes: Optional[list] = None,
+        opponents: Optional[list] = None,
+    ):
+        payload = {
             "action": "set_finished",
             "stop_type": stop_type,
             "stop_reason": stop_reason,
             "recommendation": recommendation,
             "csv_path": csv_path,
-        }, sync=True)
+        }
+        if duration_sec is not None:
+            payload["duration_sec"] = float(duration_sec)
+        if pool_modes is not None:
+            payload["pool_modes"] = pool_modes
+        if opponents is not None:
+            payload["opponents"] = opponents
+        self.post_update(payload, sync=True)
 
     def update_pool_game(self, **kwargs):
         payload = {"action": "update_pool_game"}
