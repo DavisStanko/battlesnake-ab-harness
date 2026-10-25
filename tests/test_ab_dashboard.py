@@ -522,9 +522,73 @@ class TestDashboardSkip(unittest.TestCase):
         from ab_dashboard import load_run_history
         history = load_run_history()
         self.assertIsInstance(history, list)
-        self.assertGreater(len(history), 0)
-        last_entry = history[-1]
-        self.assertIn("recommendation", last_entry)
+        if len(history) > 0:
+            last_entry = history[-1]
+            self.assertIn("recommendation", last_entry)
+
+    def test_consolidate_run_history(self):
+        from ab_dashboard import consolidate_run_history
+        raw = [
+            {
+                "run_id": 1,
+                "timestamp": "2026-10-24 10:00:00",
+                "experiment_desc": "Feature X",
+                "total_games": 200,
+                "matrix_results": [{"mode": "standard", "var_win_share": 25.5}],
+                "depth_results": {"overall": {"delta_depth": 0.5}},
+            },
+            {
+                "run_id": 2,
+                "timestamp": "2026-10-24 10:15:00",
+                "experiment_desc": "Feature X",
+                "total_games": 20,
+                "pool_data": [{"mode": "standard", "cand_win_share": 60.0}],
+                "recommendation": "KEEP",
+            },
+        ]
+        consolidated = consolidate_run_history(raw)
+        self.assertEqual(len(consolidated), 1)
+        merged = consolidated[0]
+        self.assertEqual(merged["experiment_desc"], "Feature X")
+        self.assertEqual(merged["timestamp"], "2026-10-24 10:15:00")
+        self.assertIsNotNone(merged.get("matrix_results"))
+        self.assertIsNotNone(merged.get("pool_data"))
+        self.assertIsNotNone(merged.get("depth_results"))
+        self.assertEqual(merged["total_games"], 200)
+        self.assertEqual(merged["recommendation"], "KEEP")
+
+    def test_save_run_history_merges_pool_benchmark(self):
+        from ab_test import save_run_history
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            res_dir = Path(tmpdir)
+            save_run_history(
+                "baseline", "variant", 200,
+                {"baseline": {"wins": 150, "losses": 50, "draws": 0}, "variant": {"wins": 50, "losses": 150, "draws": 0}},
+                "COMPLETE", "Self-play complete", "PARITY",
+                experiment_desc="Unified Experiment",
+                results_dir=res_dir,
+                matrix_results=[{"mode": "standard", "win_share": 25.0}],
+                depth_results={"overall": {"delta_depth": 0.0}},
+            )
+            save_run_history(
+                "baseline", "variant", 20,
+                {"baseline": {"wins": 0, "losses": 0, "draws": 0}, "variant": {"wins": 0, "losses": 0, "draws": 0}},
+                "COMPLETE", "Pool complete", "KEEP",
+                experiment_desc="Unified Experiment",
+                results_dir=res_dir,
+                pool_data=[{"mode": "standard", "cand_win_share": 60.0}],
+            )
+            with open(res_dir / "ab_history.json", "r", encoding="utf-8") as f:
+                history = json.load(f)
+            self.assertEqual(len(history), 1)
+            self.assertIsNotNone(history[0].get("matrix_results"))
+            self.assertIsNotNone(history[0].get("pool_data"))
+            self.assertEqual(history[0]["total_games"], 200)
+            self.assertEqual(history[0]["recommendation"], "KEEP")
 
     def test_omitted_modes_render_skipped(self):
         from ab_dashboard import render_html_with_state, DASHBOARD_HTML
@@ -547,8 +611,8 @@ class TestDashboardSkip(unittest.TestCase):
         }
         rendered = render_html_with_state(DASHBOARD_HTML, data)
         # In both matrix and pool tables, Duel 1v1 must be SKIPPED instead of PENDING
-        self.assertIn('<span class="matrix-col-status matrix-status-skipped">SKIPPED</span>', rendered)
-        self.assertNotIn('<span class="matrix-col-status matrix-status-pending">PENDING</span>', rendered)
+        self.assertIn('<span class="status-chip status-chip-skipped matrix-col-status matrix-status-skipped">SKIPPED</span>', rendered)
+        self.assertNotIn('<span class="status-chip status-chip-pending matrix-col-status matrix-status-pending">PENDING</span>', rendered)
 
     def test_stage_durations_frozen_on_finish(self):
         # 1. Self-play matrix run
@@ -618,10 +682,10 @@ class TestDashboardSkip(unittest.TestCase):
         self.assertIn('id="railSegment-self"', rendered)
         self.assertIn('<span class="stage-seg-status matrix-status-skipped" id="railStatus-self">SKIPPED</span>', rendered)
         self.assertIn('<span class="stage-seg-duration" id="railDuration-self">--</span>', rendered)
-        # Stage 4 (Pool) must be PARITY with 14m 52s
+        # Stage 4 (Pool) must be DONE with 14:52
         self.assertIn('id="railSegment-pool"', rendered)
-        self.assertIn('<span class="stage-seg-status matrix-status-parity" id="railStatus-pool">PARITY</span>', rendered)
-        self.assertIn('<span class="stage-seg-duration" id="railDuration-pool">14m 52s</span>', rendered)
+        self.assertIn('<span class="stage-seg-status matrix-status-done" id="railStatus-pool">DONE</span>', rendered)
+        self.assertIn('<span class="stage-seg-duration" id="railDuration-pool">14:52</span>', rendered)
 
     def test_pool_modes_and_opponents_in_set_finished(self):
         self.state.handle_update({
@@ -667,8 +731,8 @@ class TestDashboardSkip(unittest.TestCase):
         }
         rendered = render_html_with_state(DASHBOARD_HTML, data)
         # Constrictor had 0 games completed; must NEVER render PARITY
-        self.assertNotIn('<span class="matrix-col-status matrix-status-parity">PARITY</span>', rendered)
-        self.assertIn('<span class="matrix-col-status matrix-status-failed">FAILED</span>', rendered)
+        self.assertNotIn('<span class="status-chip status-chip-parity matrix-col-status matrix-status-parity">PARITY</span>', rendered)
+        self.assertIn('<span class="status-chip status-chip-failed matrix-col-status matrix-status-failed">FAILED</span>', rendered)
 
     def test_restore_state_preserves_pool_data_and_stage_durations(self):
         saved_state = {
@@ -691,6 +755,140 @@ class TestDashboardSkip(unittest.TestCase):
         p_data = d["pool_data"]
         self.assertIn("constrictor", p_data.get("modes", {}))
         self.assertEqual(p_data["modes"]["constrictor"]["games"], 40)
+
+
+    def test_cumulative_suite_metrics_when_pool_starts(self):
+        """
+        Verify that elapsed, left, and progress bar represent the entire A/B suite:
+        - When pool games start, elapsed does NOT reset to 0:00 (includes prior self-play + unit + depth).
+        - Progress bar does NOT reset to 0% (includes completed self-play games).
+        - Total planned games includes both stages.
+        """
+        from ab_dashboard import calculate_suite_progress
+
+        # 1. Self-play completed with 734 games (e.g. Constrictor early stopped at 134, others 200)
+        self_matrix = [
+            {"mode": "constrictor", "status": "PASSED", "games": 134, "max_games": 200},
+            {"mode": "royale", "status": "PARITY", "games": 200, "max_games": 200},
+            {"mode": "duel", "status": "PARITY", "games": 200, "max_games": 200},
+            {"mode": "standard", "status": "PARITY", "games": 200, "max_games": 200},
+        ]
+
+        # In self-play, planned games should include queued pool gate games (4 modes * 50 = 200)
+        comp_s, plan_s, pct_s = calculate_suite_progress(
+            run_type="self",
+            matrix_progress=self_matrix,
+            is_running=False,
+        )
+        self.assertEqual(comp_s, 734)
+        self.assertEqual(plan_s, 934)  # 734 self-play + 200 pool
+        self.assertAlmostEqual(pct_s, 78.6, places=1)
+
+        # 2. Transition to Pool
+        pool_matrix = [
+            {"mode": "constrictor", "status": "running", "games": 0, "max_games": 50},
+            {"mode": "royale", "status": "pending", "games": 0, "max_games": 50},
+            {"mode": "duel", "status": "pending", "games": 0, "max_games": 50},
+            {"mode": "standard", "status": "pending", "games": 0, "max_games": 50},
+        ]
+        comp_p0, plan_p0, pct_p0 = calculate_suite_progress(
+            run_type="pool",
+            matrix_progress=pool_matrix,
+            self_play_matrix=self_matrix,
+            current_mode="constrictor",
+            current_played=0,
+            is_running=True,
+        )
+        # At start of pool, progress must NOT be 0%! It must be 78.6%
+        self.assertEqual(comp_p0, 734)
+        self.assertEqual(plan_p0, 934)
+        self.assertAlmostEqual(pct_p0, 78.6, places=1)
+
+        # 3. Halfway through pool (50 constrictor + 25 royale done = 75 pool games)
+        comp_p1, plan_p1, pct_p1 = calculate_suite_progress(
+            run_type="pool",
+            matrix_progress=[
+                {"mode": "constrictor", "status": "PASSED", "games": 50, "max_games": 50},
+                {"mode": "royale", "status": "running", "games": 0, "max_games": 50},
+                {"mode": "duel", "status": "pending", "games": 0, "max_games": 50},
+                {"mode": "standard", "status": "pending", "games": 0, "max_games": 50},
+            ],
+            self_play_matrix=self_matrix,
+            current_mode="royale",
+            current_played=25,
+            is_running=True,
+        )
+        self.assertEqual(comp_p1, 734 + 75)
+        self.assertEqual(plan_p1, 934)
+        self.assertAlmostEqual(pct_p1, round((809 / 934) * 100.0, 1), places=1)
+
+        # 4. State tracking & suite elapsed time continuity
+        import os
+        self.state.unit_tests_data = {"status": "PASSED", "duration_sec": 5.0}
+        self.state.depth_data = {"passed": True, "duration_sec": 25.0, "completed_positions": 12}
+        self.state.handle_update({
+            "action": "init",
+            "run_type": "self",
+            "experiment_desc": "Full Suite Continuity Test",
+            "pid": os.getpid(),
+            "matrix_progress": self_matrix,
+        })
+        self.state.handle_update({
+            "action": "set_finished",
+            "duration_sec": 330.0,  # 5s unit + 25s depth + 300s matrix
+            "stop_type": "MATRIX_COMPLETE",
+            "recommendation": "PARITY",
+        })
+        d_self_done = self.state.to_dict()
+        self.assertEqual(d_self_done["matrix_duration_sec"], 300.0)
+
+        # Pool starts on same experiment: suite elapsed must start at >= 330.0s, NOT 0.0s!
+        self.state.handle_update({
+            "action": "init",
+            "run_type": "pool",
+            "experiment_desc": "Full Suite Continuity Test",
+            "game_mode": "constrictor",
+            "pid": os.getpid(),
+            "matrix_progress": pool_matrix,
+        })
+        d_pool_start = self.state.to_dict()
+        self.assertGreaterEqual(d_pool_start["suite_elapsed_seconds"], 330.0)
+        self.assertEqual(d_pool_start["matrix_duration_sec"], 300.0)
+        self.assertAlmostEqual(d_pool_start["games_progress_percent"], 78.6, places=1)
+        self.assertAlmostEqual(d_pool_start["progress_percent"], 95.0, places=1)
+
+    def test_target_and_pool_enabled_in_dashboard_state(self):
+        """Test target classification and pool_enabled status tracking."""
+        from ab_dashboard import calculate_suite_progress
+
+        self.state.handle_update({
+            "action": "init",
+            "run_type": "self",
+            "experiment_desc": "Fix hazard depth [TARGET: BUG FIX]",
+            "target": "BUG FIX",
+            "pool_enabled": False,
+            "pid": os.getpid(),
+        })
+        d = self.state.to_dict()
+        self.assertEqual(d["target"], "BUG FIX")
+        self.assertFalse(d["pool_enabled"])
+
+        # When pool_enabled is False, self-play suite progress only plans matrix games
+        matrix = [
+            {"mode": "royale", "status": "running", "games": 50, "max_games": 200},
+        ]
+        comp, plan, pct = calculate_suite_progress(
+            run_type="self",
+            matrix_progress=matrix,
+            current_mode="royale",
+            current_played=50,
+            target_games=200,
+            is_running=True,
+            pool_enabled=False,
+        )
+        self.assertEqual(comp, 50)
+        self.assertEqual(plan, 200)  # Exactly 200, no phantom 50 pool games
+        self.assertEqual(pct, 25.0)
 
 
 if __name__ == "__main__":

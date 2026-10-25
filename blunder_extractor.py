@@ -283,6 +283,8 @@ def find_blunders(
     ruleset_name = str(ruleset.get("name", "standard")).lower()
     wrap = "wrapped" in ruleset_name
     constrictor = "constrictor" in ruleset_name
+    settings = ruleset.get("settings", {})
+    hazard_dmg = int(settings.get("hazardDamagePerTurn", ruleset.get("damagePerTurn", 14 if "royale" in ruleset_name else 0)))
 
     parsed_frames = [extract_frame_board(f, metadata) for f in frames]
     blunders: List[BlunderDetection] = []
@@ -371,6 +373,12 @@ def find_blunders(
                 if opp_body_collision:
                     candidate_evals[move] = {"safe": False, "reason": "snake-collision"}
                     continue
+
+                # Check fatal hazard damage
+                if hazard_dmg > 0 and (nx, ny) in f_curr.get("hazards", []):
+                    if snake["health"] <= (hazard_dmg + 1):
+                        candidate_evals[move] = {"safe": False, "reason": "hazard-death"}
+                        continue
 
                 # Check potential head-to-head collision
                 h2h_threat = False

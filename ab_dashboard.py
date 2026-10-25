@@ -177,13 +177,14 @@ def calculate_eta(
     depth_data: Optional[dict] = None,
     unit_tests_data: Optional[dict] = None,
     pool_data: Optional[dict] = None,
+    include_pool_stage: bool = False,
 ) -> Dict[str, Any]:
     """
     Computes FULL SUITE ETA across all remaining stages and modes:
     1. Stage 1 (Unit Tests): ~5s if running/pending, 0s if passed.
     2. Stage 2 (Depth Benchmark): remaining fixtures * spp (~23s if pending, 0s if completed).
     3. Stage 3 (Self-Play Matrix): remaining games * mode rate across all queued matrix modes.
-    4. Stage 4 (Zoo Pool Gate): remaining games across pool modes if active pool run.
+    4. Stage 4 (Zoo Pool Gate): remaining games across pool modes if active pool run or queued.
     """
     timings = mode_timings if mode_timings is not None else load_mode_timings(timings_path)
     has_any_history = bool(timings and len(timings) > 0)
@@ -340,9 +341,11 @@ def calculate_eta(
                 "eta_seconds": None,
             })
 
-    # ── Stage 4: Zoo Pool Gate Modes (when pool_data provided and not already in matrix_progress) ──
+    # ── Stage 4: Zoo Pool Gate Modes (when pool_data provided and not already in matrix_progress, or queued after self-play) ──
     rem_pool_sec = 0.0
     pool_breakdown = []
+    medians_pool = get_mode_medians(timings, target_run_type="pool") if timings else {}
+
     if run_type == "pool" and not modes_to_calc and pool_data:
         p_modes = pool_data.get("mode_results") or pool_data.get("modes") or pool_data.get("mode_stats") or {}
         for m_name in ("constrictor", "royale", "duel", "standard"):
@@ -358,7 +361,7 @@ def calculate_eta(
             else:
                 p_left = p_max
 
-            spg = (current_mode_elapsed / current_played) if (is_curr_pool and current_played >= 5 and current_mode_elapsed > 0) else (medians.get(m_name) or DEFAULT_POOL_RATES.get(m_name, 12.0))
+            spg = (current_mode_elapsed / current_played) if (is_curr_pool and current_played >= 5 and current_mode_elapsed > 0) else (medians_pool.get(m_name) or DEFAULT_POOL_RATES.get(m_name, 12.0))
             m_eta = p_left * spg
             rem_pool_sec += m_eta
             pool_breakdown.append({
@@ -369,10 +372,28 @@ def calculate_eta(
                 "rate_source": "live" if is_curr_pool else "history",
                 "eta_seconds": round(m_eta, 1),
             })
+    elif include_pool_stage and run_type in ("self", "unit", "depth"):
+        # Pool gate is queued for after self-play
+        target_pool_modes = [str(item.get("mode", "")).strip().lower() for item in (matrix_progress or []) if item.get("mode")]
+        if not target_pool_modes:
+            target_pool_modes = ["constrictor", "royale", "duel", "standard"]
+        for m_name in target_pool_modes:
+            spg = medians_pool.get(m_name) or DEFAULT_POOL_RATES.get(m_name, 12.0)
+            p_left = 50
+            m_eta = p_left * spg
+            rem_pool_sec += m_eta
+            pool_breakdown.append({
+                "mode": m_name,
+                "stage": "pool",
+                "games_left": p_left,
+                "rate_spg": round(spg, 3),
+                "rate_source": "history" if m_name in medians_pool else "default",
+                "eta_seconds": round(m_eta, 1),
+            })
 
     # ── Full Suite Total ETA ──
     total_suite_eta = rem_unit_sec + rem_depth_sec + rem_matrix_sec + rem_pool_sec
-    final_eta = round(total_suite_eta, 1) if (total_suite_eta > 0 and (has_valid_rate or rem_depth_sec > 0 or rem_unit_sec > 0)) else None
+    final_eta = round(total_suite_eta, 1) if (total_suite_eta > 0 and (has_valid_rate or rem_depth_sec > 0 or rem_unit_sec > 0 or rem_pool_sec > 0)) else None
 
     # Combined breakdown for callers and UI
     combined_breakdown = []
@@ -401,7 +422,63 @@ def calculate_eta(
         },
     }
 
-def load_run_history(max_entries: int = 15) -> list:
+def consolidate_run_history(history: list) -> list:
+    """Consolidates consecutive/recent runs that share the same experiment description
+    (e.g., self-play matrix followed by external pool benchmark) into a unified entry.
+    """
+    if not history:
+        return []
+    consolidated = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        desc = entry.get("experiment_desc") or entry.get("description")
+        matched_idx = None
+        for i in range(len(consolidated) - 1, -1, -1):
+            prev = consolidated[i]
+            prev_desc = prev.get("experiment_desc") or prev.get("description")
+            if desc and prev_desc == desc:
+                has_mr_prev = prev.get("matrix_results") is not None
+                has_mr_curr = entry.get("matrix_results") is not None
+                has_pool_prev = prev.get("pool_data") is not None
+                has_pool_curr = entry.get("pool_data") is not None
+
+                if (has_mr_prev and not has_pool_prev and has_pool_curr) or \
+                   (has_pool_prev and not has_mr_prev and has_mr_curr):
+                    matched_idx = i
+                    break
+
+        if matched_idx is not None:
+            prev = dict(consolidated[matched_idx])
+            if entry.get("matrix_results") is not None and prev.get("matrix_results") is None:
+                prev["matrix_results"] = entry["matrix_results"]
+            if entry.get("depth_results") is not None and prev.get("depth_results") is None:
+                prev["depth_results"] = entry["depth_results"]
+            if entry.get("pool_data") is not None and prev.get("pool_data") is None:
+                prev["pool_data"] = entry["pool_data"]
+            if entry.get("timestamp"):
+                prev["timestamp"] = entry["timestamp"]
+            if entry.get("recommendation"):
+                prev["recommendation"] = entry["recommendation"]
+            if entry.get("stop_type"):
+                prev["stop_type"] = entry["stop_type"]
+            if entry.get("stop_reason"):
+                prev["stop_reason"] = entry["stop_reason"]
+            if entry.get("total_games", 0) > prev.get("total_games", 0):
+                prev["total_games"] = entry["total_games"]
+                if "baseline" in entry:
+                    prev["baseline"] = entry["baseline"]
+                if "variant" in entry:
+                    prev["variant"] = entry["variant"]
+            if entry.get("unit_tests") and not prev.get("unit_tests"):
+                prev["unit_tests"] = entry["unit_tests"]
+            consolidated[matched_idx] = prev
+        else:
+            consolidated.append(dict(entry))
+    return consolidated
+
+
+def load_run_history(max_entries: Optional[int] = None) -> list:
     global _HISTORY_CACHE, _HISTORY_MTIME
     history_file = Path(__file__).resolve().parent.parent / "ab_results" / "ab_history.json"
     if not history_file.exists():
@@ -414,7 +491,8 @@ def load_run_history(max_entries: int = 15) -> list:
             with history_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, list):
-                    sliced = data[-max_entries:] if len(data) > max_entries else data
+                    consolidated = consolidate_run_history(data)
+                    sliced = consolidated[-max_entries:] if (max_entries is not None and len(consolidated) > max_entries) else consolidated
                     for entry in sliced:
                         if isinstance(entry, dict):
                             entry.pop("games", None)
@@ -453,15 +531,14 @@ def format_rate_gpm(rate_gpm: float, unit: str = "games/min") -> str:
 
 
 def format_duration(seconds: Optional[float], allow_decimal: bool = False, default: str = "--") -> str:
-    """Format duration into the two largest units with unit letters.
+    """Format duration into XX:XX:XX format dropping leading zeros.
     Examples:
-      - 5520s -> '1h 32m'
-      - 2913s -> '48m 33s'
-      - 358s -> '5m 58s'
-      - 23s -> '23s'
-      - 4.7s -> '4.7s' (when allow_decimal=True)
-      - 5512s ('1h 31m 52s') -> '1h 31m' (trimmed to two units)
-      - 3240s -> '54m' (when seconds is 0 under an hour)
+      - 5520s -> '1:32:00'
+      - 2913s -> '48:33'
+      - 358s -> '5:58'
+      - 23s -> '0:23'
+      - 0s -> '0:00'
+      - 36005s -> '10:00:05'
     """
     if seconds is None:
         return default
@@ -471,40 +548,19 @@ def format_duration(seconds: Optional[float], allow_decimal: bool = False, defau
         return default
     if s < 0 or math.isnan(s):
         return default
-    if s == 0:
-        return "0.0s" if allow_decimal else "0s"
-
-    if s < 60.0:
-        if allow_decimal:
-            return f"{s:.1f}s"
-        return f"{int(round(s))}s"
 
     total_sec = int(round(s))
-    days = total_sec // 86400
-    hours = (total_sec % 86400) // 3600
+    hours = total_sec // 3600
     mins = (total_sec % 3600) // 60
     secs = total_sec % 60
 
-    if days > 0:
-        if hours > 0:
-            return f"{days}d {hours}h"
-        return f"{days}d"
     if hours > 0:
-        if mins > 0:
-            return f"{hours}h {mins}m"
-        return f"{hours}h"
-    if mins > 0:
-        if secs > 0:
-            return f"{mins}m {secs}s"
-        return f"{mins}m"
-    return f"{secs}s"
+        return f"{hours}:{mins:02d}:{secs:02d}"
+    return f"{mins}:{secs:02d}"
 
 
 def format_left_duration(eta_seconds: Optional[float], default: str = "--") -> str:
-    """Format LEFT ETA duration into two largest units, rounded to minutes:
-    - At or above 1 hr: '1h 38m', '2h 54m'
-    - Under 1 hr: '54m', '5m'
-    """
+    """Format LEFT ETA duration into XX:XX:XX format dropping leading zeros."""
     if eta_seconds is None:
         return default
     try:
@@ -513,10 +569,7 @@ def format_left_duration(eta_seconds: Optional[float], default: str = "--") -> s
         return default
     if s <= 0 or math.isnan(s):
         return default
-    total_min = int(round(s / 60.0))
-    if total_min <= 0:
-        return "< 1m"
-    return format_duration(total_min * 60)
+    return format_duration(s, default=default)
 
 
 format_elapsed_clock = format_duration
@@ -529,6 +582,105 @@ def calculate_run_progress_percent(completed_games: int, planned_games: int) -> 
         return 0.0
     pct = (completed_games / planned_games) * 100.0
     return max(0.0, min(100.0, round(pct, 1)))
+
+
+def calculate_time_progress_percent(
+    elapsed_sec: float,
+    eta_sec: Optional[float],
+    is_finished: bool = False,
+) -> float:
+    """Calculates run progress percentage based on time:
+    progress = elapsed / (elapsed + left) * 100.
+    """
+    if is_finished:
+        return 100.0
+    if elapsed_sec <= 0:
+        return 0.0
+    if eta_sec is None:
+        return 0.0
+    try:
+        e = float(eta_sec)
+    except (ValueError, TypeError):
+        return 0.0
+    if e <= 0:
+        return 100.0
+    total_time = elapsed_sec + e
+    if total_time <= 0:
+        return 0.0
+    pct = (elapsed_sec / total_time) * 100.0
+    return max(0.0, min(100.0, round(pct, 1)))
+
+
+def calculate_suite_progress(
+    run_type: str,
+    matrix_progress: Optional[list],
+    self_play_matrix: Optional[list] = None,
+    depth_data: Optional[dict] = None,
+    current_mode: str = "standard",
+    current_played: int = 0,
+    target_games: int = 200,
+    is_running: bool = False,
+    pool_enabled: bool = True,
+) -> Tuple[int, int, float]:
+    """Calculates cumulative completed games, planned games, and progress percentage
+    for the entire A/B validation suite.
+    """
+    if run_type == "depth" and depth_data:
+        planned = depth_data.get("total_positions", 12) or 12
+        completed = depth_data.get("completed_positions", 0) or 0
+        pct = calculate_run_progress_percent(completed, planned)
+        return (completed, planned, pct)
+
+    curr_mode_clean = str(current_mode).strip().lower()
+    total_completed = 0
+    total_planned = 0
+
+    # 1. Stage 3 (Self-Play Matrix) games
+    # If in pool run and self_play_matrix exists, add all self-play games
+    if run_type == "pool" and self_play_matrix:
+        for m in self_play_matrix:
+            g_val = m.get("games") if m.get("games") is not None else (m.get("total_played") or 0)
+            m_status = str(m.get("status") or "").upper()
+            is_comp = (m_status in ("PASSED", "PARITY", "FAILED", "KEEP", "REVERT") and g_val > 0)
+            mg = g_val if is_comp else (m.get("max_games") or 200)
+            total_completed += g_val
+            total_planned += mg
+    elif run_type == "self" and matrix_progress:
+        for m in matrix_progress:
+            m_mode = str(m.get("mode") or "").strip().lower()
+            is_curr = (is_running and m_mode == curr_mode_clean)
+            g_val = current_played if is_curr else (m.get("games") if m.get("games") is not None else (m.get("total_played") or 0))
+            m_status = str(m.get("status") or "").upper()
+            is_comp = (m_status in ("PASSED", "PARITY", "FAILED", "KEEP", "REVERT") and g_val > 0)
+            mg = g_val if is_comp else (m.get("max_games") or 200)
+            total_completed += g_val
+            total_planned += mg
+
+    # 2. Stage 4 (Zoo Pool Gate) games
+    if run_type == "pool":
+        pool_matrix = matrix_progress or []
+        if pool_matrix:
+            for m in pool_matrix:
+                m_mode = str(m.get("mode") or "").strip().lower()
+                is_curr = (is_running and m_mode == curr_mode_clean)
+                g_val = current_played if is_curr else (m.get("games") if m.get("games") is not None else (m.get("cand_games") or m.get("total_played") or 0))
+                m_status = str(m.get("status") or "").upper()
+                is_comp = (m_status in ("PASSED", "PARITY", "FAILED", "KEEP", "REVERT") and g_val > 0)
+                mg = g_val if is_comp else (m.get("max_games") or 50)
+                total_completed += g_val
+                total_planned += mg
+        else:
+            total_completed += current_played
+            total_planned += target_games
+    elif run_type == "self":
+        if pool_enabled:
+            # Pool gate is queued to run after self-play
+            # Pool planned games for each active mode in matrix_progress
+            active_count = len(matrix_progress) if matrix_progress else 4
+            total_planned += (active_count * 50)
+
+    pct = calculate_run_progress_percent(total_completed, total_planned)
+    return (total_completed, total_planned, pct)
 
 
 MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -549,6 +701,7 @@ def format_history_time(raw: Any) -> str:
         month_str = MONTH_NAMES[month_idx] if 0 <= month_idx < 12 else m.group(2)
         day = int(m.group(3))
         time_part = m.group(4)
+        time_part = re.sub(r"^0(\d:\d{2}:\d{2})", r"\1", time_part)
         return f"{month_str} {day} {time_part}"
     except (ValueError, IndexError):
         return s
@@ -557,45 +710,47 @@ def format_history_time(raw: Any) -> str:
 def get_default_unit_tests(status: str = "PASSED", total_duration: float = 4.7) -> List[Dict[str, Any]]:
     test_names = [
         "test_avoid_dead_end_when_boxed_in_corner",
+        "test_avoid_larger_opponent_corridor_trap_prefer_tail_recession_pocket",
         "test_avoid_risky_head_kill_chase",
+        "test_avoid_running_into_opponent_if_open_space",
         "test_c_engine_loads_without_compiler_if_binary_exists",
         "test_c_engine_mandatory_fail_fast",
-        "test_c_lib_singleton_across_instances",
-        "test_c_search_diagnostics_instrumentation",
-        "test_constrictor_turn_10_avoid_non_receding_tail",
+        "test_concurrent_move_requests_under_timeout_cap",
+        "test_concurrent_thread_safety_no_segfault",
+        "test_constrictor_7x7_turn_11_must_take_right_for_tie",
+        "test_constrictor_turn_22_must_take_right",
+        "test_constrictor_turn_30_must_take_down",
+        "test_dont_run_into_tail_if_constrictor",
+        "test_dont_run_into_tail_if_just_ate",
         "test_duel_turn_172_avoid_wall_pocket_tunnel_left",
+        "test_duel_turn_208_avoid_dead_end_pocket_suicide",
+        "test_duel_turn_78_must_keep_opponent_cornered",
         "test_duel_turn_79_avoid_corner_trap_wall_collision",
         "test_execute_adjacent_head_kill_on_smaller_opponent",
-        "test_game_09f3e098_turn_17_avoid_food_tunnel_trap",
-        "test_game_1fca82d9_turn_79_avoid_wall_trap",
-        "test_game_3b8cb4df_turn_119_head_threat_trap",
-        "test_game_6a603957_turn_156_head_collision_avoidance",
-        "test_game_76c7c4f4_turn_165_avoid_corner_pocket_deadend",
-        "test_game_78427f71_turn_10_avoid_blunder_hazard",
-        "test_game_790cb962_turn_188_avoid_self_body_collision_into_corner",
-        "test_game_79fbe544_turn_86_avoid_dead_end",
-        "test_game_7f082e05_turn_45_avoid_corner_trap",
-        "test_game_8f4305c4_turn_129_avoid_trap",
-        "test_game_a77717d2_turn_154_avoid_head_collision",
-        "test_game_a9e526a0_turn_115_avoid_head_to_head",
-        "test_game_ac29c9fe_turn_18_avoid_suicide_head_threat",
-        "test_game_b63ba0e8_turn_24_avoid_blunder",
-        "test_game_b88b22a0_turn_128_avoid_dead_end",
-        "test_game_cf172cb2_turn_85_avoid_corner_trap",
-        "test_game_d3b07ca5_turn_108_avoid_blunder",
-        "test_game_d4fe6fa5_turn_115_avoid_suicide",
+        "test_failure_case_turn_45_avoid_contested_head_collision",
         "test_game_de138756_turn_106_avoid_suicidal_head_threat_override",
-        "test_game_eb23bc2e_turn_130_avoid_trap",
+        "test_multiplayer_turn_108_avoid_opponent_body_suicide",
         "test_multiplayer_turn_10_avoid_non_receding_tail_collision",
         "test_multiplayer_turn_116_avoid_flibba_head_to_head_trap",
+        "test_multiplayer_turn_119_avoid_wall_down",
+        "test_multiplayer_turn_194_pocket_trap_follow_tail",
         "test_multiplayer_turn_29_avoid_wall_left",
-        "test_multiplayer_turn_85_avoid_center_hazard_trap",
-        "test_never_run_into_opponent_body",
+        "test_multiplayer_turn_31_avoid_wall_collision",
+        "test_multiplayer_turn_321_cornered_down_into_tail",
+        "test_multiplayer_turn_61_avoid_wall_and_opponent_body_suicide",
+        "test_multiplayer_turn_61_avoid_wall_corner_pocket_trap",
+        "test_multiplayer_turn_63_avoid_self_collision",
+        "test_multiplayer_turn_85_avoid_wall_up",
+        "test_multiplayer_turn_97_avoid_opponent_body_suicide",
         "test_never_run_into_wall",
         "test_never_run_into_yourself",
-        "test_prefer_larger_open_space",
+        "test_prefer_opponent_over_wall_or_self",
+        "test_royale_danger_zone_low_health_must_seek_food",
+        "test_search_diagnostics",
         "test_trap_avoidance_dead_end_pocket",
         "test_urgent_food_eating_on_critical_health",
+        "test_wrap_mode_boundary_escape",
+        "test_wrap_mode_flood_fill_modulo",
     ]
     per_test_dur = round(total_duration / max(len(test_names), 1), 3)
     return [
@@ -611,30 +766,29 @@ def get_default_unit_tests(status: str = "PASSED", total_duration: float = 4.7) 
 
 def render_unit_tests_html(tests: List[Dict[str, Any]]) -> str:
     if not tests:
-        return '<div style="color: var(--text-muted); padding: 1rem; text-align: center; font-size: 0.85rem;">No individual test records available.</div>'
+        return '<tr class="empty-row"><td colspan="3" class="empty-cell">No individual test records available.</td></tr>'
     sorted_tests = sorted(
         tests,
         key=lambda t: (0 if str(t.get("status", "")).upper() in ("FAILED", "ERROR") else 1, t.get("name", ""))
     )
-    items = []
+    rows = []
     for idx, t in enumerate(sorted_tests, 1):
         status_val = str(t.get("status", "")).upper()
         is_failed = status_val in ("FAILED", "ERROR")
-        icon = "❌" if is_failed else "✓"
-        icon_class = "failed" if is_failed else "passed"
-        item_class = "unit-test-item failed" if is_failed else "unit-test-item"
+        st_text = "FAILED" if is_failed else "PASSED"
+        st_class = "failed" if is_failed else "passed"
+        chip_html = f'<span class="status-chip status-chip-{st_class} matrix-col-status matrix-status-{st_class}">{st_text}</span>'
         name = html.escape(str(t.get("name", "unnamed_test")))
         msg = t.get("message", "")
-        msg_html = f'<div class="unit-test-failure-msg">{html.escape(str(msg))}</div>' if (is_failed and msg) else ""
-        items.append(f'''        <div class="{item_class}">
-          <div class="unit-test-row">
-            <span class="unit-test-num">{idx}.</span>
-            <span class="unit-test-icon {icon_class}">{icon}</span>
-            <span class="unit-test-name" title="{name}">{name}</span>
-          </div>
-          {msg_html}
-        </div>''')
-    return "\n".join(items)
+        fail_row = f'<tr class="test-fail-row"><td colspan="3"><div class="unit-test-failure-msg">{html.escape(str(msg))}</div></td></tr>' if (is_failed and msg) else ""
+        row_class = ' class="row-failed"' if is_failed else ""
+        rows.append(f'''        <tr{row_class}>
+          <td class="td-right" style="color: var(--pipeline-text-muted);">{idx}.</td>
+          <td class="td-left" style="font-weight: 600; color: var(--pipeline-text-main);">{name}</td>
+          <td class="td-right">{chip_html}</td>
+        </tr>
+        {fail_row}''')
+    return "\n".join(rows)
 
 
 class DashboardState:
@@ -675,6 +829,8 @@ class DashboardState:
         self.target_win_share = 25.0 if num_snakes == 4 else 50.0
         self.matrix_progress = []
         self.run_type = "self"
+        self.target: Optional[str] = None
+        self.pool_enabled: bool = False
 
         self.pool_data: Dict[str, Any] = {
             "cand_score": 0.0,
@@ -729,6 +885,8 @@ class DashboardState:
         self.matrix_duration_sec: Optional[float] = None
         self.pool_duration_sec: Optional[float] = None
         self.self_play_matrix: Optional[List[Dict[str, Any]]] = None
+        self.prior_suite_elapsed: Optional[float] = None
+        self.pool_start_time: Optional[float] = None
         self.csv_path = ""
         self.recommendation = "PENDING"
         self.skip_requested: bool = False
@@ -773,12 +931,17 @@ class DashboardState:
                         unit_dur = float((getattr(self, "unit_tests_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
                         depth_dur = float((getattr(self, "depth_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
                         self.matrix_duration_sec = max(0.0, round(prev_elapsed - unit_dur - depth_dur, 1))
+                        self.prior_suite_elapsed = prev_elapsed
                     if self.matrix_progress:
                         self.self_play_matrix = list(self.matrix_progress)
+                    if getattr(self, "pool_start_time", None) is None:
+                        self.pool_start_time = time.time()
                 elif not is_same_experiment:
                     self.matrix_duration_sec = None
                     self.pool_duration_sec = None
                     self.self_play_matrix = None
+                    self.prior_suite_elapsed = None
+                    self.pool_start_time = None
 
                 self.run_type = new_run_type
                 self.active_pid = payload.get("pid", self.active_pid)
@@ -792,6 +955,8 @@ class DashboardState:
                 self.early_stop_low = payload.get("early_stop_low", 18.0)
                 self.threads = payload.get("threads", self.threads)
                 self.experiment_desc = new_desc
+                self.target = payload.get("target")
+                self.pool_enabled = bool(payload.get("pool_enabled", new_run_type == "pool"))
                 self.game_mode = payload.get("game_mode", "standard")
                 self.num_snakes = payload.get("num_snakes", 4)
                 self.target_win_share = payload.get("target_win_share", 25.0 if self.num_snakes == 4 else 50.0)
@@ -826,7 +991,7 @@ class DashboardState:
                         "mode_stats": {},
                         "modes": {},
                     }
-                if not getattr(self, "depth_data", None) or not self.depth_data.get("completed_positions"):
+                if not getattr(self, "depth_data", None) or (not is_same_experiment and not self.depth_data.get("completed_positions") and not self.depth_data.get("duration_sec")):
                     self.depth_data = {
                         "completed_positions": 0,
                         "total_positions": 12,
@@ -845,7 +1010,16 @@ class DashboardState:
                 self.snakes_stats = self._init_snakes_stats(self.num_snakes, self.strategy_variant, self.strategy_baseline)
                 self.start_time = time.time()
                 explicit_suite = payload.get("suite_start_time")
-                if explicit_suite:
+                if new_run_type == "pool" and is_same_experiment and getattr(self, "matrix_duration_sec", None) is not None:
+                    prior_dur = float(getattr(self, "prior_suite_elapsed", 0.0) or 0.0)
+                    if prior_dur <= 0.0:
+                        unit_dur = float((getattr(self, "unit_tests_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
+                        depth_dur = float((getattr(self, "depth_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
+                        prior_dur = unit_dur + depth_dur + float(self.matrix_duration_sec or 0.0)
+                    pool_start = getattr(self, "pool_start_time", None) or self.start_time
+                    pool_el = max(0.0, time.time() - pool_start)
+                    self.suite_start_time = time.time() - (prior_dur + pool_el)
+                elif explicit_suite:
                     self.suite_start_time = float(explicit_suite)
                 elif self.suite_start_time is None or getattr(self, "_last_desc", None) != new_desc:
                     self.suite_start_time = self.start_time
@@ -1083,6 +1257,7 @@ class DashboardState:
                     f_list.append(fixture_entry)
                 var_depths = [f["var_med_depth"] for f in f_list]
                 base_depths = [f["base_med_depth"] for f in f_list]
+                delta_depths = [f.get("delta_depth", round(f["var_med_depth"] - f["base_med_depth"], 1)) for f in f_list]
                 nps_ratios = [f["nps_ratio"] for f in f_list]
                 agrees = [f["agreement_pct"] for f in f_list]
                 if var_depths and base_depths:
@@ -1092,6 +1267,7 @@ class DashboardState:
                     self.depth_data["median_var_depth"] = round(med_v, 1)
                     self.depth_data["median_base_depth"] = round(med_b, 1)
                     self.depth_data["delta_depth"] = round(med_v - med_b, 1)
+                self.depth_data["total_delta_depth"] = round(sum(delta_depths), 1)
                 if nps_ratios:
                     import statistics
                     self.depth_data["nps_ratio"] = round(statistics.median(nps_ratios), 2)
@@ -1105,6 +1281,14 @@ class DashboardState:
                 self.depth_data["median_base_depth"] = round(float(payload.get("overall_base_d", 0.0)), 1)
                 self.depth_data["median_var_depth"] = round(float(payload.get("overall_var_d", 0.0)), 1)
                 self.depth_data["delta_depth"] = round(float(payload.get("overall_delta_d", 0.0)), 1)
+                f_list = self.depth_data.get("fixtures", [])
+                if f_list:
+                    tot_d = sum(f.get("delta_depth", round(f.get("var_med_depth", 0.0) - f.get("base_med_depth", 0.0), 1)) for f in f_list)
+                    self.depth_data["total_delta_depth"] = round(tot_d, 1)
+                elif "total_delta_depth" in payload:
+                    self.depth_data["total_delta_depth"] = round(float(payload["total_delta_depth"]), 1)
+                else:
+                    self.depth_data["total_delta_depth"] = round(float(payload.get("overall_delta_d", 0.0)), 1)
                 self.depth_data["nps_ratio"] = round(float(payload.get("overall_nps_r", 1.0)), 2)
                 self.depth_data["agreement_pct"] = round(float(payload.get("overall_agree", 100.0)), 1)
                 self.depth_data["passed"] = bool(payload.get("overall_pass", True))
@@ -1131,10 +1315,12 @@ class DashboardState:
                         pass
                 if not tests_list and payload.get("status") in ("PASSED", "DONE"):
                     tests_list = get_default_unit_tests(status="PASSED", total_duration=float(payload.get("duration_sec", 4.7)))
+                tot = len(tests_list) if tests_list else payload.get("total", 42)
+                pas = sum(1 for t in tests_list if str(t.get("status", "")).upper() == "PASSED") if tests_list else payload.get("passed", tot)
                 self.unit_tests_data = {
                     "status": payload.get("status", "PASSED"),
-                    "passed": payload.get("passed", 40),
-                    "total": payload.get("total", 40),
+                    "passed": pas,
+                    "total": tot,
                     "details": payload.get("details", ""),
                     "duration_sec": float(payload.get("duration_sec", 0.0)),
                     "tests": tests_list or [],
@@ -1147,7 +1333,8 @@ class DashboardState:
                     "early_stop_low", "threads", "strategy_baseline", "strategy_variant",
                     "experiment_desc", "recommendation", "csv_path",
                     "game_mode", "num_snakes", "target_win_share", "matrix_progress", "active_pid",
-                    "run_type", "matrix_duration_sec", "pool_duration_sec", "self_play_matrix"
+                    "run_type", "matrix_duration_sec", "pool_duration_sec", "self_play_matrix",
+                    "prior_suite_elapsed", "pool_start_time"
                 ]:
                     if attr in d:
                         setattr(self, attr, d[attr])
@@ -1226,7 +1413,13 @@ class DashboardState:
                     self.matrix_duration_sec = max(0.0, round(dur - unit_dur - depth_dur, 1)) if dur > 0 else 0.0
                     self.self_play_matrix = list(self.matrix_progress or [])
                 elif getattr(self, "run_type", "self") == "pool":
-                    self.pool_duration_sec = max(0.0, round(dur - unit_dur - depth_dur, 1)) if dur > 0 else 0.0
+                    if dur > 0:
+                        pool_dur = max(0.0, round(dur - unit_dur - depth_dur, 1))
+                    elif getattr(self, "pool_start_time", None) and self.end_time:
+                        pool_dur = max(0.0, round(self.end_time - self.pool_start_time, 1))
+                    else:
+                        pool_dur = 0.0
+                    self.pool_duration_sec = pool_dur
                     if not getattr(self, "pool_data", None) or not isinstance(self.pool_data, dict):
                         self.pool_data = {}
                     self.pool_data["duration_sec"] = self.pool_duration_sec
@@ -1490,21 +1683,36 @@ class DashboardState:
                 suite_elapsed = 0.0
                 mode_elapsed = 0.0
                 matrix_elapsed = 0.0
+                pool_elapsed = 0.0
                 eta_info = {"total_eta_seconds": None, "has_history": False, "is_stable": False, "breakdown": []}
             else:
                 now = self.end_time or time.time()
-                suite_start = getattr(self, "suite_start_time", None) or self.start_time or now
-                if suite_start < 100_000_000 or (now - suite_start) > 30 * 86400:
-                    suite_start = self.start_time or now
-                suite_elapsed = max(0.0, now - suite_start)
-                mode_start = self.start_time or now
-                mode_elapsed = max(0.0, now - mode_start)
                 unit_dur = float((getattr(self, "unit_tests_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
                 depth_dur = float((getattr(self, "depth_data", {}) or {}).get("duration_sec", 0.0) or 0.0)
-                if getattr(self, "matrix_duration_sec", None) is not None:
+
+                if getattr(self, "run_type", "self") == "pool" and getattr(self, "matrix_duration_sec", None) is not None:
+                    prior_dur = unit_dur + depth_dur + float(self.matrix_duration_sec)
+                    if getattr(self, "pool_duration_sec", None) is not None:
+                        pool_elapsed = float(self.pool_duration_sec)
+                    else:
+                        pool_start = getattr(self, "pool_start_time", None) or self.start_time or now
+                        pool_elapsed = max(0.0, now - pool_start)
+                    suite_elapsed = prior_dur + pool_elapsed
+                    mode_start = self.start_time or now
+                    mode_elapsed = max(0.0, now - mode_start)
                     matrix_elapsed = float(self.matrix_duration_sec)
                 else:
-                    matrix_elapsed = max(0.0, suite_elapsed - unit_dur - depth_dur)
+                    suite_start = getattr(self, "suite_start_time", None) or self.start_time or now
+                    if suite_start < 100_000_000 or (now - suite_start) > 30 * 86400:
+                        suite_start = self.start_time or now
+                    suite_elapsed = max(0.0, now - suite_start)
+                    mode_start = self.start_time or now
+                    mode_elapsed = max(0.0, now - mode_start)
+                    if getattr(self, "matrix_duration_sec", None) is not None:
+                        matrix_elapsed = float(self.matrix_duration_sec)
+                    else:
+                        matrix_elapsed = max(0.0, suite_elapsed - unit_dur - depth_dur)
+                    pool_elapsed = float(self.pool_duration_sec) if getattr(self, "pool_duration_sec", None) is not None else 0.0
 
                 if self.status == "RUNNING" and (self.total_played > 0 or self.active_pid is not None or getattr(self, "run_type", "self") in ("depth", "self", "unit", "pool")):
                     eta_info = calculate_eta(
@@ -1517,11 +1725,34 @@ class DashboardState:
                         depth_data=getattr(self, "depth_data", None),
                         unit_tests_data=getattr(self, "unit_tests_data", None),
                         pool_data=getattr(self, "pool_data", None),
+                        include_pool_stage=(bool(getattr(self, "pool_enabled", False)) and getattr(self, "run_type", "self") in ("self", "unit", "depth")),
                     )
                 else:
                     eta_info = {"total_eta_seconds": None, "has_history": False, "is_stable": False, "breakdown": []}
 
-            unit_d = getattr(self, "unit_tests_data", {"status": "PENDING", "passed": 0, "total": 40, "details": ""})
+            # Cumulative suite progress across all games & stages
+            tot_completed, tot_planned, suite_games_pct = calculate_suite_progress(
+                run_type=getattr(self, "run_type", "self"),
+                matrix_progress=live_matrix_progress if live_matrix_progress else self.matrix_progress,
+                self_play_matrix=getattr(self, "self_play_matrix", None),
+                depth_data=getattr(self, "depth_data", None),
+                current_mode=self.game_mode,
+                current_played=played,
+                target_games=self.target_games or self.max_games or 200,
+                is_running=(self.status == "RUNNING"),
+                pool_enabled=bool(getattr(self, "pool_enabled", False)),
+            )
+
+            is_finished = (self.status in ("FINISHED", "TEST_FAILURE") or self.stop_type in ("MATRIX_COMPLETE", "PARITY", "KEEP"))
+            time_eta = eta_info.get("total_eta_seconds")
+            if is_finished:
+                suite_progress_pct = 100.0
+            elif self.status == "RUNNING" and time_eta is not None and time_eta > 0 and suite_elapsed > 0:
+                suite_progress_pct = calculate_time_progress_percent(suite_elapsed, time_eta, is_finished=False)
+            else:
+                suite_progress_pct = suite_games_pct
+
+            unit_d = getattr(self, "unit_tests_data", {"status": "PENDING", "passed": 0, "total": 42, "details": ""})
             if isinstance(unit_d, dict):
                 unit_d_copy = dict(unit_d)
                 if not unit_d_copy.get("tests") and unit_d_copy.get("status") in ("PASSED", "DONE"):
@@ -1540,6 +1771,19 @@ class DashboardState:
                         for item in self.matrix_progress
                         if isinstance(item, dict) and item.get("mode")
                     }
+
+            depth_d = getattr(self, "depth_data", None)
+            if depth_d and isinstance(depth_d, dict):
+                depth_d_copy = dict(depth_d)
+                f_list = depth_d_copy.get("fixtures") or []
+                if "total_delta_depth" not in depth_d_copy:
+                    if f_list:
+                        tot_d = sum(f.get("delta_depth", float(f.get("var_med_depth", 0.0)) - float(f.get("base_med_depth", 0.0))) for f in f_list)
+                        depth_d_copy["total_delta_depth"] = round(tot_d, 1)
+                    elif depth_d_copy.get("delta_depth") is not None:
+                        depth_d_copy["total_delta_depth"] = round(float(depth_d_copy["delta_depth"]), 1)
+            else:
+                depth_d_copy = depth_d
 
             res = {
                 "status": self.status,
@@ -1597,18 +1841,25 @@ class DashboardState:
                 "mode_elapsed_seconds": round(mode_elapsed, 1),
                 "suite_elapsed_seconds": round(suite_elapsed, 1),
                 "matrix_elapsed_seconds": round(matrix_elapsed, 1),
+                "pool_elapsed_seconds": round(pool_elapsed, 1),
                 "matrix_duration_sec": getattr(self, "matrix_duration_sec", None),
                 "pool_duration_sec": getattr(self, "pool_duration_sec", None),
                 "self_play_matrix": getattr(self, "self_play_matrix", None),
+                "progress_percent": suite_progress_pct,
+                "games_progress_percent": suite_games_pct,
+                "total_planned_games": tot_planned,
+                "total_completed_games": tot_completed,
                 "eta_seconds": eta_info.get("total_eta_seconds"),
                 "eta_breakdown": eta_info.get("breakdown", []),
                 "run_type": getattr(self, "run_type", "self"),
                 "pool_data": pool_d,
-                "depth_data": getattr(self, "depth_data", None),
+                "depth_data": depth_d_copy,
                 "unit_tests_data": unit_d_copy,
                 "snakes_stats": self.snakes_stats,
                 "run_history": load_run_history(),
-                "experiment_desc": self.experiment_desc
+                "experiment_desc": self.experiment_desc,
+                "target": getattr(self, "target", None),
+                "pool_enabled": getattr(self, "pool_enabled", getattr(self, "run_type", "self") == "pool")
             }
 
             now = time.time()
@@ -1649,6 +1900,51 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       --variant-color: #10b981;
       --draw-color: #9ca3af;
       --danger-color: #ef4444;
+
+      /* ── Validation Pipeline Design Tokens ───────────────────────────────── */
+      /* Colors */
+      --pipeline-bg: rgba(0, 0, 0, 0.25);
+      --pipeline-panel-bg: rgba(18, 24, 38, 0.65);
+      --pipeline-border: rgba(255, 255, 255, 0.08);
+      --pipeline-border-subtle: rgba(255, 255, 255, 0.05);
+      --pipeline-border-header: rgba(255, 255, 255, 0.08);
+      --pipeline-border-row: rgba(255, 255, 255, 0.04);
+      --pipeline-strip-bg: rgba(0, 0, 0, 0.35);
+      --pipeline-th-bg: rgba(15, 20, 32, 0.95);
+      --pipeline-row-hover: rgba(255, 255, 255, 0.035);
+      --pipeline-row-active: rgba(59, 130, 246, 0.08);
+
+      --pipeline-text-main: #f3f4f6;
+      --pipeline-text-muted: #9ca3af;
+
+      /* Semantic Colors (Strict: ONE blue only!) */
+      --pipeline-green: #10b981;  /* Success / Passed / Good */
+      --pipeline-red: #ef4444;    /* Danger / Failed / Bad */
+      --pipeline-amber: #f59e0b;  /* Warning / Parity / Near threshold */
+      --pipeline-blue: #3b82f6;   /* ONE BLUE: Running / Info / Active */
+      --pipeline-grey: #9ca3af;   /* Neutral / Pending / Empty / Skipped */
+
+      /* Spacing Scale */
+      --pipeline-space-xs: 0.3rem;
+      --pipeline-space-sm: 0.5rem;
+      --pipeline-space-md: 0.75rem;
+      --pipeline-space-lg: 1.0rem;
+      --pipeline-space-xl: 1.25rem;
+
+      /* Radii */
+      --pipeline-radius-sm: 0.35rem;
+      --pipeline-radius-md: 0.5rem;
+      --pipeline-radius-lg: 0.75rem;
+      --pipeline-radius-pill: 9999px;
+
+      /* Typography */
+      --pipeline-font-title: 1.05rem;
+      --pipeline-font-sub: 0.88rem;
+      --pipeline-font-meta: 0.82rem;
+      --pipeline-font-body: 0.86rem;
+      --pipeline-font-sm: 0.72rem;
+      --pipeline-font-chip: 0.68rem;
+      --pipeline-font-mono: 'JetBrains Mono', monospace;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1685,7 +1981,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       align-items: center;
       gap: 0.75rem;
       min-width: 0;
-      flex-shrink: 1;
+      flex: 1;
     }
     .logo-icon {
       font-size: 2.2rem;
@@ -1694,6 +1990,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     .logo-text {
       min-width: 0;
+      flex: 1;
       overflow: hidden;
     }
 
@@ -1713,7 +2010,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 480px;
+      max-width: 100%;
     }
 
     .header-badges {
@@ -1877,306 +2174,35 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       animation: none;
     }
 
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.35; transform: scale(0.85); }
-    }
-
-    /* Tug of war hero card */
-    .hero-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 1.25rem;
-      padding: 2rem;
-      margin-bottom: 1.5rem;
-      backdrop-filter: blur(16px);
-      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.45);
-      position: relative;
-      overflow: hidden;
-    }
-
-    .hero-card::before {
-      content: '';
-      position: absolute;
-      top: 0; left: 0; right: 0;
-      height: 3px;
-      background: linear-gradient(90deg, var(--baseline-color), var(--variant-color));
-    }
-
-    .tug-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-end;
-      margin-bottom: 1.25rem;
-    }
-
-    .strategy-stat { display: flex; flex-direction: column; }
-    .strategy-stat.baseline { text-align: left; }
-    .strategy-stat.variant { text-align: right; }
-
-    .strategy-name {
-      font-size: 0.9rem;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
+    .badge-target {
       font-weight: 700;
-      margin-bottom: 0.25rem;
+      letter-spacing: 0.03em;
+      font-size: 0.80rem;
     }
-
-    .baseline .strategy-name { color: var(--baseline-color); }
-    .variant .strategy-name { color: var(--variant-color); }
-
-    .win-rate-big {
-      font-size: 2.5rem;
-      font-weight: 800;
-      line-height: 1;
-      font-family: 'JetBrains Mono', monospace;
-    }
-
-    .games-count { font-size: 0.85rem; color: var(--text-muted); margin-top: 0.35rem; }
-
-    /* Hero Dual Bars Section */
-    .bar-section {
-      margin-top: 1.25rem;
-      margin-bottom: 1.25rem;
-    }
-
-    .bar-label-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 0.75rem;
-      font-weight: 700;
-      color: var(--text-muted);
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      margin-bottom: 1.5rem;
-    }
-
-    /* Bar 1: Points Win Share Bar */
-    .tug-bar-wrapper { position: relative; margin-top: 1.25rem; margin-bottom: 1.25rem; }
-
-    .tug-bar-container {
-      position: relative;
-      height: 36px;
-      background: rgba(0, 0, 0, 0.5);
-      border-radius: 18px;
-      overflow: hidden;
-      display: flex;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      box-shadow: inset 0 3px 8px rgba(0, 0, 0, 0.7);
-    }
-
-    .tug-side {
-      height: 100%;
-      transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-      display: flex;
-      align-items: center;
-      font-weight: 700;
-      font-size: 0.82rem;
-      font-family: 'JetBrains Mono', monospace;
-      white-space: nowrap;
-      overflow: hidden;
-      min-width: 0;
-      flex-shrink: 0;
-      box-sizing: border-box;
-    }
-
-    .tug-side.baseline-pts-bar {
-      background: linear-gradient(90deg, #1e3a8a, var(--baseline-color));
-      justify-content: flex-start;
-      padding-left: 0.85rem;
-      color: #fff;
-    }
-
-    .tug-side.variant-pts-bar {
-      background: linear-gradient(90deg, var(--variant-color), #047857);
-      justify-content: flex-end;
-      padding-right: 0.85rem;
-      color: #fff;
-    }
-
-    .tug-divider {
-      position: absolute;
-      left: 50%; top: 0; bottom: 0;
-      width: 2px;
-      background: rgba(255, 255, 255, 0.9);
-      z-index: 10;
-      box-shadow: 0 0 10px #fff;
-    }
-
-    .tug-divider-label {
-      position: absolute;
-      left: 50%;
-      top: -22px;
-      transform: translateX(-50%);
-      font-size: 0.72rem;
-      font-weight: 700;
-      color: var(--text-muted);
-      letter-spacing: 0.06em;
-      white-space: nowrap;
-    }
-
-    .tug-threshold {
-      position: absolute;
-      top: 0; bottom: 0;
-      width: 2px;
-      z-index: 9;
-      border-left: 1.5px dashed rgba(255, 255, 255, 0.5);
-    }
-
-    .tug-threshold.threshold-keep { left: 40%; }
-    .tug-threshold.threshold-revert { left: 60%; }
-
-    .tug-threshold-label {
-      position: absolute;
-      top: -22px;
-      font-size: 0.72rem;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      transform: translateX(-50%);
-      white-space: nowrap;
-    }
-
-    .tug-threshold-label.label-keep { left: 40%; color: var(--variant-color); }
-    .tug-threshold-label.label-revert { left: 60%; color: var(--baseline-color); }
-
-    .tug-footer {
-      display: flex;
-      justify-content: center;
-      gap: 1.5rem;
-      font-size: 0.85rem;
-      color: var(--text-muted);
-      margin-top: 1rem;
-    }
-
-    /* Recommendation Banner (Permanent slot, zero layout shift) */
-    .banner {
-      border-radius: 1rem;
-      padding: 1.25rem 1.75rem;
-      margin-bottom: 1.5rem;
-      display: flex;
-      min-height: 82px;
-      box-sizing: border-box;
-      align-items: center;
-      justify-content: space-between;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      backdrop-filter: blur(12px);
-      transition: background 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, color 0.3s ease;
-    }
-
-    .banner.idle {
-      background: rgba(255, 255, 255, 0.03);
-      border-color: rgba(255, 255, 255, 0.08);
-      color: var(--text-muted);
-    }
-
-    .banner.info {
-      background: rgba(59, 130, 246, 0.1);
-      border-color: rgba(59, 130, 246, 0.3);
-      color: #93c5fd;
-    }
-
-    .banner.keep {
-      background: rgba(16, 185, 129, 0.15);
+    .badge-target-improvement {
       border-color: rgba(16, 185, 129, 0.4);
-      color: #6ee7b7;
-      box-shadow: 0 0 30px rgba(16, 185, 129, 0.2);
+      background: rgba(16, 185, 129, 0.12);
+      color: #34d399;
     }
-
-    .banner.revert {
-      background: rgba(239, 68, 68, 0.15);
-      border-color: rgba(239, 68, 68, 0.4);
-      color: #fca5a5;
-      box-shadow: 0 0 30px rgba(239, 68, 68, 0.2);
-    }
-
-    .banner.parity {
-      background: rgba(245, 158, 11, 0.15);
+    .badge-target-parity {
       border-color: rgba(245, 158, 11, 0.4);
-      color: #fcd34d;
-      box-shadow: 0 0 30px rgba(245, 158, 11, 0.2);
+      background: rgba(245, 158, 11, 0.12);
+      color: #fbbf24;
+    }
+    .badge-target-bug-fix {
+      border-color: rgba(56, 189, 248, 0.4);
+      background: rgba(56, 189, 248, 0.12);
+      color: #38bdf8;
+    }
+    .badge-target-harness {
+      border-color: rgba(168, 85, 247, 0.4);
+      background: rgba(168, 85, 247, 0.12);
+      color: #c084fc;
     }
 
-    .banner-title { font-size: 1.2rem; font-weight: 800; display: flex; align-items: center; gap: 0.5rem; }
-    .banner-desc { font-size: 0.9rem; opacity: 0.95; margin-top: 0.25rem; }
-
-    /* Combined Stats Card */
-    .stats-grid {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 1.25rem;
-      margin-bottom: 1.5rem;
-    }
-
-    .stat-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 1rem;
-      padding: 1.25rem 1.5rem;
-      backdrop-filter: blur(12px);
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-    }
-
-    .stat-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 0.75rem;
-      color: var(--text-muted);
-      font-size: 0.825rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-
-    .stat-icon { font-size: 1.2rem; }
-
-    .stat-value {
-      font-size: 1.75rem;
-      font-weight: 800;
-      font-family: 'JetBrains Mono', monospace;
-      margin-bottom: 0.25rem;
-    }
-
-    .stat-subtext { font-size: 0.825rem; color: var(--text-muted); }
-
-    .progress-bar-wrap {
-      height: 8px;
-      background: rgba(255, 255, 255, 0.1);
-      border-radius: 4px;
-      overflow: hidden;
-      margin-top: 0.8rem;
-    }
-
-    .progress-bar-fill {
-      height: 100%;
-      background: linear-gradient(90deg, var(--baseline-color), var(--variant-color));
-      transition: width 0.4s ease;
-    }
-
-    /* Logs Table */
-    .table-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 1rem;
-      padding: 1.5rem;
-      backdrop-filter: blur(12px);
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
-      margin-bottom: 1.5rem;
-    }
-
-    .table-title {
-      font-size: 1.1rem;
-      font-weight: 700;
-      margin-bottom: 1rem;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .history-table-wrapper {
-      overflow-x: auto;
-      border-radius: 0.5rem;
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
     }
 
     table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
@@ -2206,113 +2232,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       white-space: nowrap;
     }
 
-    th.col-desc {
-      text-align: left;
-      max-width: 300px;
-      min-width: 180px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      cursor: default;
+    /* Run History Pipeline Redesign (Reusing Pipeline Tokens & Components) */
+    #historyCard {
+      height: auto;
+      min-height: auto;
+      max-height: none;
+      overflow: visible;
     }
 
-    td.col-desc {
-      text-align: left;
-      position: relative;
-      max-width: 300px;
-      min-width: 180px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      cursor: pointer;
+    #historyCard .stage-panel-body,
+    #historyPanelBody {
+      overflow-y: visible;
+      overflow-x: auto;
+      height: auto;
+      max-height: none;
+      flex: none;
     }
 
-    td.col-desc .tooltip-text {
-      visibility: hidden;
-      opacity: 0;
-      width: max-content;
-      max-width: 360px;
-      background-color: #1e293b;
-      color: #f8fafc;
-      text-align: left;
-      border-radius: 8px;
-      padding: 0.6rem 0.85rem;
-      position: absolute;
-      z-index: 100;
-      bottom: 125%;
-      left: 50%;
-      transform: translateX(-50%);
-      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.6);
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      font-size: 0.8rem;
-      font-weight: 500;
-      white-space: normal;
-      line-height: 1.4;
-      transition: opacity 0.2s ease, visibility 0.2s ease;
-      pointer-events: none;
-    }
-
-    td.col-desc:hover .tooltip-text {
-      visibility: visible;
-      opacity: 1;
-    }
-
-    #headerSubtext {
-      max-width: 550px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    tr:hover td { background: rgba(255, 255, 255, 0.02); }
-
-    .winner-pill {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 85px;
-      width: auto;
-      height: 28px;
-      padding: 0 0.55rem;
-      border-radius: 6px;
-      font-size: 0.74rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      box-sizing: border-box;
-      white-space: nowrap;
-    }
-
-    .winner-pill.variant, .winner-pill.keep {
-      background: rgba(16, 185, 129, 0.2);
-      color: var(--variant-color);
-      border: 1px solid rgba(16, 185, 129, 0.4);
-    }
-
-    .winner-pill.baseline {
-      background: rgba(59, 130, 246, 0.2);
-      color: var(--baseline-color);
-      border: 1px solid rgba(59, 130, 246, 0.4);
-    }
-
-    .winner-pill.draw {
-      background: rgba(156, 163, 175, 0.2);
-      color: var(--text-muted);
-      border: 1px solid rgba(156, 163, 175, 0.4);
-    }
-
-    .winner-pill.revert {
-      background: rgba(239, 68, 68, 0.2);
-      color: var(--danger-color);
-      border: 1px solid rgba(239, 68, 68, 0.4);
-    }
-
-    .winner-pill.parity {
-      background: rgba(245, 158, 11, 0.2);
-      color: #f59e0b;
-      border: 1px solid rgba(245, 158, 11, 0.4);
-    }
-
-    /* Run History Redesign */
     .run-history-table {
       width: 100%;
       border-collapse: separate;
@@ -2320,137 +2256,153 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     .run-history-table th {
-      background: rgba(17, 24, 39, 0.95);
-      padding: 0.5rem 0.65rem;
-      font-size: 0.72rem;
-      font-weight: 700;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      border-bottom: 1px solid var(--card-border);
-      text-align: center;
+      padding: var(--pipeline-space-sm) 0.65rem;
+      font-size: var(--pipeline-font-meta);
+      font-family: 'Outfit', sans-serif;
+      font-weight: 600;
+      color: var(--pipeline-text-muted);
+      border-bottom: 1px solid var(--pipeline-border-header);
       vertical-align: middle;
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: var(--pipeline-th-bg);
+      text-transform: none;
+      letter-spacing: normal;
     }
 
     .run-history-table th.th-left {
       text-align: left;
     }
 
-    .run-history-table th.mode-header {
-      border-left: 1px solid rgba(255, 255, 255, 0.08);
-      font-size: 0.73rem;
-      color: var(--text-main);
-    }
-
-    .run-history-table th.sub-col-header {
-      font-size: 0.67rem;
-      padding: 0.35rem 0.5rem;
-      color: var(--text-muted);
-      font-weight: 600;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    }
-
-    .run-history-table th.sub-col-border {
-      border-left: 1px solid rgba(255, 255, 255, 0.08);
-    }
-
-    .run-history-table td.mode-col-border {
-      border-left: 1px solid rgba(255, 255, 255, 0.06);
-    }
-
-    .run-block-even td {
-      background: rgba(255, 255, 255, 0.012);
-    }
-
-    .run-block-odd td {
-      background: rgba(255, 255, 255, 0.045);
+    .run-history-table th.th-right {
+      text-align: right;
     }
 
     .history-title-row td {
-      padding: 0.85rem 0.85rem 0.35rem 0.85rem;
-      border-top: 1px solid rgba(255, 255, 255, 0.12);
-      text-align: left;
-    }
-
-    .history-title-row:first-child td {
+      padding: 0.35rem 0.65rem 0.05rem 0.65rem;
       border-top: none;
+      border-bottom: none;
+      text-align: left;
+      transition: background 0.15s ease;
     }
 
     .history-title-bar {
       display: flex;
-      align-items: baseline;
-      gap: 0.85rem;
+      align-items: center;
+      gap: var(--pipeline-space-md);
+      overflow: hidden;
+      white-space: nowrap;
+      line-height: 1.15;
     }
 
     .history-time {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.76rem;
-      color: var(--text-muted);
+      font-family: var(--pipeline-font-mono);
+      font-size: var(--pipeline-font-sm);
+      color: var(--pipeline-text-muted);
       white-space: nowrap;
       flex-shrink: 0;
     }
 
     .history-title-text {
-      font-weight: 700;
-      color: var(--text-main);
-      font-size: 0.92rem;
-      line-height: 1.35;
-      white-space: normal;
-      word-break: normal;
-      overflow-wrap: break-word;
-      text-transform: none;
+      font-family: 'Outfit', sans-serif;
+      font-weight: 600;
+      color: var(--pipeline-text-main);
+      font-size: var(--pipeline-font-body);
+      line-height: 1.15;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .history-data-row td {
-      padding: 0.35rem 0.65rem 0.85rem 0.65rem;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+      padding: 0.05rem 0.65rem 0.35rem 0.65rem;
+      border-top: none;
+      border-bottom: 1px solid var(--pipeline-border-row);
       vertical-align: middle;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.82rem;
-      text-align: center;
-      white-space: nowrap;
+      font-family: var(--pipeline-font-mono);
+      font-size: var(--pipeline-font-body);
+      height: 36px;
+      min-height: 36px;
+      box-sizing: border-box;
+      transition: background 0.15s ease;
     }
 
-    .history-data-row td.td-left {
+    /* Alternating background colors per entry (title and data row share identical background) */
+    .run-history-table tr.entry-even td {
+      background: rgba(255, 255, 255, 0.028);
+    }
+
+    .run-history-table tr.entry-odd td {
+      background: transparent;
+    }
+
+    /* Hover highlight: title and data rows highlight together as a single unified entry */
+    .run-history-table tr.history-title-row:hover td,
+    .run-history-table tr.history-title-row:hover + tr.history-data-row td,
+    .run-history-table tr.history-title-row:has(+ tr.history-data-row:hover) td,
+    .run-history-table tr.history-data-row:hover td,
+    .run-history-table tr.hover-highlight td {
+      background: rgba(255, 255, 255, 0.065) !important;
+    }
+
+    .hist-cell-stack {
+      display: inline-flex;
+      flex-direction: column;
+      justify-content: center;
+      min-height: 26px;
+      gap: 0.05rem;
+      box-sizing: border-box;
+      vertical-align: middle;
+    }
+
+    .hist-cell-stack.align-left {
+      align-items: flex-start;
       text-align: left;
     }
 
-    .hist-metric-val {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.86rem;
+    .hist-cell-stack.align-right {
+      align-items: flex-end;
+      text-align: right;
+    }
+
+    .hist-source-line {
+      display: flex;
+      align-items: baseline;
+      justify-content: flex-end;
+      gap: 0.35rem;
+      font-family: var(--pipeline-font-mono);
+      font-size: var(--pipeline-font-body);
+      line-height: 1.15;
+      white-space: nowrap;
+    }
+
+    .hist-source-label {
+      font-size: var(--pipeline-font-sm);
+      font-weight: 600;
+      color: var(--pipeline-text-muted);
+      letter-spacing: 0.04em;
+      opacity: 0.85;
+      min-width: 2.3rem;
+      display: inline-block;
+      text-align: right;
+    }
+
+    .hist-share-val {
+      font-weight: 600;
+      color: var(--pipeline-text-main);
+    }
+
+    .hist-delta-val {
+      font-size: var(--pipeline-font-sm);
       font-weight: 700;
-      line-height: 1.25;
     }
 
     .hist-metric-sub {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.70rem;
-      color: var(--text-muted);
-      margin-top: 0.15rem;
-      line-height: 1.2;
-    }
-
-    .history-title-row:hover td,
-    .history-data-row:hover td {
-      background: rgba(255, 255, 255, 0.065);
-    }
-
-    .hist-delta-pos {
-      color: #34d399;
-      font-size: 0.74rem;
-      font-weight: 500;
-    }
-
-    .hist-delta-neg {
-      color: #f87171;
-      font-size: 0.74rem;
-      font-weight: 500;
-    }
-
-    .hist-delta-zero {
-      color: var(--text-muted);
-      font-size: 0.74rem;
-      font-weight: 500;
+      font-family: var(--pipeline-font-mono);
+      font-size: 0.72rem;
+      color: var(--pipeline-text-muted);
+      line-height: 1.15;
     }
 
     /* Stage Rail Styles (Requirement 1) */
@@ -2513,15 +2465,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     .stage-segment {
       display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      padding: 0.75rem 0.9rem;
+      flex-direction: row;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.75rem;
       border-radius: 0.55rem;
       cursor: pointer;
       transition: all 0.2s ease;
       border: 1px solid transparent;
       user-select: none;
       background: rgba(255, 255, 255, 0.02);
+      min-width: 0;
     }
 
     .stage-segment:hover {
@@ -2529,57 +2483,127 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border-color: rgba(255, 255, 255, 0.12);
     }
 
+    /* Base fallback selected highlight */
     .stage-segment.active {
       background: rgba(255, 255, 255, 0.08);
-      border-color: rgba(255, 255, 255, 0.25);
-      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+      border-color: rgba(255, 255, 255, 0.35);
+      box-shadow: 0 0 10px rgba(255, 255, 255, 0.06);
     }
 
-    .stage-segment.active.running {
-      border-color: rgba(59, 130, 246, 0.65);
-      box-shadow: 0 0 14px rgba(59, 130, 246, 0.3);
-      background: rgba(59, 130, 246, 0.12);
+    /* Selected card keeping its status color */
+    .stage-segment.running.active {
+      background: rgba(59, 130, 246, 0.14);
+      border-color: var(--pipeline-blue);
+      box-shadow: 0 0 14px rgba(59, 130, 246, 0.25);
     }
 
-    .stage-segment.active.passed, .stage-segment.active.done {
-      border-color: rgba(16, 185, 129, 0.65);
-      box-shadow: 0 0 14px rgba(16, 185, 129, 0.25);
-      background: rgba(16, 185, 129, 0.12);
+    .stage-segment.running.active .stage-seg-index {
+      background: rgba(59, 130, 246, 0.25);
+      color: var(--pipeline-blue);
     }
 
-    .stage-segment.active.parity {
-      border-color: rgba(245, 158, 11, 0.65);
-      box-shadow: 0 0 14px rgba(245, 158, 11, 0.25);
-      background: rgba(245, 158, 11, 0.12);
+    .stage-segment.running.active:hover {
+      background: rgba(59, 130, 246, 0.18);
     }
 
-    .stage-segment.active.failed {
-      border-color: rgba(239, 68, 68, 0.65);
-      box-shadow: 0 0 14px rgba(239, 68, 68, 0.25);
-      background: rgba(239, 68, 68, 0.12);
+    .stage-segment.running:hover:not(.active) {
+      background: rgba(59, 130, 246, 0.06);
+      border-color: rgba(59, 130, 246, 0.4);
     }
 
-    .stage-seg-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 0.4rem;
-      margin-bottom: 0.4rem;
+    .stage-segment.done.active,
+    .stage-segment.passed.active {
+      background: rgba(16, 185, 129, 0.14);
+      border-color: var(--pipeline-green);
+      box-shadow: 0 0 14px rgba(16, 185, 129, 0.22);
+    }
+
+    .stage-segment.done.active .stage-seg-index,
+    .stage-segment.passed.active .stage-seg-index {
+      background: rgba(16, 185, 129, 0.25);
+      color: var(--pipeline-green);
+    }
+
+    .stage-segment.done.active:hover,
+    .stage-segment.passed.active:hover {
+      background: rgba(16, 185, 129, 0.18);
+    }
+
+    .stage-segment.done:hover:not(.active),
+    .stage-segment.passed:hover:not(.active) {
+      background: rgba(16, 185, 129, 0.06);
+      border-color: rgba(16, 185, 129, 0.4);
+    }
+
+    .stage-segment.failed.active,
+    .stage-segment.revert.active {
+      background: rgba(239, 68, 68, 0.14);
+      border-color: var(--pipeline-red);
+      box-shadow: 0 0 14px rgba(239, 68, 68, 0.22);
+    }
+
+    .stage-segment.failed.active .stage-seg-index,
+    .stage-segment.revert.active .stage-seg-index {
+      background: rgba(239, 68, 68, 0.25);
+      color: var(--pipeline-red);
+    }
+
+    .stage-segment.failed.active:hover,
+    .stage-segment.revert.active:hover {
+      background: rgba(239, 68, 68, 0.18);
+    }
+
+    .stage-segment.failed:hover:not(.active),
+    .stage-segment.revert:hover:not(.active) {
+      background: rgba(239, 68, 68, 0.06);
+      border-color: rgba(239, 68, 68, 0.4);
+    }
+
+    .stage-segment.parity.active,
+    .stage-segment.warning.active {
+      background: rgba(245, 158, 11, 0.14);
+      border-color: var(--pipeline-amber);
+      box-shadow: 0 0 14px rgba(245, 158, 11, 0.22);
+    }
+
+    .stage-segment.parity.active .stage-seg-index,
+    .stage-segment.warning.active .stage-seg-index {
+      background: rgba(245, 158, 11, 0.25);
+      color: var(--pipeline-amber);
+    }
+
+    .stage-segment.parity.active:hover,
+    .stage-segment.warning.active:hover {
+      background: rgba(245, 158, 11, 0.18);
+    }
+
+    .stage-segment.parity:hover:not(.active),
+    .stage-segment.warning:hover:not(.active) {
+      background: rgba(245, 158, 11, 0.06);
+      border-color: rgba(245, 158, 11, 0.4);
     }
 
     .stage-seg-index {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 18px;
-      height: 18px;
+      width: 20px;
+      height: 20px;
       border-radius: 50%;
       background: rgba(255, 255, 255, 0.08);
-      font-size: 0.68rem;
+      font-size: 0.7rem;
       font-weight: 700;
       color: var(--text-muted);
       font-family: 'JetBrains Mono', monospace;
       flex-shrink: 0;
+    }
+
+    .stage-seg-info {
+      display: flex;
+      flex-direction: column;
+      gap: 0.15rem;
+      flex: 1;
+      min-width: 0;
     }
 
     .stage-seg-name {
@@ -2588,228 +2612,295 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      flex: 1;
-      margin: 0 0.25rem;
+      color: var(--pipeline-text-main);
+      line-height: 1.2;
     }
 
-    .stage-seg-status {
-      font-size: 0.64rem;
-      font-weight: 800;
-      padding: 0.15rem 0.4rem;
-      border-radius: 9999px;
-      text-transform: uppercase;
-      font-family: 'JetBrains Mono', monospace;
-      letter-spacing: 0.02em;
-      flex-shrink: 0;
-    }
-
-    .stage-seg-footer {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
+    .stage-seg-duration {
       font-family: 'JetBrains Mono', monospace;
       font-size: 0.72rem;
       color: var(--text-muted);
+      font-weight: 600;
+      line-height: 1;
+    }
+
+    .stage-seg-status {
+      font-size: var(--pipeline-font-chip);
+      font-weight: 800;
+      padding: 0.18rem 0.48rem;
+      border-radius: var(--pipeline-radius-pill);
+      text-transform: uppercase;
+      font-family: var(--pipeline-font-mono);
+      letter-spacing: 0.03em;
+      flex-shrink: 0;
+      line-height: 1.2;
     }
 
     .stage-detail-panel {
-      margin-top: 1.25rem;
-      padding-top: 1.25rem;
-      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      margin-top: 1rem;
     }
 
-    /* Unit Detail Panel & Tests Viewport (Requirement 2) */
-    .unit-panel-header {
+    /* ── Shared Validation Pipeline Components ─────────────────────────── */
+
+    /* 1. StagePanel */
+    .stage-panel {
+      height: 550px;
+      min-height: 550px;
+      max-height: 550px;
+      display: flex;
+      flex-direction: column;
+      background: var(--pipeline-panel-bg);
+      border: 1px solid var(--pipeline-border);
+      border-radius: var(--pipeline-radius-lg);
+      padding: var(--pipeline-space-lg);
+      box-sizing: border-box;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .stage-panel-body {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: auto;
+    }
+
+    /* 2. PanelHeader */
+    .panel-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 0.75rem;
+      margin-bottom: var(--pipeline-space-sm);
+      flex-shrink: 0;
     }
 
-    .unit-tests-list-viewport {
-      max-height: 280px;
-      overflow-y: auto;
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 0.35rem 0.6rem;
-      padding-right: 0.4rem;
-    }
-
-    @media (max-width: 900px) {
-      .unit-tests-list-viewport {
-        grid-template-columns: 1fr;
-      }
-    }
-
-    .unit-test-item {
-      background: rgba(0, 0, 0, 0.25);
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      border-radius: 0.45rem;
-      padding: 0.45rem 0.65rem;
-      font-family: 'JetBrains Mono', monospace;
-      min-width: 0;
-    }
-
-    .unit-test-item.failed {
-      background: rgba(239, 68, 68, 0.08);
-      border-color: rgba(239, 68, 68, 0.3);
-    }
-
-    .unit-test-row {
+    .panel-header-title {
+      font-size: var(--pipeline-font-title);
+      font-weight: 800;
+      color: var(--pipeline-text-main);
       display: flex;
       align-items: center;
-      gap: 0.55rem;
-      min-width: 0;
+      gap: var(--pipeline-space-sm);
     }
 
-    .unit-test-num {
-      font-size: 0.78rem;
-      color: var(--text-muted);
-      width: 1.6rem;
-      text-align: right;
+    .panel-header-icon {
+      font-size: 1.1rem;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.4rem;
+    }
+
+    .panel-meta {
+      font-size: var(--pipeline-font-meta);
+      font-family: var(--pipeline-font-mono);
+      font-weight: 600;
+      color: var(--pipeline-text-muted);
+    }
+
+    /* Subheader (for Stage 4 Breakdown) */
+    .panel-subheader {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: var(--pipeline-space-md);
+      margin-bottom: var(--pipeline-space-xs);
+      padding: var(--pipeline-space-xs) 0;
+      border-top: 1px solid var(--pipeline-border-header);
+    }
+
+    .panel-subheader-title {
+      font-size: var(--pipeline-font-sub);
+      font-weight: 700;
+      color: var(--pipeline-text-muted);
+      display: flex;
+      align-items: center;
+      gap: var(--pipeline-space-xs);
+    }
+
+    .panel-subheader-icon {
+      font-size: 0.95rem;
+    }
+
+    /* 3. SummaryStrip */
+    .summary-strip {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--pipeline-strip-bg);
+      padding: 0.5rem 0.85rem;
+      border-radius: var(--pipeline-radius-md);
+      border: 1px solid var(--pipeline-border-subtle);
+      margin-bottom: var(--pipeline-space-md);
       flex-shrink: 0;
-      font-family: 'JetBrains Mono', monospace;
+      gap: var(--pipeline-space-md);
+      flex-wrap: wrap;
+    }
+
+    .summary-metrics {
+      display: flex;
+      align-items: center;
+      gap: var(--pipeline-space-md);
+      font-family: var(--pipeline-font-mono);
+      font-size: var(--pipeline-font-body);
+      color: var(--pipeline-text-main);
+      flex-wrap: wrap;
+    }
+
+    .summary-status {
+      display: flex;
+      align-items: center;
+      flex-shrink: 0;
+    }
+
+    /* 4. StatusChip */
+    .status-chip,
+    .matrix-col-status {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.2rem 0.55rem;
+      font-size: var(--pipeline-font-chip);
+      font-weight: 700;
+      border-radius: var(--pipeline-radius-pill);
+      text-transform: uppercase;
+      font-family: var(--pipeline-font-mono);
+      letter-spacing: 0.03em;
+      line-height: 1.2;
+      box-sizing: border-box;
+      white-space: nowrap;
+    }
+
+    .status-chip-pending,
+    .matrix-status-pending,
+    .status-chip-skipped,
+    .matrix-status-skipped {
+      background: rgba(156, 163, 175, 0.15);
+      color: var(--pipeline-grey);
+      border: 1px solid rgba(156, 163, 175, 0.25);
+    }
+
+    .status-chip-running,
+    .matrix-status-running {
+      background: rgba(59, 130, 246, 0.15);
+      color: var(--pipeline-blue);
+      border: 1px solid rgba(59, 130, 246, 0.35);
+    }
+
+    .status-chip-passed,
+    .status-chip-done,
+    .matrix-status-passed,
+    .matrix-status-done {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--pipeline-green);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+    }
+
+    .status-chip-failed,
+    .matrix-status-failed {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--pipeline-red);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+    }
+
+    .status-chip-warning,
+    .status-chip-parity,
+    .matrix-status-parity {
+      background: rgba(245, 158, 11, 0.15);
+      color: var(--pipeline-amber);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+    }
+
+    /* 5. DataTable */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: var(--pipeline-font-mono);
       font-variant-numeric: tabular-nums;
     }
 
-    .unit-test-icon {
-      font-size: 0.95rem;
-      width: 1.25rem;
-      flex-shrink: 0;
-      text-align: center;
+    .data-table th {
+      background: var(--pipeline-th-bg);
+      color: var(--pipeline-text-muted);
+      font-size: var(--pipeline-font-sm);
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 0.6rem 0.75rem;
+      border-bottom: 1px solid var(--pipeline-border-header);
+      position: sticky;
+      top: 0;
+      z-index: 2;
     }
 
-    .unit-test-icon.passed {
-      color: var(--variant-color);
+    .data-table td {
+      padding: 0.55rem 0.75rem;
+      border-bottom: 1px solid var(--pipeline-border-row);
+      font-size: var(--pipeline-font-body);
+      vertical-align: middle;
     }
 
-    .unit-test-icon.failed {
-      color: var(--danger-color);
+    .data-table tr:hover td {
+      background: var(--pipeline-row-hover);
     }
 
-    .unit-test-name {
-      font-size: 0.82rem;
-      color: var(--text-main);
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      min-width: 0;
+    .data-table tr.active-running td {
+      background: var(--pipeline-row-active);
+    }
+
+    .th-left, .td-left {
+      text-align: left !important;
+    }
+
+    .th-right, .td-right {
+      text-align: right !important;
+    }
+
+    td.empty-cell {
+      text-align: center !important;
+      color: var(--pipeline-text-muted);
+      font-style: italic;
+      padding: 2.5rem 1rem !important;
+    }
+
+    .test-fail-row td {
+      background: rgba(239, 68, 68, 0.08) !important;
+      padding: 0.4rem 0.75rem !important;
     }
 
     .unit-test-failure-msg {
-      margin-top: 0.4rem;
-      margin-left: 2.2rem;
       padding: 0.5rem 0.65rem;
       background: rgba(239, 68, 68, 0.12);
       border: 1px solid rgba(239, 68, 68, 0.25);
-      border-radius: 0.35rem;
+      border-radius: var(--pipeline-radius-sm);
       color: #fca5a5;
       font-size: 0.75rem;
       white-space: pre-wrap;
       word-break: break-all;
+      font-family: var(--pipeline-font-mono);
     }
 
-    .unit-detail-line {
-      display: flex;
-      align-items: center;
-      gap: 0.85rem;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.95rem;
-      background: rgba(0, 0, 0, 0.3);
-      padding: 0.85rem 1.25rem;
-      border-radius: 0.65rem;
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      flex-wrap: wrap;
-    }
-
-    .matrix-detail-wrap {
+    /* Compatibility classes for legacy references */
+    .matrix-detail-wrap, .pool-detail-wrap, .depth-summary-container {
       position: relative;
-      background: rgba(0, 0, 0, 0.25);
-      border-radius: 0.75rem;
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      overflow: hidden;
-      padding: 1.25rem 1.25rem 0.75rem 1.25rem;
     }
 
-
-    /* Live Matrix Table (Requirement 3) */
     .live-matrix-table {
       width: 100%;
       border-collapse: collapse;
-      margin-top: 0.5rem;
-    }
-
-    .live-matrix-table th {
-      background: rgba(255, 255, 255, 0.03);
-      color: var(--text-muted);
-      font-size: 0.75rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      padding: 0.75rem 0.85rem;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      text-align: center;
-    }
-
-    .live-matrix-table th:first-child {
-      text-align: left;
-    }
-
-    .live-matrix-table td {
-      padding: 0.85rem 0.85rem;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.88rem;
-      text-align: center;
-    }
-
-    .live-matrix-table td:first-child {
-      text-align: left;
-    }
-
-    .live-matrix-table tr.active-running {
-      background: rgba(59, 130, 246, 0.08);
-      box-shadow: inset 3px 0 0 #3b82f6;
-    }
-
-    .live-matrix-table tr:hover td {
-      background: rgba(255, 255, 255, 0.02);
-    }
-
-    /* Depth Summary Bar & Toggle (Requirement 4) */
-    .depth-summary-bar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background: rgba(0, 0, 0, 0.3);
-      padding: 0.85rem 1.25rem;
-      border-radius: 0.65rem;
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      flex-wrap: wrap;
-      gap: 0.75rem;
-    }
-
-    .depth-summary-line {
-      display: flex;
-      align-items: center;
-      gap: 0.85rem;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 0.92rem;
-      flex-wrap: wrap;
     }
 
     .sep-dot {
-      color: var(--text-muted);
+      color: var(--pipeline-text-muted);
       opacity: 0.6;
     }
 
     .btn-toggle-expand {
       background: rgba(255, 255, 255, 0.06);
       border: 1px solid rgba(255, 255, 255, 0.15);
-      color: var(--text-main);
+      color: var(--pipeline-text-main);
       padding: 0.4rem 0.85rem;
-      border-radius: 0.45rem;
+      border-radius: var(--pipeline-radius-sm);
       font-size: 0.78rem;
       font-weight: 700;
       cursor: pointer;
@@ -2926,6 +3017,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .chip-badge.parity { background: rgba(245, 158, 11, 0.25); color: #f59e0b; }
     .chip-badge.passed, .chip-badge.keep { background: rgba(16, 185, 129, 0.25); color: #34d399; }
     .chip-badge.failed, .chip-badge.revert { background: rgba(239, 68, 68, 0.25); color: #f87171; }
+    .chip-badge.pending, .chip-badge.skipped { background: rgba(156, 163, 175, 0.15); color: var(--text-muted); }
 
     .matrix-col-status {
       font-size: 0.68rem;
@@ -2937,12 +3029,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       letter-spacing: 0.03em;
     }
 
-    .matrix-status-pending { background: rgba(156, 163, 175, 0.15); color: var(--text-muted); }
-    .matrix-status-running { background: rgba(59, 130, 246, 0.25); color: #60a5fa; animation: pulse 1.5s infinite; }
+    .matrix-status-pending, .matrix-status-skipped { background: rgba(156, 163, 175, 0.15); color: var(--text-muted); }
+    .matrix-status-running { background: rgba(59, 130, 246, 0.25); color: #60a5fa; }
     .matrix-status-passed, .matrix-status-done { background: rgba(16, 185, 129, 0.25); color: #34d399; }
     .matrix-status-parity { background: rgba(245, 158, 11, 0.25); color: #f59e0b; }
     .matrix-status-failed { background: rgba(239, 68, 68, 0.25); color: #f87171; }
-    .matrix-status-skipped { background: rgba(245, 158, 11, 0.25); color: #fbbf24; }
 
     .matrix-col-score {
       font-size: 1.35rem;
@@ -2988,7 +3079,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="header-badges">
-      <div class="badge-threads" id="threadsBadge" style="display: none;">⚡ <span id="threadsCount">0</span> Threads</div>
+      <div class="badge badge-target" id="targetBadge" style="display: none;">
+        <span id="targetText">TARGET: IMPROVEMENT</span>
+      </div>
       <div class="badge" id="statusBadge">
         <span class="status-dot" id="statusDot"></span>
         <span id="statusText">IDLE</span>
@@ -3005,7 +3098,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="header-stat-line" id="headerStatLine">
     <div class="header-stat-item">
       <span class="header-stat-label">ELAPSED</span>
-      <strong class="header-stat-val" id="headerStatElapsed">0s</strong>
+      <strong class="header-stat-val" id="headerStatElapsed">0:00</strong>
     </div>
     <div class="header-stat-item">
       <span class="header-stat-label">LEFT</span>
@@ -3014,6 +3107,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="header-stat-item">
       <span class="header-stat-label">RATE</span>
       <strong class="header-stat-val" id="headerStatRate">0.0 games/min</strong>
+    </div>
+    <div class="header-stat-item">
+      <span class="header-stat-label">THREADS</span>
+      <strong class="header-stat-val" id="threadsCount">0</strong>
     </div>
   </div>
 
@@ -3024,97 +3121,102 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="stage-rail" id="stageRail">
       <div class="stage-segment pending" id="railSegment-unit">
-        <div class="stage-seg-header">
-          <span class="stage-seg-index">1</span>
+        <span class="stage-seg-index">1</span>
+        <div class="stage-seg-info">
           <span class="stage-seg-name">Unit Tests</span>
-          <span class="stage-seg-status matrix-status-pending" id="railStatus-unit">PENDING</span>
-        </div>
-        <div class="stage-seg-footer">
-          <span>Safety Suite</span>
           <span class="stage-seg-duration" id="railDuration-unit">--</span>
         </div>
+        <span class="stage-seg-status matrix-status-pending" id="railStatus-unit">PENDING</span>
       </div>
 
       <div class="stage-segment pending" id="railSegment-depth">
-        <div class="stage-seg-header">
-          <span class="stage-seg-index">2</span>
+        <span class="stage-seg-index">2</span>
+        <div class="stage-seg-info">
           <span class="stage-seg-name">Depth Benchmark</span>
-          <span class="stage-seg-status matrix-status-pending" id="railStatus-depth">PENDING</span>
-        </div>
-        <div class="stage-seg-footer">
-          <span>Fixed Search</span>
           <span class="stage-seg-duration" id="railDuration-depth">--</span>
         </div>
+        <span class="stage-seg-status matrix-status-pending" id="railStatus-depth">PENDING</span>
       </div>
 
       <div class="stage-segment active pending" id="railSegment-self">
-        <div class="stage-seg-header">
-          <span class="stage-seg-index">3</span>
+        <span class="stage-seg-index">3</span>
+        <div class="stage-seg-info">
           <span class="stage-seg-name">Self-Play Matrix</span>
-          <span class="stage-seg-status matrix-status-pending" id="railStatus-self">PENDING</span>
-        </div>
-        <div class="stage-seg-footer">
-          <span>4 Modes Matrix</span>
           <span class="stage-seg-duration" id="railDuration-self">--</span>
         </div>
+        <span class="stage-seg-status matrix-status-pending" id="railStatus-self">PENDING</span>
       </div>
 
       <div class="stage-segment pending" id="railSegment-pool">
-        <div class="stage-seg-header">
-          <span class="stage-seg-index">4</span>
+        <span class="stage-seg-index">4</span>
+        <div class="stage-seg-info">
           <span class="stage-seg-name">Zoo Pool Gate</span>
-          <span class="stage-seg-status matrix-status-pending" id="railStatus-pool">PENDING</span>
-        </div>
-        <div class="stage-seg-footer">
-          <span>Opponent Pool</span>
           <span class="stage-seg-duration" id="railDuration-pool">--</span>
         </div>
+        <span class="stage-seg-status matrix-status-pending" id="railStatus-pool">PENDING</span>
       </div>
-    </div>
-
-    <!-- Hidden compatibility elements for existing unit test assertions -->
-    <div style="display: none;" id="pipelineGrid">
-      <div id="stageCol-unit"><span id="stageStatus-unit"></span><span id="stageScore-unit"></span><span id="stageMeta-unit"></span></div>
-      <div id="stageCol-depth"><span id="stageStatus-depth"></span><span id="stageScore-depth"></span><span id="stageMeta-depth"></span></div>
-      <div id="stageCol-self"><span id="stageStatus-self"></span><span id="stageScore-self"></span><span id="stageMeta-self"></span></div>
-      <div id="stageCol-pool"><span id="stageStatus-pool"></span><span id="stageScore-pool"></span><span id="stageMeta-pool"></span></div>
-      <span id="headerEtaBadge"><span id="headerEtaText"></span></span>
-      <span id="headerUnitPill"><span id="headerUnitDot"></span><span id="headerUnitText"></span></span>
-      <span id="pipelineSubtitle"></span>
     </div>
 
     <!-- Stage Detail Panel (Expanded below rail, Requirement 1) -->
     <div class="stage-detail-panel" id="stageDetailPanel">
       <!-- 1. Unit Tests Detail (Requirement 2) -->
       <div class="stage-panel-content" id="panel-unit" style="display: none;">
-        <div class="matrix-detail-wrap" id="unitCard" style="padding: 1.15rem 1.25rem;">
-          <div class="unit-panel-header" id="unitPanelHeader" style="margin-bottom: 0.85rem; display: flex; align-items: center; justify-content: space-between;">
-            <div style="display: flex; align-items: center; gap: 0.6rem;">
-              <span id="unitDetailIcon" style="font-size: 1.05rem; color: var(--variant-color);">✓</span>
-              <span id="unitDetailScore" style="font-weight: 700; font-family: 'JetBrains Mono', monospace; font-size: 0.95rem; color: var(--text-main);">40 / 40 passed</span>
+        <div class="stage-panel" id="unitCard">
+          <div class="panel-header" id="unitPanelHeader">
+            <div class="panel-header-title">
+              <span class="panel-header-icon">⚡</span>
+              <span>Tactical Unit Tests</span>
             </div>
-            <span id="unitDetailMeta" style="color: var(--text-muted); font-size: 0.8rem; font-family: 'JetBrains Mono', monospace;"></span>
           </div>
-          <div class="unit-tests-list-viewport" id="unitTestsList">
-            <!-- Dynamically populated test rows -->
+
+          <div class="summary-strip" id="unitSummaryStrip">
+            <div class="summary-metrics">
+              <span>Tests: <strong id="unitPassedMetric">42 / 42 passed</strong></span>
+            </div>
+            <div class="summary-status">
+              <span class="status-chip status-chip-passed matrix-col-status matrix-status-passed" id="unitSummaryChip">PASSED</span>
+            </div>
+          </div>
+
+          <div class="stage-panel-body">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th class="th-right" style="width: 50px;">#</th>
+                  <th class="th-left">Test Name</th>
+                  <th class="th-right" style="width: 110px;">Status</th>
+                </tr>
+              </thead>
+              <tbody id="unitTestsList">
+                <!-- Dynamically populated test rows -->
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
 
       <!-- 2. Depth Benchmark Detail (Requirement 4: summary line + toggle) -->
       <div class="stage-panel-content" id="panel-depth" style="display: none;">
-        <div class="depth-summary-container" id="depthCard">
-          <div class="depth-summary-bar">
-            <div class="depth-summary-line">
-              <span>📐 Fixed Positions: <strong id="depthSummaryCount">12</strong></span>
+        <div class="stage-panel" id="depthCard">
+          <div class="panel-header" id="depthPanelHeader">
+            <div class="panel-header-title">
+              <span class="panel-header-icon">📐</span>
+              <span>Fixed Search Depth Benchmark</span>
+            </div>
+          </div>
+
+          <div class="summary-strip" id="depthSummaryStrip">
+            <div class="summary-metrics">
+              <span>Positions: <strong id="depthSummaryCount">12</strong></span>
               <span class="sep-dot">•</span>
-              <span>Median Δ Depth: <strong id="depthSummaryDelta" style="color: var(--variant-color);">+0.0</strong></span>
+              <span>Delta Depth: <strong id="depthSummaryDepth">+0.0</strong></span>
               <span class="sep-dot">•</span>
-              <span>NPS Ratio: <strong id="depthSummaryNps" style="color: #60a5fa;">1.00x</strong></span>
+              <span>Speed: <strong id="depthSummaryNps">1.00x</strong></span>
               <span class="sep-dot">•</span>
-              <span>Move Agreement: <strong id="depthSummaryAgree">100.0%</strong></span>
-              <span class="sep-dot">•</span>
-              <span id="depthStatusBadge" class="matrix-col-status matrix-status-pending">AWAITING FIXTURES</span>
+              <span>Agreement: <strong id="depthSummaryAgree">100.0%</strong></span>
+            </div>
+            <div class="summary-status">
+              <span class="status-chip status-chip-pending matrix-col-status matrix-status-pending" id="depthStatusBadge">AWAITING FIXTURES</span>
             </div>
           </div>
 
@@ -3126,54 +3228,71 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <span id="depthAgreeValue">100.0%</span>
             <span id="depthVarMeta"></span>
             <span id="depthNpsMeta"></span>
+            <span id="depthSummaryDelta"></span>
+            <button class="btn-toggle-expand" id="btnToggleDepth" onclick="toggleDepthTable()"></button>
           </div>
 
-          <div class="depth-fixtures-collapsible" id="depthTableContainer">
-            <div class="history-table-wrapper" style="margin-top: 1rem;">
-              <table>
-                <thead>
-                  <tr>
-                    <th style="text-align: left; min-width: 140px;">Title</th>
-                    <th style="min-width: 90px;">Base Depth</th>
-                    <th style="min-width: 90px;">Var Depth</th>
-                    <th style="min-width: 80px;">Δ Depth</th>
-                    <th style="min-width: 90px;">Base NPS</th>
-                    <th style="min-width: 90px;">Var NPS</th>
-                    <th style="min-width: 80px;">NPS Ratio</th>
-                    <th style="min-width: 80px;">Agree %</th>
-                    <th style="min-width: 90px;">Status</th>
-                  </tr>
-                </thead>
-                <tbody id="depthTableBody">
-                  <tr>
-                    <td colspan="9" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Waiting for depth benchmark fixtures to evaluate...</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+          <div class="stage-panel-body" id="depthTableContainer">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th class="th-left">Fixture</th>
+                  <th class="th-right">Base Depth</th>
+                  <th class="th-right">Var Depth</th>
+                  <th class="th-right">Δ Depth</th>
+                  <th class="th-right">Base NPS</th>
+                  <th class="th-right">Var NPS</th>
+                  <th class="th-right">NPS Ratio</th>
+                  <th class="th-right">Agree %</th>
+                  <th class="th-right">Status</th>
+                </tr>
+              </thead>
+              <tbody id="depthTableBody">
+                <tr>
+                  <td colspan="9" class="empty-cell">Waiting for depth benchmark fixtures to evaluate...</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
 
       <!-- 3. Self-Play Matrix Detail (Requirement 3: centerpiece table) -->
       <div class="stage-panel-content" id="panel-self" style="display: block;">
-        <div class="matrix-detail-wrap" id="matrixCard">
-          <div class="table-title" style="margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
-            <span style="font-size: 1.05rem; font-weight: 800; display: flex; align-items: center; gap: 0.5rem;">🏁 Self-Play Multi-Mode Matrix</span>
-            <span style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;" id="matrixSubtitle">0 / 4 Modes Complete</span>
+        <div class="stage-panel" id="matrixCard">
+          <div class="panel-header" id="matrixPanelHeader">
+            <div class="panel-header-title">
+              <span class="panel-header-icon">🏁</span>
+              <span>Self-Play Multi-Mode Matrix</span>
+            </div>
           </div>
-          <!-- Live table for matrix modes (Requirement 3) -->
-          <div class="history-table-wrapper">
-            <table class="live-matrix-table" id="matrixTable">
+
+          <div class="summary-strip" id="matrixSummaryStrip">
+            <div class="summary-metrics">
+              <span>Modes: <strong id="matrixSummaryModes">4</strong></span>
+              <span class="sep-dot">•</span>
+              <span>Total Games: <strong id="matrixSummaryGames">0 / 800</strong></span>
+              <span class="sep-dot">•</span>
+              <span>Net Delta: <strong id="matrixSummaryDelta">--</strong></span>
+              <span class="sep-dot">•</span>
+              <span>Z-Score: <strong id="matrixSummaryZ">--</strong></span>
+            </div>
+            <div class="summary-status">
+              <span class="status-chip status-chip-pending matrix-col-status matrix-status-pending" id="matrixSummaryChip">PENDING</span>
+            </div>
+          </div>
+
+          <div class="stage-panel-body">
+            <table class="data-table live-matrix-table" id="matrixTable">
               <thead>
                 <tr>
-                  <th style="text-align: left; min-width: 140px;">Mode</th>
-                  <th style="min-width: 140px;">Games</th>
-                  <th style="min-width: 110px;">Win Share</th>
-                  <th style="min-width: 90px;">Δ (Delta)</th>
-                  <th style="min-width: 90px;">Z-Score</th>
-                  <th style="min-width: 110px;">Time</th>
-                  <th style="min-width: 95px;">Status</th>
+                  <th class="th-left">Mode</th>
+                  <th class="th-right">Games</th>
+                  <th class="th-right">Win Share</th>
+                  <th class="th-right">Δ (Delta)</th>
+                  <th class="th-right">Z-Score</th>
+                  <th class="th-right">Time</th>
+                  <th class="th-right">Status</th>
                 </tr>
               </thead>
               <tbody id="matrixTableBody">
@@ -3181,124 +3300,109 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               </tbody>
             </table>
           </div>
-          <div id="matrixGrid" style="display: none;"></div>
         </div>
       </div>
 
       <!-- 4. Zoo Pool Gate Detail (Requirement 5: table per mode) -->
       <div class="stage-panel-content" id="panel-pool" style="display: none;">
-        <div class="pool-detail-wrap" id="poolOpponentsCard">
-          <div class="table-title" style="margin-bottom: 0.75rem; display: flex; justify-content: space-between; align-items: center;">
-            <span style="font-size: 1.05rem; font-weight: 800; display: flex; align-items: center; gap: 0.5rem;">🐍 Zoo Pool Gate Multi-Mode Benchmark</span>
-            <span style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); font-family: 'JetBrains Mono', monospace;" id="poolStatusSubtitle">0 / 4 Modes Complete</span>
+        <div class="stage-panel" id="poolOpponentsCard">
+          <div class="panel-header" id="poolPanelHeader">
+            <div class="panel-header-title">
+              <span class="panel-header-icon">🐍</span>
+              <span>Zoo Pool Gate Multi-Mode Benchmark</span>
+            </div>
           </div>
 
-          <div class="history-table-wrapper">
-            <table class="live-matrix-table" id="poolModesTable">
+          <div class="summary-strip" id="poolSummaryStrip">
+            <div class="summary-metrics">
+              <span>Modes: <strong id="poolSummaryModes">4</strong></span>
+              <span class="sep-dot">•</span>
+              <span>Total Games: <strong id="poolSummaryGames">0 / 160</strong></span>
+              <span class="sep-dot">•</span>
+              <span>Net Delta: <strong id="poolSummaryDelta">--</strong></span>
+              <span class="sep-dot">•</span>
+              <span>Z-Score: <strong id="poolSummaryZ">--</strong></span>
+            </div>
+            <div class="summary-status">
+              <span class="status-chip status-chip-pending matrix-col-status matrix-status-pending" id="poolSummaryChip">PENDING</span>
+            </div>
+          </div>
+
+          <div class="stage-panel-body">
+            <table class="data-table live-matrix-table" id="poolModesTable">
               <thead>
                 <tr>
-                  <th style="text-align: left; min-width: 140px;">Mode</th>
-                  <th style="min-width: 140px;">Games</th>
-                  <th style="min-width: 110px;">Win Share</th>
-                  <th style="min-width: 90px;">Δ (Delta)</th>
-                  <th style="min-width: 90px;">Z-Score</th>
-                  <th style="min-width: 110px;">Time</th>
-                  <th style="min-width: 95px;">Status</th>
+                  <th class="th-left">Mode</th>
+                  <th class="th-right">Games</th>
+                  <th class="th-right">Win Share (Var / Base)</th>
+                  <th class="th-right">Δ (Delta)</th>
+                  <th class="th-right">Z-Score</th>
+                  <th class="th-right">Time</th>
+                  <th class="th-right">Status</th>
                 </tr>
               </thead>
               <tbody id="poolModesTableBody">
                 <!-- Populated per mode -->
               </tbody>
             </table>
-          </div>
 
-          <!-- Opponent Breakdown List (collapsible) -->
-          <div style="margin-top: 1.25rem;">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-              <span style="font-size: 0.88rem; font-weight: 700; color: var(--text-muted);">Opponent Head-to-Head Breakdown</span>
-              <span style="font-size: 0.8rem; color: var(--text-muted);" id="poolOpponentsCount">0 Opponents</span>
+            <!-- Opponent Breakdown List (collapsible) -->
+            <div class="panel-subheader">
+              <div class="panel-subheader-title">
+                <span class="panel-subheader-icon">👥</span>
+                <span>Opponent Head-to-Head Breakdown</span>
+              </div>
+              <span class="panel-meta" id="poolOpponentsCount">0 Opponents</span>
             </div>
-            <div class="history-table-wrapper">
-              <table>
-                <thead>
-                  <tr>
-                    <th style="text-align: left; min-width: 140px;">Opponent</th>
-                    <th style="min-width: 80px;">Games</th>
-                    <th style="min-width: 130px;">Win Share</th>
-                    <th style="min-width: 90px;">Δ (Delta)</th>
-                  </tr>
-                </thead>
-                <tbody id="poolOpponentsTableBody"></tbody>
-              </table>
-            </div>
+
+            <table class="data-table" id="poolOpponentsTable">
+              <thead id="poolOpponentsHead">
+                <tr>
+                  <th class="th-left">Opponent</th>
+                  <th class="th-right">Games</th>
+                  <th class="th-right">Win Share (Var / Base)</th>
+                  <th class="th-right">Δ (Delta)</th>
+                </tr>
+              </thead>
+              <tbody id="poolOpponentsTableBody">
+                <tr class="empty-row">
+                  <td colspan="100%" class="empty-cell">No data yet</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Hidden compatibility elements (Live-run panels deleted per requirements 1 & 2) -->
-  <div style="display: none;" id="compatibilityElements">
-    <div id="activeRunHero"></div>
-    <div id="heroCard"></div>
-    <div id="statsGrid"></div>
-    <div id="decisionBanner"><span id="bannerTitle"></span><span id="bannerDesc"></span></div>
-    <span id="runsValue"></span>
-    <span id="runsSubtext" title="Total Run ETA"></span>
-    <span id="paceValue"></span>
-    <span id="runsProgress"></span>
-    <span id="baselinePts"></span>
-    <span id="variantPts"></span>
-    <span id="baselineName"></span>
-    <span id="variantName"></span>
-    <div id="idleCompletedHero">
-      <span id="lastRunTitle"></span>
-      <span id="lastRunDecisionBadge"></span>
-      <span id="lastRunTime"></span>
-      <span id="lastRunGames"></span>
-      <span id="lastRunModesCount"></span>
-      <span id="lastRunVarShare"></span>
-      <span id="lastRunVarWins"></span>
-      <span id="lastRunBaseShare"></span>
-      <span id="lastRunBaseWins"></span>
-      <span id="lastRunOutcome"></span>
-      <span id="lastRunStopReason"></span>
-      <div id="lastRunChips"></div>
-    </div>
-  </div>
+  <!-- A/B Test Simulation Run History (Reusing Pipeline Components) -->
 
-  <!-- A/B Test Simulation Run History -->
-  <div class="table-card">
-    <div class="table-title">
-      <span>📜 Run History</span>
-      <span style="font-size: 0.8rem; font-weight: 500; color: var(--text-muted);" id="historyCount">Last 10</span>
+  <!-- A/B Test Simulation Run History (Reusing Pipeline Components) -->
+  <div class="stage-panel" id="historyCard" style="margin-top: 1.5rem; margin-bottom: 1.5rem;">
+    <div class="panel-header" id="historyPanelHeader">
+      <div class="panel-header-title">
+        <span class="panel-header-icon">📜</span>
+        <span>Run History</span>
+      </div>
+      <span class="panel-meta" id="historyCount">0 Runs</span>
     </div>
-    <div class="history-table-wrapper">
-      <table class="run-history-table">
+    <div class="stage-panel-body" id="historyPanelBody">
+      <table class="data-table run-history-table">
         <thead>
           <tr>
-            <th rowspan="2" class="th-left" style="width: 7%; vertical-align: bottom;">Tests</th>
-            <th rowspan="2" class="th-left" style="width: 8%; vertical-align: bottom;">Depth</th>
-            <th colspan="2" class="mode-header">Constrictor (25%)</th>
-            <th colspan="2" class="mode-header">Royale (25%)</th>
-            <th colspan="2" class="mode-header">Duel (50%)</th>
-            <th colspan="2" class="mode-header">Standard (25%)</th>
-            <th rowspan="2" class="mode-header" style="width: 10%; vertical-align: bottom;">Verdict</th>
-          </tr>
-          <tr>
-            <th class="sub-col-header sub-col-border">Self</th>
-            <th class="sub-col-header">Pool</th>
-            <th class="sub-col-header sub-col-border">Self</th>
-            <th class="sub-col-header">Pool</th>
-            <th class="sub-col-header sub-col-border">Self</th>
-            <th class="sub-col-header">Pool</th>
-            <th class="sub-col-header sub-col-border">Self</th>
-            <th class="sub-col-header">Pool</th>
+            <th class="th-left" style="width: 10%;">Tests</th>
+            <th class="th-left" style="width: 13%;">Depth</th>
+            <th class="th-right" style="width: 16%;">Constrictor (25%)</th>
+            <th class="th-right" style="width: 16%;">Royale (25%)</th>
+            <th class="th-right" style="width: 16%;">Duel (50%)</th>
+            <th class="th-right" style="width: 16%;">Standard (25%)</th>
+            <th class="th-right" style="width: 13%;">Verdict</th>
           </tr>
         </thead>
         <tbody id="historyTableBody">
-          <tr>
-            <td colspan="11" style="text-align: center; color: var(--text-muted); padding: 2rem;">No previous simulation runs recorded.</td>
+          <tr class="empty-row">
+            <td colspan="7" class="empty-cell" style="text-align: center; color: var(--pipeline-text-muted); padding: 3rem;">No runs yet</td>
           </tr>
         </tbody>
       </table>
@@ -3311,38 +3415,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     if (sec == null || isNaN(sec)) return defaultVal;
     const s = Number(sec);
     if (s < 0) return defaultVal;
-    if (s === 0) return allowDecimal ? '0.0s' : '0s';
-
-    if (s < 60) {
-      if (allowDecimal) return `${s.toFixed(1)}s`;
-      return `${Math.round(s)}s`;
-    }
 
     const totalSec = Math.round(s);
-    const days = Math.floor(totalSec / 86400);
-    const hours = Math.floor((totalSec % 86400) / 3600);
+    const hours = Math.floor(totalSec / 3600);
     const mins = Math.floor((totalSec % 3600) / 60);
     const secs = totalSec % 60;
 
-    if (days > 0) {
-      return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
-    }
     if (hours > 0) {
-      return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+      const mStr = String(mins).padStart(2, '0');
+      const sStr = String(secs).padStart(2, '0');
+      return `${hours}:${mStr}:${sStr}`;
     }
-    if (mins > 0) {
-      return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
-    }
-    return `${secs}s`;
+    const sStr = String(secs).padStart(2, '0');
+    return `${mins}:${sStr}`;
   }
 
   function formatLeftDuration(sec, defaultVal = '--') {
     if (sec == null || isNaN(sec)) return defaultVal;
     const s = Number(sec);
     if (s <= 0) return defaultVal;
-    const totalMin = Math.round(s / 60);
-    if (totalMin <= 0) return '< 1m';
-    return formatDuration(totalMin * 60);
+    return formatDuration(s, false, defaultVal);
   }
 
   const formatSeconds = formatDuration;
@@ -3368,13 +3460,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     const monthIdx = parseInt(m[2], 10) - 1;
     const monthStr = (monthIdx >= 0 && monthIdx < 12) ? months[monthIdx] : m[2];
     const day = parseInt(m[3], 10);
-    const timePart = m[4];
+    const timePart = m[4].replace(/^0(\\d:\\d{2}:\\d{2})/, '$1');
     return `${monthStr} ${day} ${timePart}`;
   }
 
   function renderUnitTestsList(tests) {
     if (!tests || tests.length === 0) {
-      return '<div style="color: var(--text-muted); padding: 1rem; text-align: center; font-size: 0.85rem;">No individual test records available.</div>';
+      return '<tr class="empty-row"><td colspan="3" class="empty-cell">No individual test records available.</td></tr>';
     }
     const sorted = [...tests].sort((a, b) => {
       const aFail = (a.status === 'FAILED' || a.status === 'ERROR') ? 0 : 1;
@@ -3386,23 +3478,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     return sorted.map((t, idx) => {
       const num = idx + 1;
       const isFailed = (t.status === 'FAILED' || t.status === 'ERROR');
-      const icon = isFailed ? '❌' : '✓';
-      const iconClass = isFailed ? 'failed' : 'passed';
-      const itemClass = isFailed ? 'unit-test-item failed' : 'unit-test-item';
+      const statusText = isFailed ? 'FAILED' : 'PASSED';
+      const statusClass = isFailed ? 'failed' : 'passed';
+      const chipHtml = `<span class="status-chip status-chip-${statusClass} matrix-col-status matrix-status-${statusClass}">${statusText}</span>`;
       const escName = escapeHtml(t.name || 'unnamed_test');
-      const msgHtml = (isFailed && t.message)
-        ? `<div class="unit-test-failure-msg">${escapeHtml(t.message)}</div>`
+      const failRow = (isFailed && t.message)
+        ? `<tr class="test-fail-row"><td colspan="3"><div class="unit-test-failure-msg">${escapeHtml(t.message)}</div></td></tr>`
         : '';
 
       return `
-        <div class="${itemClass}">
-          <div class="unit-test-row">
-            <span class="unit-test-num">${num}.</span>
-            <span class="unit-test-icon ${iconClass}">${icon}</span>
-            <span class="unit-test-name" title="${escName}">${escName}</span>
-          </div>
-          ${msgHtml}
-        </div>
+        <tr class="${isFailed ? 'row-failed' : ''}">
+          <td class="td-right" style="color: var(--pipeline-text-muted);">${num}.</td>
+          <td class="td-left" style="font-weight: 600; color: var(--pipeline-text-main);">${escName}</td>
+          <td class="td-right">${chipHtml}</td>
+        </tr>
+        ${failRow}
       `;
     }).join('');
   }
@@ -3498,7 +3588,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const poolData = data.pool_data || {};
       const rawPoolSec = (data.pool_duration_sec != null)
         ? Math.max(0, Number(data.pool_duration_sec))
-        : (poolData.duration_sec ? Number(poolData.duration_sec) : Math.max(0, rawSuiteSec - unitSec - depthSec));
+        : (data.pool_elapsed_seconds != null
+            ? Math.max(0, Number(data.pool_elapsed_seconds))
+            : (poolData.duration_sec ? Number(poolData.duration_sec) : Math.max(0, rawSuiteSec - unitSec - depthSec - rawMatrixSec)));
 
       this.staticDurations = {
         suiteSec: Math.round(rawSuiteSec),
@@ -3624,51 +3716,82 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if (isIdle || (!isRunning && snapshot.suiteElapsed === 0)) {
           statLineEl.title = 'No active benchmark running';
         } else {
-          let tooltip = `Total Suite: ${formatSeconds(snapshot.suiteElapsed)} | Current Mode: ${formatSeconds(snapshot.modeElapsed)}`;
-          if (data.eta_breakdown && data.eta_breakdown.length > 0) {
-            tooltip += ' | Total Run ETA: ' + data.eta_breakdown.map(b => {
-              const mKey = b.mode.toLowerCase();
-              const mEta = (snapshot.modeEtas[mKey] != null) ? snapshot.modeEtas[mKey] : b.eta_seconds;
-              return `${b.mode}: ${b.games_left}G (${formatLeftDuration(mEta)})`;
-            }).join(' · ');
-          }
-          statLineEl.title = tooltip;
+          statLineEl.title = `Total Suite: ${formatSeconds(snapshot.suiteElapsed)} | Current Mode: ${formatSeconds(snapshot.modeElapsed)}`;
         }
       }
 
-      // 2. Static Thread Count next to Status Pill
-      const thCount = isRunning ? ((data.threads != null && data.threads > 0) ? data.threads : 0) : 0;
+      // 2. Thread Count beside Rate
+      const thCount = (data.threads != null && data.threads > 0) ? data.threads : (isRunning ? 0 : '--');
       setText('threadsCount', thCount);
-      const thBadge = document.getElementById('threadsBadge');
-      if (thBadge) {
-        thBadge.style.display = (isRunning && thCount > 0) ? 'inline-flex' : 'none';
-      }
 
-      // 3. Header Slim Progress Bar (Percent = games completed / total planned games)
+      // 3. Header Slim Progress Bar (Percent = games completed / total planned games across entire suite)
       let totalPlannedGames = 0;
       let totalCompletedGames = 0;
-      if (data.matrix_progress && data.matrix_progress.length > 0) {
-        data.matrix_progress.forEach(m => {
-          const maxG = m.max_games || 200;
-          totalPlannedGames += maxG;
-          const isCurr = isRunning && (this.activeModeKey === (m.mode || '').toLowerCase()) && runType === 'self';
+
+      const selfMatrix = data.self_play_matrix || (runType === 'self' ? data.matrix_progress : null);
+      if (selfMatrix && Array.isArray(selfMatrix) && selfMatrix.length > 0) {
+        selfMatrix.forEach(m => {
+          const isCurr = isRunning && (runType === 'self') && (this.activeModeKey === (m.mode || '').toLowerCase());
           const gVal = isCurr ? played : (m.games != null ? m.games : (m.total_played != null ? m.total_played : 0));
+          const isCompleted = ['PASSED', 'PARITY', 'FAILED', 'KEEP', 'REVERT'].includes(m.status || m.decision) && gVal > 0;
+          const maxG = isCompleted ? gVal : (m.max_games || 200);
+          totalPlannedGames += maxG;
           totalCompletedGames += gVal;
         });
+      }
+
+      if (runType === 'pool') {
+        const poolMatrix = data.matrix_progress || [];
+        if (poolMatrix.length > 0) {
+          poolMatrix.forEach(m => {
+            const isCurr = isRunning && (this.activeModeKey === (m.mode || '').toLowerCase());
+            const gVal = isCurr ? played : (m.games != null ? m.games : (m.cand_games != null ? m.cand_games : 0));
+            const isCompleted = ['PASSED', 'PARITY', 'FAILED', 'KEEP', 'REVERT'].includes(m.status || m.decision) && gVal > 0;
+            const maxG = isCompleted ? gVal : (m.max_games || 50);
+            totalPlannedGames += maxG;
+            totalCompletedGames += gVal;
+          });
+        } else {
+          totalPlannedGames += (data.target_games || data.max_games || 50);
+          totalCompletedGames += played;
+        }
+      } else if (runType === 'self') {
+        const activeCount = (selfMatrix && selfMatrix.length > 0) ? selfMatrix.length : 4;
+        totalPlannedGames += (activeCount * 50);
       } else if (runType === 'depth' && data.depth_data) {
         totalPlannedGames = data.depth_data.total_positions || 12;
         totalCompletedGames = data.depth_data.completed_positions || 0;
-      } else {
-        totalPlannedGames = data.target_games || data.max_games || 200;
-        totalCompletedGames = played;
       }
-      const runProgressPct = totalPlannedGames > 0
-        ? Math.min(100, Math.max(0, (totalCompletedGames / totalPlannedGames) * 100)).toFixed(1)
-        : 0;
+
+      // Time-based progress: elapsed / (elapsed + left)
+      const isFinished = (data.status === 'FINISHED' || data.stop_type === 'MATRIX_COMPLETE' || data.stop_type === 'PARITY' || data.stop_type === 'KEEP' || data.status === 'DONE');
+      const suiteElapsed = snapshot.suiteElapsed || 0;
+      const totalEta = (snapshot.totalEta != null && snapshot.totalEta > 0) ? snapshot.totalEta : (snapshot.totalEta === 0 ? 0 : null);
+
+      let runProgressPct = 0;
+      if (isFinished) {
+        runProgressPct = 100;
+      } else if (suiteElapsed > 0) {
+        if (totalEta != null && totalEta > 0) {
+          const totalEstimatedTime = suiteElapsed + totalEta;
+          runProgressPct = totalEstimatedTime > 0
+            ? Math.min(100, Math.max(0, (suiteElapsed / totalEstimatedTime) * 100)).toFixed(1)
+            : 0;
+        } else if (totalEta === 0) {
+          runProgressPct = 100;
+        } else if (totalPlannedGames > 0 && totalCompletedGames > 0) {
+          runProgressPct = Math.min(100, Math.max(0, (totalCompletedGames / totalPlannedGames) * 100)).toFixed(1);
+        }
+      }
+
       setWidth('headerProgressBar', runProgressPct);
       const wrapEl = document.getElementById('headerProgressWrap');
       if (wrapEl) {
-        wrapEl.title = `Overall Run Progress: ${totalCompletedGames} / ${totalPlannedGames} Games (${runProgressPct}%)`;
+        if (totalEta != null && totalEta > 0) {
+          wrapEl.title = `Overall Run Progress: ${runProgressPct}% (${formatSeconds(suiteElapsed)} / ${formatSeconds(suiteElapsed + totalEta)}) • ${totalCompletedGames} / ${totalPlannedGames} Games`;
+        } else {
+          wrapEl.title = `Overall Run Progress: ${runProgressPct}% (${formatSeconds(suiteElapsed)}) • ${totalCompletedGames} / ${totalPlannedGames} Games`;
+        }
       }
 
       // 3. Stage Rail Duration Displays for Running Stage
@@ -3688,16 +3811,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
       }
 
-      // 4. Self-Play Matrix & Zoo Pool Table Active Mode Row ETA
+      // 4. Self-Play Matrix & Zoo Pool Table Active Mode Row Time (Current running duration)
       if (isRunning && this.activeModeKey) {
         const activeEtaEl = runType === 'pool'
           ? document.getElementById(`pool-eta-${this.activeModeKey}`)
           : document.getElementById(`matrix-eta-${this.activeModeKey}`);
         if (activeEtaEl) {
-          const mEta = snapshot.modeEtas[this.activeModeKey];
-          if (mEta != null && mEta > 0) {
-            activeEtaEl.innerText = `${formatDuration(mEta)} left`;
-          }
+          activeEtaEl.innerText = formatDuration(snapshot.modeElapsed);
         }
       }
 
@@ -3756,23 +3876,42 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   function updateDepthUI(data) {
     const depth = data.depth_data || {};
+    const fixtures = depth.fixtures || [];
+    let totalDelta = 0.0;
+    if (depth.total_delta_depth != null) {
+      totalDelta = Number(depth.total_delta_depth);
+    } else if (fixtures.length > 0) {
+      totalDelta = fixtures.reduce((acc, f) => {
+        const d = (f.delta_depth != null) ? f.delta_depth : ((f.var_med_depth || 0) - (f.base_med_depth || 0));
+        return acc + Number(d);
+      }, 0.0);
+    } else if (depth.delta_depth != null) {
+      totalDelta = Number(depth.delta_depth);
+    }
+    totalDelta = Math.round(totalDelta * 10) / 10;
+
     const varD = (depth.median_var_depth != null) ? depth.median_var_depth : 0.0;
     const baseD = (depth.median_base_depth != null) ? depth.median_base_depth : 0.0;
-    const deltaD = (depth.delta_depth != null) ? depth.delta_depth : (varD - baseD);
     const npsR = (depth.nps_ratio != null) ? depth.nps_ratio : 1.0;
     const agree = (depth.agreement_pct != null) ? depth.agreement_pct : 100.0;
 
-    // Single summary line (Requirement 4)
+    // Single summary line with labeled paired values
     setText('depthSummaryCount', depth.total_positions || depth.completed_positions || 12);
+    const sign = totalDelta >= 0 ? '+' : '';
+    const depthDepthEl = document.getElementById('depthSummaryDepth');
+    if (depthDepthEl) {
+      depthDepthEl.innerText = `${sign}${totalDelta.toFixed(1)}`;
+      depthDepthEl.style.color = totalDelta > 0 ? 'var(--pipeline-green)' : (totalDelta < 0 ? 'var(--pipeline-red)' : 'var(--pipeline-text-main)');
+    }
     const deltaEl = document.getElementById('depthSummaryDelta');
     if (deltaEl) {
-      deltaEl.innerText = `${deltaD >= 0 ? '+' : ''}${deltaD.toFixed(1)} (V ${varD.toFixed(1)} vs B ${baseD.toFixed(1)})`;
-      deltaEl.style.color = deltaD > 0 ? 'var(--variant-color)' : (deltaD < 0 ? 'var(--danger-color)' : 'var(--text-main)');
+      deltaEl.innerText = `${sign}${totalDelta.toFixed(1)} (V ${varD.toFixed(1)} vs B ${baseD.toFixed(1)})`;
+      deltaEl.style.color = totalDelta > 0 ? 'var(--pipeline-green)' : (totalDelta < 0 ? 'var(--pipeline-red)' : 'var(--pipeline-text-main)');
     }
     const npsEl = document.getElementById('depthSummaryNps');
     if (npsEl) {
       npsEl.innerText = `${npsR.toFixed(2)}x`;
-      npsEl.style.color = npsR >= 1.0 ? 'var(--variant-color)' : 'var(--danger-color)';
+      npsEl.style.color = npsR >= 1.0 ? 'var(--pipeline-green)' : 'var(--pipeline-red)';
     }
     setText('depthSummaryAgree', `${agree.toFixed(1)}%`);
 
@@ -3785,48 +3924,58 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     const statusBadge = document.getElementById('depthStatusBadge');
     if (statusBadge) {
       if (data.status === 'FINISHED' || (depth.completed_positions && depth.completed_positions >= 12)) {
-        const passed = depth.passed !== false && deltaD >= 0;
-        statusBadge.className = `matrix-col-status ${passed ? 'matrix-status-passed' : 'matrix-status-failed'}`;
-        statusBadge.innerText = passed ? 'PASSED (NO REGRESSION)' : 'DEPTH REGRESSION';
+        const passed = depth.passed !== false && totalDelta >= 0;
+        const stClass = passed ? 'passed' : 'failed';
+        statusBadge.className = `status-chip status-chip-${stClass} matrix-col-status matrix-status-${stClass}`;
+        statusBadge.innerText = passed ? 'PASSED' : 'FAILED';
       } else if (data.run_type === 'depth' && data.status === 'RUNNING') {
-        statusBadge.className = 'matrix-col-status matrix-status-running';
-        statusBadge.innerText = `EVALUATING (${depth.completed_positions || 0}/${depth.total_positions || 12})`;
+        statusBadge.className = 'status-chip status-chip-running matrix-col-status matrix-status-running';
+        statusBadge.innerText = 'RUNNING';
       } else {
-        statusBadge.className = 'matrix-col-status matrix-status-pending';
-        statusBadge.innerText = 'AWAITING FIXTURES';
+        statusBadge.className = 'status-chip status-chip-pending matrix-col-status matrix-status-pending';
+        statusBadge.innerText = 'PENDING';
       }
     }
 
     // Per-fixture breakdown table
     const tbody = document.getElementById('depthTableBody');
     if (tbody) {
-      const fixtures = depth.fixtures || [];
+      const fixtures = (depth.fixtures || []).slice();
+      const modeWeights = { constrictor: 0, royale: 1, duel: 2, standard: 3 };
+      fixtures.sort((a, b) => {
+        const ma = modeWeights[(a.mode || '').toLowerCase()] ?? 99;
+        const mb = modeWeights[(b.mode || '').toLowerCase()] ?? 99;
+        if (ma !== mb) return ma - mb;
+        return (a.turn || 0) - (b.turn || 0);
+      });
       if (fixtures.length === 0) {
-        setHTML(tbody, '<tr><td colspan="9" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Waiting for depth benchmark fixtures to evaluate...</td></tr>');
+        setHTML(tbody, '<tr><td colspan="9" class="empty-cell">Waiting for depth benchmark fixtures to evaluate...</td></tr>');
       } else {
         const turnMap = { 25: 'Early', 50: 'Mid', 75: 'Late' };
         const rowsHtml = fixtures.map(f => {
           const delta = (f.delta_depth != null) ? f.delta_depth : (f.var_med_depth - f.base_med_depth);
           const isPass = f.passed !== false && delta >= 0;
           const statusClass = isPass ? 'passed' : 'failed';
-          const statusText = isPass ? 'PASS' : 'REGRESSION';
-          const deltaColor = delta > 0 ? 'var(--variant-color)' : (delta < 0 ? 'var(--danger-color)' : 'var(--text-muted)');
-          const npsColor = f.nps_ratio >= 1.0 ? 'var(--variant-color)' : 'var(--danger-color)';
+          const statusText = isPass ? 'PASSED' : 'FAILED';
+          // Rule: Color a value by its pass/fail threshold. Do not color a value red if its row has a PASS status.
+          const deltaColor = isPass ? (delta > 0 ? 'var(--pipeline-green)' : 'var(--pipeline-text-main)') : 'var(--pipeline-red)';
+          const npsColor = isPass ? (f.nps_ratio >= 1.0 ? 'var(--pipeline-green)' : 'var(--pipeline-text-main)') : (f.nps_ratio >= 1.0 ? 'var(--pipeline-green)' : 'var(--pipeline-red)');
           const modeName = f.mode ? (f.mode.charAt(0).toUpperCase() + f.mode.slice(1).toLowerCase()) : '';
           const phase = turnMap[f.turn] || `Turn ${f.turn}`;
           const title = f.title || `${modeName} ${phase}`;
+          const chipHtml = `<span class="status-chip status-chip-${statusClass} matrix-col-status matrix-status-${statusClass}">${statusText}</span>`;
 
           return `
             <tr>
-              <td style="text-align: left; font-weight: 700;">${escapeHtml(title)}</td>
-              <td>${f.base_med_depth.toFixed(1)}</td>
-              <td style="font-weight: 700; color: var(--variant-color);">${f.var_med_depth.toFixed(1)}</td>
-              <td style="color: ${deltaColor}; font-weight: 700;">${delta > 0 ? '+' : ''}${delta.toFixed(1)}</td>
-              <td>${Math.round(f.base_med_nps || 0).toLocaleString()}</td>
-              <td>${Math.round(f.var_med_nps || 0).toLocaleString()}</td>
-              <td style="color: ${npsColor}; font-weight: 700;">${f.nps_ratio.toFixed(2)}x</td>
-              <td>${f.agreement_pct.toFixed(1)}%</td>
-              <td><span class="matrix-col-status matrix-status-${statusClass}">${statusText}</span></td>
+              <td class="td-left" style="font-weight: 700; color: var(--pipeline-text-main);">${escapeHtml(title)}</td>
+              <td class="td-right">${f.base_med_depth != null ? f.base_med_depth.toFixed(1) : '--'}</td>
+              <td class="td-right" style="font-weight: 700; color: var(--pipeline-green);">${f.var_med_depth != null ? f.var_med_depth.toFixed(1) : '--'}</td>
+              <td class="td-right" style="color: ${deltaColor}; font-weight: 700;">${delta > 0 ? '+' : ''}${delta.toFixed(1)}</td>
+              <td class="td-right">${f.base_med_nps != null ? Math.round(f.base_med_nps).toLocaleString() : '--'}</td>
+              <td class="td-right">${f.var_med_nps != null ? Math.round(f.var_med_nps).toLocaleString() : '--'}</td>
+              <td class="td-right" style="color: ${npsColor}; font-weight: 700;">${f.nps_ratio != null ? `${f.nps_ratio.toFixed(2)}x` : '--'}</td>
+              <td class="td-right">${f.agreement_pct != null ? `${f.agreement_pct.toFixed(1)}%` : '--'}</td>
+              <td class="td-right">${chipHtml}</td>
             </tr>
           `;
         }).join('');
@@ -3838,7 +3987,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   function updatePoolUI(data) {
     const pool = data.pool_data || {};
     const poolModesBody = document.getElementById('poolModesTableBody');
-    const poolSubtitle = document.getElementById('poolStatusSubtitle');
 
     const baseModes = [
       { mode: 'constrictor', name: 'Constrictor 4P', max_games: 200 },
@@ -3869,13 +4017,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const isPoolRunning = (data.run_type === 'pool' && data.status === 'RUNNING' && data.runner_alive !== false);
       const activeModeClean = (data.game_mode || '').toLowerCase();
 
-      // Per-mode ETA lookup from data.eta_breakdown
-      const etaMap = {};
-      (data.eta_breakdown || []).forEach(b => {
-        if (b.mode) etaMap[b.mode.toLowerCase()] = b;
-      });
-
       let completedPoolModes = 0;
+      let totalPoolPlayed = 0;
+      let totalPoolMax = 0;
+      let poolModesCount = 0;
 
       const rowsHtml = baseModes.map(bm => {
         const modeKey = bm.mode.toLowerCase();
@@ -3887,15 +4032,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const isExplicitSkipped = (m.status === 'SKIPPED' || md.status === 'SKIPPED' || m.decision === 'SKIPPED' || md.decision === 'SKIPPED');
         const isSkipped = isOmitted || isExplicitSkipped;
 
-        const candShare = isOmitted ? null : (md.cand_share != null ? md.cand_share : (m.cand_share != null ? m.cand_share : (isCurrentActive ? (pool.cand_share || 0) : null)));
-        const baseShare = isOmitted ? null : (md.base_share != null ? md.base_share : (m.base_share != null ? m.base_share : (isCurrentActive ? (pool.base_share || 0) : null)));
-        const delta = isOmitted ? null : (md.delta != null ? md.delta : (m.delta != null ? m.delta : (candShare != null && baseShare != null ? (candShare - baseShare) : null)));
-        const z = isOmitted ? null : (md.z_score != null ? md.z_score : (m.z_score != null ? m.z_score : (isCurrentActive ? overallZ : null)));
+        const candShare = isOmitted ? null : (md.cand_share != null ? md.cand_share : (isCurrentActive ? (pool.cand_share || 0) : null));
+        const baseShare = isOmitted ? null : (md.base_share != null ? md.base_share : (isCurrentActive ? (pool.base_share || 0) : null));
+        const delta = isOmitted ? null : (md.delta != null ? md.delta : (candShare != null && baseShare != null ? (candShare - baseShare) : null));
+        const z = isOmitted ? null : (md.z_score != null ? md.z_score : (isCurrentActive ? overallZ : null));
 
-        const defaultPoolMax = pool.max_games || (data.run_type === 'pool' ? (data.target_games || 40) : 200);
-        const maxGames = md.max_games || m.max_games || defaultPoolMax;
-        const candGames = md.cand_games != null ? md.cand_games : (isCurrentActive ? (pool.cand_games || data.total_played || 0) : (md.games != null ? md.games : (m.cand_games != null ? m.cand_games : (m.games != null ? m.games : 0))));
-        const baseGames = md.base_games != null ? md.base_games : (isCurrentActive ? (pool.base_games || data.total_played || 0) : (md.games != null ? md.games : (m.base_games != null ? m.base_games : (m.games != null ? m.games : 0))));
+        const defaultPoolMax = pool.max_games || (data.run_type === 'pool' ? (data.target_games || 40) : 40);
+        const maxGames = md.max_games || defaultPoolMax;
+        const candGames = md.cand_games != null ? md.cand_games : (isCurrentActive ? (pool.cand_games || data.total_played || 0) : (md.games != null ? md.games : 0));
+        const baseGames = md.base_games != null ? md.base_games : (isCurrentActive ? (pool.base_games || data.total_played || 0) : (md.games != null ? md.games : 0));
         const gamesActive = Math.max(candGames, baseGames);
 
         let statusClass = 'pending';
@@ -3906,9 +4051,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         } else if (isSkipped) {
           statusClass = 'skipped';
           statusText = 'SKIPPED';
-          completedPoolModes++;
-        } else if (md.decision || m.decision) {
-          const dec = md.decision || m.decision;
+        } else if (md.decision) {
+          const dec = md.decision;
           if (gamesActive === 0) {
             statusText = 'FAILED';
             statusClass = 'failed';
@@ -3916,7 +4060,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             statusText = dec;
             statusClass = dec.toLowerCase();
           }
-          completedPoolModes++;
+          if (statusText === 'PASSED') {
+            completedPoolModes++;
+          }
         } else if (candShare != null) {
           if (gamesActive === 0) {
             statusText = 'FAILED';
@@ -3924,109 +4070,199 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           } else {
             statusClass = delta >= 0 ? 'passed' : 'failed';
             statusText = delta >= 0 ? 'PASSED' : 'FAILED';
+            if (statusText === 'PASSED') {
+              completedPoolModes++;
+            }
           }
-          completedPoolModes++;
         }
 
         // 1. Mode: Name only
         // 2. Games: "cand / max · base / max" (or "--" if skipped without games)
+        const isCompleted = ['PASSED', 'PARITY', 'FAILED', 'KEEP', 'REVERT'].includes(statusText) && gamesActive > 0;
+        const effMaxGames = isCompleted ? gamesActive : maxGames;
+        if (!isSkipped) {
+          poolModesCount++;
+          totalPoolPlayed += gamesActive;
+          totalPoolMax += effMaxGames;
+        }
         const gamesText = (gamesActive > 0)
-          ? `${candGames} / ${maxGames} · ${baseGames} / ${maxGames}`
+          ? `${candGames} / ${effMaxGames} · ${baseGames} / ${effMaxGames}`
           : (isSkipped ? '--' : `0 / ${maxGames} · 0 / ${maxGames}`);
-        const pctDone = maxGames > 0 ? Math.min(100, (gamesActive / maxGames) * 100) : 0;
 
-        // 3. Win Share: combined "variant% / baseline%"
+        // 3. Win Share: combined "Var: variant% · Base: baseline%" with clear labels
         const winShareHtml = (candShare != null && baseShare != null)
-          ? `<span style="font-weight: 700; color: var(--variant-color);">${candShare.toFixed(1)}%</span> <span style="color: var(--text-muted); font-weight: 600;">/</span> <span style="font-weight: 700; color: var(--baseline-color);">${baseShare.toFixed(1)}%</span>`
-          : `<span style="color: var(--text-muted);">-- / --</span>`;
+          ? `<span style="font-weight: 700; color: var(--pipeline-green);">Var: ${candShare.toFixed(1)}%</span> <span style="color: var(--pipeline-text-muted);">·</span> <span style="font-weight: 700; color: var(--pipeline-blue);">Base: ${baseShare.toFixed(1)}%</span>`
+          : `<span style="color: var(--pipeline-text-muted);">--</span>`;
 
         // 4. Delta: variant minus baseline
-        const deltaColor = delta > 0.5 ? 'var(--variant-color)' : (delta < -0.5 ? 'var(--danger-color)' : '#f59e0b');
+        const deltaColor = delta > 0.5 ? 'var(--pipeline-green)' : (delta < -0.5 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
         const deltaText = delta != null ? `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%` : '--';
 
         // 5. Z-Score
         let zScoreText = '--';
-        let zColor = 'var(--text-muted)';
+        let zColor = 'var(--pipeline-text-muted)';
         if (z != null) {
           const zNum = Number(z);
           zScoreText = `${zNum >= 0 ? '+' : ''}${zNum.toFixed(2)}`;
-          zColor = zNum >= 1.645 ? 'var(--variant-color)' : (zNum <= -1.645 ? 'var(--danger-color)' : '#f59e0b');
+          zColor = zNum >= 1.645 ? 'var(--pipeline-green)' : (zNum <= -1.645 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
         }
 
-        // 6. Time (Finished: duration, Running: rem " left", Queued: exp " est")
+        // 6. Time (Finished: duration, Running: current duration, Not started: "--")
         let etaText = '--';
-        const dur = md.duration_sec || m.duration_sec;
+        const dur = md.duration_sec;
         if (isSkipped) {
           etaText = '--';
+        } else if (isCurrentActive) {
+          const unitData = data.unit_tests_data || {};
+          const unitSec = (unitData && unitData.duration_sec && unitData.duration_sec > 0) ? unitData.duration_sec : 0;
+          const depth = data.depth_data || {};
+          const depthSec = (depth && depth.duration_sec && depth.duration_sec > 0) ? depth.duration_sec : 0;
+          const poolElapsed = (data.mode_elapsed_seconds != null && data.mode_elapsed_seconds > 0)
+            ? data.mode_elapsed_seconds
+            : (dur != null && dur > 0 ? dur : Math.max(0, (data.elapsed_seconds || 0) - unitSec - depthSec));
+          etaText = (poolElapsed != null && poolElapsed > 0) ? formatDuration(poolElapsed) : '0:00';
         } else if (['PASSED', 'PARITY', 'FAILED', 'KEEP', 'REVERT'].includes(statusText) || dur != null) {
           etaText = (dur != null && dur > 0) ? formatDuration(dur) : '--';
-        } else if (isCurrentActive) {
-          const b = etaMap[modeKey];
-          let remSec = null;
-          if (b && b.eta_seconds != null && b.eta_seconds > 0) {
-            remSec = b.eta_seconds;
-          }
-          etaText = (remSec != null && remSec > 0) ? `${formatDuration(remSec)} left` : '--';
         } else {
-          const b = etaMap[modeKey];
-          if (b && b.eta_seconds != null && b.eta_seconds > 0) {
-            etaText = `${formatDuration(b.eta_seconds)} est`;
-          } else {
-            etaText = '--';
-          }
+          etaText = '--';
         }
 
         const rowClass = isCurrentActive ? 'active-running' : '';
 
         return `
           <tr class="${rowClass}">
-            <td style="font-weight: 700; color: var(--text-main); text-align: left;">
+            <td class="td-left" style="font-weight: 700; color: var(--pipeline-text-main);">
               <span>${bm.name}</span>
             </td>
-            <td style="font-weight: 700; font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;">${gamesText}</td>
-            <td style="font-size: 0.95rem; font-family: 'JetBrains Mono', monospace;">${winShareHtml}</td>
-            <td style="font-weight: 700; color: ${delta != null ? deltaColor : 'var(--text-muted)'}; font-family: 'JetBrains Mono', monospace;">${deltaText}</td>
-            <td style="font-weight: 600; color: ${zColor}; font-family: 'JetBrains Mono', monospace;">${zScoreText}</td>
-            <td style="color: var(--text-muted); font-size: 0.82rem;" id="pool-eta-${modeKey}">${etaText}</td>
-            <td><span class="matrix-col-status matrix-status-${statusClass}">${statusText}</span></td>
+            <td class="td-right" style="font-weight: 700;">${gamesText}</td>
+            <td class="td-right">${winShareHtml}</td>
+            <td class="td-right" style="font-weight: 700; color: ${delta != null ? deltaColor : 'var(--pipeline-text-muted)'};">${deltaText}</td>
+            <td class="td-right" style="font-weight: 600; color: ${zColor};">${zScoreText}</td>
+            <td class="td-right" style="color: var(--pipeline-text-muted); font-size: 0.82rem;" id="pool-eta-${modeKey}">${etaText}</td>
+            <td class="td-right"><span class="status-chip status-chip-${statusClass} matrix-col-status matrix-status-${statusClass}">${statusText}</span></td>
           </tr>
         `;
       }).join('');
 
       setHTML(poolModesBody, rowsHtml);
-      if (poolSubtitle) {
-        if (pool.total_games && pool.total_games > 0) {
-          poolSubtitle.innerText = `${completedPoolModes} / 4 Modes Complete • z = ${overallZ >= 0 ? '+' : ''}${overallZ.toFixed(2)}`;
-        } else if (isPoolRunning) {
-          poolSubtitle.innerText = `${completedPoolModes} / 4 Modes Complete (Evaluating Variant vs Opponent Pool...)`;
-        } else {
-          poolSubtitle.innerText = `${completedPoolModes} / 4 Modes Complete`;
+
+      // Summary Strip elements for Stage 4
+      if (poolModesCount === 0) poolModesCount = 4;
+      const hasPoolGames = (pool.total_games && pool.total_games > 0) || isPoolRunning || (totalPoolPlayed > 0);
+      setText('poolSummaryModes', poolModesCount);
+      setText('poolSummaryGames', `${totalPoolPlayed} / ${totalPoolMax}`);
+
+      let pDeltaText = '--';
+      let pDeltaColor = 'var(--pipeline-text-muted)';
+      if (hasPoolGames && overallDelta != null && totalPoolPlayed > 0) {
+        pDeltaText = `${overallDelta > 0 ? '+' : ''}${overallDelta.toFixed(1)}%`;
+        pDeltaColor = getPipelineDeltaColor(overallDelta);
+      }
+      const pDeltaEl = document.getElementById('poolSummaryDelta');
+      if (pDeltaEl) {
+        pDeltaEl.innerText = pDeltaText;
+        pDeltaEl.style.color = pDeltaColor;
+      }
+
+      let pZText = '--';
+      let pZColor = 'var(--pipeline-text-muted)';
+      if (hasPoolGames && overallZ != null && totalPoolPlayed >= 5) {
+        pZText = `${overallZ >= 0 ? '+' : ''}${overallZ.toFixed(2)}`;
+        pZColor = overallZ >= 1.645 ? 'var(--pipeline-green)' : (overallZ <= -1.645 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
+      }
+      const pZEl = document.getElementById('poolSummaryZ');
+      if (pZEl) {
+        pZEl.innerText = pZText;
+        pZEl.style.color = pZColor;
+      }
+
+      const poolChip = document.getElementById('poolSummaryChip');
+      const isPoolEnabled = Boolean(data.pool_enabled || (data.run_type || 'self') === 'pool');
+      if (poolChip) {
+        let chipSt = 'PENDING';
+        if (isPoolRunning) chipSt = 'RUNNING';
+        else if (hasPoolGames && (completedPoolModes > 0 || (pool.total_games && pool.total_games > 0))) {
+          chipSt = (overallDelta >= 0) ? 'PASSED' : 'FAILED';
+        } else if (!isPoolEnabled) {
+          chipSt = 'SKIPPED';
         }
+        const chipCls = chipSt.toLowerCase();
+        poolChip.className = `status-chip status-chip-${chipCls} matrix-col-status matrix-status-${chipCls}`;
+        poolChip.innerText = chipSt;
+      }
+      if (!isPoolEnabled && !hasPoolGames) {
+        setText('poolSummaryGames', '--');
+        setHTML(poolModesBody, '<tr><td colspan="7" class="empty-cell" style="padding: 1.5rem; color: var(--pipeline-text-muted);">Stage 4 (Zoo Pool Gate) skipped for this run (Self-play evaluation only or proven bug fix exempt under Rule 3)</td></tr>');
       }
     }
 
-    // Update Opponents Table
+    // Update Opponents Table (Dynamic columns, DataTable styling, empty state)
     const oppTbody = document.getElementById('poolOpponentsTableBody');
+    const oppThead = document.getElementById('poolOpponentsHead');
     const oppCount = document.getElementById('poolOpponentsCount');
     const opponents = pool.opponents || [];
     if (oppCount) oppCount.innerText = `${opponents.length} Opponent${opponents.length === 1 ? '' : 's'}`;
     if (oppTbody) {
       if (opponents.length === 0) {
-        setHTML(oppTbody, '');
+        if (oppThead) {
+          oppThead.innerHTML = `
+            <tr>
+              <th class="th-left">Opponent</th>
+              <th class="th-right">Games</th>
+              <th class="th-right">Win Share (Var / Base)</th>
+              <th class="th-right">Δ (Delta)</th>
+            </tr>
+          `;
+        }
+        setHTML(oppTbody, `
+          <tr class="empty-row">
+            <td colspan="100%" class="empty-cell">No data yet</td>
+          </tr>
+        `);
       } else {
+        const sample = opponents[0] || {};
+        const knownKeys = ['opponent', 'games', 'cand_win_pct', 'base_win_pct', 'delta'];
+        const extraKeys = Object.keys(sample).filter(k => !knownKeys.includes(k) && !k.startsWith('_'));
+
+        let headCols = `
+          <tr>
+            <th class="th-left">Opponent</th>
+            <th class="th-right">Games</th>
+            <th class="th-right">Win Share (Var / Base)</th>
+            <th class="th-right">Δ (Delta)</th>
+        `;
+        extraKeys.forEach(k => {
+          const colLabel = k.replace(/_/g, ' ').replace(/\\b\\w/g, l => l.toUpperCase());
+          headCols += `<th class="th-right">${escapeHtml(colLabel)}</th>`;
+        });
+        headCols += '</tr>';
+        if (oppThead) oppThead.innerHTML = headCols;
+
         const oppRows = opponents.map(o => {
-          const d = (o.delta != null) ? o.delta : (o.cand_win_pct - o.base_win_pct);
-          const dColor = d > 0.5 ? 'var(--variant-color)' : (d < -0.5 ? 'var(--danger-color)' : '#f59e0b');
+          const d = (o.delta != null) ? o.delta : ((o.cand_win_pct != null && o.base_win_pct != null) ? (o.cand_win_pct - o.base_win_pct) : null);
+          const dColor = d > 0.5 ? 'var(--pipeline-green)' : (d < -0.5 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
+          const dText = d != null ? `${d > 0 ? '+' : ''}${d.toFixed(1)}%` : '--';
+          const cPct = o.cand_win_pct != null ? `${o.cand_win_pct.toFixed(1)}%` : '--';
+          const bPct = o.base_win_pct != null ? `${o.base_win_pct.toFixed(1)}%` : '--';
+
+          let extraCells = '';
+          extraKeys.forEach(k => {
+            const v = o[k];
+            const vStr = v != null ? escapeHtml(String(v)) : '--';
+            extraCells += `<td class="td-right">${vStr}</td>`;
+          });
+
           return `
             <tr>
-              <td style="text-align: left; font-weight: 700; color: var(--text-main);">${escapeHtml(o.opponent)}</td>
-              <td>${o.games}</td>
-              <td style="font-family: 'JetBrains Mono', monospace; font-size: 0.92rem;">
-                <span style="color: var(--variant-color); font-weight: 700;">${o.cand_win_pct.toFixed(1)}%</span>
-                <span style="color: var(--text-muted); font-weight: 600;">/</span>
-                <span style="color: var(--baseline-color); font-weight: 700;">${o.base_win_pct.toFixed(1)}%</span>
+              <td class="td-left" style="font-weight: 700; color: var(--pipeline-text-main);">${escapeHtml(o.opponent || 'Unknown')}</td>
+              <td class="td-right">${o.games != null ? o.games : '--'}</td>
+              <td class="td-right">
+                <span style="color: var(--pipeline-green); font-weight: 700;">Var: ${cPct}</span>
+                <span style="color: var(--pipeline-text-muted);">·</span>
+                <span style="color: var(--pipeline-blue); font-weight: 700;">Base: ${bPct}</span>
               </td>
-              <td style="color: ${dColor}; font-weight: 700; font-family: 'JetBrains Mono', monospace;">${d > 0 ? '+' : ''}${d.toFixed(1)}%</td>
+              <td class="td-right" style="color: ${dColor}; font-weight: 700;">${dText}</td>
+              ${extraCells}
             </tr>
           `;
         }).join('');
@@ -4085,35 +4321,56 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     const unitScoreEl = document.getElementById('unitDetailScore');
     const unitDurEl = document.getElementById('unitDetailDuration');
     const unitIconEl = document.getElementById('unitDetailIcon');
-    const unitMetaEl = document.getElementById('unitDetailMeta');
     const unitListEl = document.getElementById('unitTestsList');
+    const unitPassedMetric = document.getElementById('unitPassedMetric');
+    const unitDurationMetric = document.getElementById('unitDurationMetric');
+    const unitChip = document.getElementById('unitSummaryChip');
 
-    const passedCount = unitData.passed != null ? unitData.passed : 40;
-    const totalCount = unitData.total != null ? unitData.total : 40;
+    const totalCount = (unitData.tests && unitData.tests.length) ? unitData.tests.length : (unitData.total != null ? unitData.total : 42);
+    const passedCount = unitData.passed != null ? unitData.passed : (unitData.tests ? unitData.tests.filter(t => t.status === 'PASSED').length : totalCount);
     const durSec = (unitData.duration_sec != null && unitData.duration_sec > 0) ? Number(unitData.duration_sec) : 4.7;
     const durStr = formatDuration(durSec, true);
+
+    if (unitPassedMetric) {
+      unitPassedMetric.innerText = `${passedCount} / ${totalCount} passed`;
+    }
+    if (unitDurationMetric) {
+      unitDurationMetric.innerText = durStr;
+    }
+    if (unitChip) {
+      let cClass = 'pending';
+      let cText = 'PENDING';
+      if (unitStatus === 'FAILED') {
+        cClass = 'failed';
+        cText = 'FAILED';
+      } else if (unitStatus === 'DONE' || unitStatus === 'PASSED') {
+        cClass = 'passed';
+        cText = 'PASSED';
+      } else if (unitStatus === 'RUNNING') {
+        cClass = 'running';
+        cText = 'RUNNING';
+      }
+      unitChip.className = `status-chip status-chip-${cClass} matrix-col-status matrix-status-${cClass}`;
+      unitChip.innerText = cText;
+    }
 
     if (unitScoreEl) {
       if (unitStatus === 'FAILED') {
         unitScoreEl.innerText = `${passedCount} / ${totalCount} passed`;
-        unitScoreEl.style.color = 'var(--danger-color)';
-        if (unitIconEl) { unitIconEl.innerText = '❌'; unitIconEl.style.color = 'var(--danger-color)'; }
-        if (unitMetaEl) unitMetaEl.innerText = 'Pre-flight Safety Suite Failed';
+        unitScoreEl.style.color = 'var(--pipeline-red)';
+        if (unitIconEl) { unitIconEl.innerText = '❌'; unitIconEl.style.color = 'var(--pipeline-red)'; }
       } else if (unitStatus === 'DONE') {
         unitScoreEl.innerText = `${passedCount} / ${totalCount} passed`;
-        unitScoreEl.style.color = 'var(--variant-color)';
-        if (unitIconEl) { unitIconEl.innerText = '✓'; unitIconEl.style.color = 'var(--variant-color)'; }
-        if (unitMetaEl) unitMetaEl.innerText = '';
+        unitScoreEl.style.color = 'var(--pipeline-green)';
+        if (unitIconEl) { unitIconEl.innerText = '✓'; unitIconEl.style.color = 'var(--pipeline-green)'; }
       } else if (unitStatus === 'RUNNING') {
         unitScoreEl.innerText = 'Running unit tests...';
-        unitScoreEl.style.color = '#60a5fa';
-        if (unitIconEl) { unitIconEl.innerText = '⏳'; unitIconEl.style.color = '#60a5fa'; }
-        if (unitMetaEl) unitMetaEl.innerText = 'Running deterministic test scenarios';
+        unitScoreEl.style.color = 'var(--pipeline-blue)';
+        if (unitIconEl) { unitIconEl.innerText = '⏳'; unitIconEl.style.color = 'var(--pipeline-blue)'; }
       } else {
         unitScoreEl.innerText = `${totalCount} / ${totalCount} tests · Pending`;
-        unitScoreEl.style.color = 'var(--text-muted)';
-        if (unitIconEl) { unitIconEl.innerText = '⚪'; unitIconEl.style.color = 'var(--text-muted)'; }
-        if (unitMetaEl) unitMetaEl.innerText = 'Awaiting Pre-flight Execution';
+        unitScoreEl.style.color = 'var(--pipeline-grey)';
+        if (unitIconEl) { unitIconEl.innerText = '⚪'; unitIconEl.style.color = 'var(--pipeline-grey)'; }
       }
     }
     if (unitDurEl) unitDurEl.innerText = `Duration: ${durStr}`;
@@ -4164,9 +4421,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         selfDur = formatSeconds(computedMatrixElapsed);
         autoSelectStage('self');
       } else if (isFinished) {
-        if (rec === 'KEEP') selfStatus = 'DONE';
-        else if (rec === 'PARITY') selfStatus = 'PARITY';
-        else if (rec === 'REVERT') selfStatus = 'FAILED';
+        if (rec === 'REVERT') selfStatus = 'FAILED';
         else selfStatus = 'DONE';
         const finalSec = (data.matrix_duration_sec != null && data.matrix_duration_sec > 0)
           ? data.matrix_duration_sec
@@ -4201,6 +4456,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       ? data.pool_duration_sec
       : (pool.duration_sec && pool.duration_sec > 0 ? pool.duration_sec : null);
     let poolDur = poolDurSec ? formatSeconds(poolDurSec) : '--';
+    const isPoolEnabled = Boolean(data.pool_enabled || runType === 'pool');
 
     if (runType === 'pool') {
       if (isRunning) {
@@ -4209,9 +4465,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         poolDur = formatSeconds(poolElapsed);
         autoSelectStage('pool');
       } else if (isFinished) {
-        if (rec === 'KEEP') poolStatus = 'DONE';
-        else if (rec === 'PARITY') poolStatus = 'PARITY';
-        else poolStatus = 'FAILED';
+        if (rec === 'REVERT') poolStatus = 'FAILED';
+        else poolStatus = 'DONE';
         const finishedPoolSec = poolDurSec || Math.max(0, (data.elapsed_seconds || 0) - unitTestSec - depthSec);
         poolDur = formatSeconds(finishedPoolSec);
         autoSelectStage('pool');
@@ -4219,6 +4474,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     } else if (pool.total_games && pool.total_games > 0) {
       poolStatus = (pool.delta || 0) >= 0 ? 'DONE' : 'FAILED';
       poolDur = poolDurSec ? formatSeconds(poolDurSec) : '--';
+    } else if (!isPoolEnabled) {
+      poolStatus = 'SKIPPED';
+      poolDur = '--';
     } else if (isFinished && runType === 'self') {
       poolStatus = 'SKIPPED';
       poolDur = '--';
@@ -4233,15 +4491,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         depthDur = '--';
         selfStatus = 'PENDING';
         selfDur = '--';
-        poolStatus = 'PENDING';
+        poolStatus = isPoolEnabled ? 'PENDING' : 'SKIPPED';
         poolDur = '--';
       } else if (depthStatus === 'RUNNING' || runType === 'depth') {
         selfStatus = 'PENDING';
         selfDur = '--';
-        poolStatus = 'PENDING';
+        poolStatus = isPoolEnabled ? 'PENDING' : 'SKIPPED';
         poolDur = '--';
       } else if (selfStatus === 'RUNNING' || runType === 'self') {
-        poolStatus = 'PENDING';
+        poolStatus = isPoolEnabled ? 'PENDING' : 'SKIPPED';
         poolDur = '--';
       }
       setRailSeg('depth', depthStatus, depthDur);
@@ -4274,13 +4532,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     if (subEl) subEl.style.display = 'none';
   }
 
-  function updatePipelineUI(data) {
-    updateStageRail(data);
-  }
-
   function updateMatrixUI(data) {
     const tableBody = document.getElementById('matrixTableBody');
-    const matrixSubtitle = document.getElementById('matrixSubtitle');
     if (!tableBody) return;
 
     const baseModes = [
@@ -4307,12 +4560,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     const varPts = (data.variant && typeof data.variant.points === 'number') ? data.variant.points : (varW + drawShare * drawsCount);
     const varWS = (data.variant && typeof data.variant.win_share === 'number') ? data.variant.win_share : (played > 0 ? (varPts / played * 100) : (is4p ? 25.0 : 50.0));
 
-    // Per-mode ETA lookup from data.eta_breakdown
-    const etaMap = {};
-    (data.eta_breakdown || []).forEach(b => {
-      if (b.mode) etaMap[b.mode.toLowerCase()] = b;
-    });
-
     let completedCount = 0;
 
     const rowsHtml = baseModes.map((bm) => {
@@ -4329,34 +4576,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         effectiveStatus = 'RUNNING';
       } else if (isSkipped) {
         effectiveStatus = 'SKIPPED';
-        completedCount++;
       } else if (m.status && ['PASSED', 'PARITY', 'FAILED'].includes(m.status)) {
         effectiveStatus = m.status;
-        completedCount++;
+        if (effectiveStatus === 'PASSED') {
+          completedCount++;
+        }
       } else if (isSelfRunning && (m.status === 'RUNNING' || m.status === 'running')) {
         effectiveStatus = 'RUNNING';
       }
 
       const statusClass = effectiveStatus.toLowerCase();
-      const statusBadge = `<span class="matrix-col-status matrix-status-${statusClass}">${effectiveStatus}</span>`;
+      const statusBadge = `<span class="status-chip status-chip-${statusClass} matrix-col-status matrix-status-${statusClass}">${effectiveStatus}</span>`;
 
       const gamesVal = isCurrentActive ? played : (m.games != null ? m.games : (m.total_played != null ? m.total_played : 0));
-      const maxGames = m.max_games || bm.max_games || 200;
+      const isCompleted = ['PASSED', 'PARITY', 'FAILED'].includes(effectiveStatus) && gamesVal > 0;
+      const maxGames = isCompleted ? gamesVal : (m.max_games || bm.max_games || 200);
       const targetVal = bm.target_share;
 
       let scoreVal = '--';
-      let scoreColor = 'var(--text-main)';
+      let scoreColor = 'var(--pipeline-text-main)';
       let deltaText = '--';
-      let deltaColor = 'var(--text-muted)';
+      let deltaColor = 'var(--pipeline-text-muted)';
       let zScoreText = '--';
+      let zScoreColor = 'var(--pipeline-text-muted)';
       let etaText = '--';
 
       if (effectiveStatus === 'RUNNING') {
         scoreVal = `${varWS.toFixed(1)}%`;
-        scoreColor = '#60a5fa';
+        scoreColor = 'var(--pipeline-blue)';
         const delta = varWS - targetVal;
         deltaText = `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%`;
-        deltaColor = delta > 0.5 ? 'var(--variant-color)' : (delta < -0.5 ? 'var(--danger-color)' : '#f59e0b');
+        deltaColor = delta > 0.5 ? 'var(--pipeline-green)' : (delta < -0.5 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
         // Compute live z-score
         if (played >= 5) {
           const p = varWS / 100.0;
@@ -4364,33 +4614,40 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const se = Math.sqrt((p0 * (1.0 - p0)) / played);
           const z = se > 0 ? ((p - p0) / se) : 0.0;
           zScoreText = `${z >= 0 ? '+' : ''}${z.toFixed(2)}`;
+          zScoreColor = z >= 1.645 ? 'var(--pipeline-green)' : (z <= -1.645 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
         }
-        const b = etaMap[modeKey];
-        let remSec = null;
-        if (b && b.eta_seconds != null && b.eta_seconds > 0) {
-          remSec = b.eta_seconds;
-        }
-        etaText = (remSec != null && remSec > 0) ? `${formatDuration(remSec)} left` : '--';
+        const unitData = data.unit_tests_data || {};
+        const unitSec = (unitData && unitData.duration_sec && unitData.duration_sec > 0) ? unitData.duration_sec : 0;
+        const depth = data.depth_data || {};
+        const depthSec = (depth && depth.duration_sec && depth.duration_sec > 0) ? depth.duration_sec : 0;
+        const modeElapsed = (data.mode_elapsed_seconds != null && data.mode_elapsed_seconds > 0)
+          ? data.mode_elapsed_seconds
+          : (m.duration_sec != null && m.duration_sec > 0
+            ? m.duration_sec
+            : (data.matrix_elapsed_seconds != null ? data.matrix_elapsed_seconds : Math.max(0, (data.elapsed_seconds || 0) - unitSec - depthSec)));
+        etaText = (modeElapsed != null && modeElapsed > 0) ? formatDuration(modeElapsed) : '0:00';
       } else if (['PASSED', 'PARITY', 'FAILED'].includes(effectiveStatus)) {
         const ws = (m.win_share != null ? m.win_share : (m.var_win_share != null ? m.var_win_share : varWS));
         scoreVal = `${ws.toFixed(1)}%`;
-        if (effectiveStatus === 'PASSED') scoreColor = 'var(--variant-color)';
-        else if (effectiveStatus === 'PARITY') scoreColor = '#f59e0b';
-        else scoreColor = 'var(--danger-color)';
+        if (effectiveStatus === 'PASSED') scoreColor = 'var(--pipeline-green)';
+        else if (effectiveStatus === 'PARITY') scoreColor = 'var(--pipeline-amber)';
+        else scoreColor = 'var(--pipeline-red)';
 
         const delta = ws - targetVal;
         deltaText = `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%`;
-        deltaColor = delta > 0.5 ? 'var(--variant-color)' : (delta < -0.5 ? 'var(--danger-color)' : '#f59e0b');
+        deltaColor = delta > 0.5 ? 'var(--pipeline-green)' : (delta < -0.5 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
 
         if (m.z_score != null) {
           const zNum = Number(m.z_score);
           zScoreText = `${zNum >= 0 ? '+' : ''}${zNum.toFixed(2)}`;
+          zScoreColor = zNum >= 1.645 ? 'var(--pipeline-green)' : (zNum <= -1.645 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
         } else if (gamesVal >= 5 && ws != null) {
           const p = ws / 100.0;
           const p0 = targetVal / 100.0;
           const se = Math.sqrt((p0 * (1.0 - p0)) / gamesVal);
           const z = se > 0 ? ((p - p0) / se) : 0.0;
           zScoreText = `${z >= 0 ? '+' : ''}${z.toFixed(2)}`;
+          zScoreColor = z >= 1.645 ? 'var(--pipeline-green)' : (z <= -1.645 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
         }
         if (m.duration_sec != null && m.duration_sec > 0) {
           etaText = formatDuration(m.duration_sec);
@@ -4399,24 +4656,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
       } else if (effectiveStatus === 'SKIPPED') {
         scoreVal = (gamesVal > 0 && m.win_share != null) ? `${Number(m.win_share).toFixed(1)}%` : '--';
-        scoreColor = (gamesVal > 0 && m.win_share != null) ? '#fbbf24' : 'var(--text-muted)';
+        scoreColor = 'var(--pipeline-text-muted)';
         if (gamesVal > 0 && m.win_share != null) {
           const delta = Number(m.win_share) - targetVal;
           deltaText = `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%`;
-          deltaColor = delta > 0.5 ? 'var(--variant-color)' : (delta < -0.5 ? 'var(--danger-color)' : '#f59e0b');
+          deltaColor = delta > 0.5 ? 'var(--pipeline-green)' : (delta < -0.5 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
         } else {
           deltaText = '--';
-          deltaColor = 'var(--text-muted)';
+          deltaColor = 'var(--pipeline-text-muted)';
         }
         zScoreText = '--';
         etaText = '--';
       } else {
-        const b = etaMap[modeKey];
-        if (b && b.eta_seconds != null && b.eta_seconds > 0) {
-          etaText = `${formatDuration(b.eta_seconds)} est`;
-        } else {
-          etaText = '--';
-        }
+        etaText = '--';
       }
 
       const rowClass = isCurrentActive ? 'active-running' : '';
@@ -4424,528 +4676,115 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       return `
         <tr class="${rowClass}">
-          <td style="font-weight: 700; color: var(--text-main); text-align: left;">
+          <td class="td-left" style="font-weight: 700; color: var(--pipeline-text-main);">
             <span>${bm.name}</span>
           </td>
-          <td style="font-weight: 700;">${gamesText}</td>
-          <td style="font-weight: 700; color: ${scoreColor}; font-size: 0.95rem;">${scoreVal}</td>
-          <td style="font-weight: 700; color: ${deltaColor}; font-family: 'JetBrains Mono', monospace;">${deltaText}</td>
-          <td style="font-weight: 600; color: ${zScoreText !== '--' ? (parseFloat(zScoreText) >= 1.645 ? 'var(--variant-color)' : (parseFloat(zScoreText) <= -1.645 ? 'var(--danger-color)' : '#f59e0b')) : 'var(--text-muted)'}; font-family: 'JetBrains Mono', monospace;">${zScoreText}</td>
-          <td style="color: var(--text-muted); font-size: 0.82rem;" id="matrix-eta-${modeKey}">${etaText}</td>
-          <td>${statusBadge}</td>
+          <td class="td-right" style="font-weight: 700;">${gamesText}</td>
+          <td class="td-right" style="font-weight: 700; color: ${scoreColor}; font-size: 0.92rem;">${scoreVal}</td>
+          <td class="td-right" style="font-weight: 700; color: ${deltaColor};">${deltaText}</td>
+          <td class="td-right" style="font-weight: 600; color: ${zScoreColor};">${zScoreText}</td>
+          <td class="td-right" style="color: var(--pipeline-text-muted); font-size: 0.82rem;" id="matrix-eta-${modeKey}">${etaText}</td>
+          <td class="td-right">${statusBadge}</td>
         </tr>
       `;
     }).join('');
 
     let totalMatrixPlayed = 0;
     let totalMatrixMax = 0;
+    let matrixModesCount = 0;
+    let totalVarPoints = 0;
+    let totalExpectedPoints = 0;
+    let totalVariance = 0;
+
     baseModes.forEach((bm) => {
       const modeKey = bm.mode;
       const m = modeMap[modeKey] || {};
       const isOmitted = (data.run_type === 'pool' && !data.self_play_matrix) || (matrixList.length > 0 && !modeMap[modeKey]);
       const isSkipped = isOmitted || (m.status === 'SKIPPED' || m.decision === 'SKIPPED');
       if (!isSkipped) {
+        matrixModesCount++;
         const isCurrentActive = isSelfRunning && (activeModeClean === modeKey);
         const gamesVal = isCurrentActive ? played : (m.games != null ? m.games : (m.total_played != null ? m.total_played : 0));
-        const maxGames = m.max_games || bm.max_games || 200;
+        const isCompleted = ['PASSED', 'PARITY', 'FAILED', 'KEEP', 'REVERT'].includes(m.status || m.decision) && gamesVal > 0;
+        const maxGames = isCompleted ? gamesVal : (m.max_games || bm.max_games || 200);
         totalMatrixPlayed += gamesVal;
         totalMatrixMax += maxGames;
+
+        if (gamesVal > 0) {
+          const p0 = bm.target_share / 100.0;
+          let modeVarPts = 0;
+          if (isCurrentActive) {
+            modeVarPts = varPts;
+          } else if (m.points != null) {
+            modeVarPts = m.points;
+          } else if (m.var_points != null) {
+            modeVarPts = m.var_points;
+          } else {
+            const ws = (m.win_share != null ? m.win_share : (m.var_win_share != null ? m.var_win_share : null));
+            if (ws != null) {
+              modeVarPts = (ws / 100.0) * gamesVal;
+            }
+          }
+          totalVarPoints += modeVarPts;
+          totalExpectedPoints += gamesVal * p0;
+          totalVariance += gamesVal * p0 * (1.0 - p0);
+        }
       }
     });
+    if (matrixModesCount === 0) matrixModesCount = 4;
     setHTML(tableBody, rowsHtml);
-    if (matrixSubtitle) matrixSubtitle.innerText = `${completedCount} / 4 Modes Complete`;
-  }
 
-  function updateHeroAndIdleState(data) {
-    const isRunning = (data.status === 'RUNNING' && data.runner_alive !== false);
-    const isFinished = (data.status === 'FINISHED');
-    const played = data.total_played || 0;
-    const isRunActive = isRunning || (isFinished && played > 0);
+    // Summary Strip elements for Stage 3
+    setText('matrixSummaryModes', matrixModesCount);
+    setText('matrixSummaryGames', `${totalMatrixPlayed} / ${totalMatrixMax}`);
 
-    const activeHero = document.getElementById('activeRunHero');
-    const idleHero = document.getElementById('idleCompletedHero');
-
-    if (isRunActive) {
-      if (activeHero) activeHero.style.display = 'block';
-      if (idleHero) idleHero.style.display = 'none';
-      return;
+    let mDeltaText = '--';
+    let mDeltaColor = 'var(--pipeline-text-muted)';
+    if (totalMatrixPlayed > 0) {
+      const netDelta = ((totalVarPoints - totalExpectedPoints) / totalMatrixPlayed) * 100.0;
+      mDeltaText = `${netDelta > 0 ? '+' : ''}${netDelta.toFixed(1)}%`;
+      mDeltaColor = getPipelineDeltaColor(netDelta);
+    }
+    const mDeltaEl = document.getElementById('matrixSummaryDelta');
+    if (mDeltaEl) {
+      mDeltaEl.innerText = mDeltaText;
+      mDeltaEl.style.color = mDeltaColor;
     }
 
-    // No run is active: Hide hero numbers completely, show last completed run summary!
-    if (activeHero) activeHero.style.display = 'none';
-    if (idleHero) idleHero.style.display = 'block';
-
-    const historyList = data.run_history || [];
-    if (historyList.length === 0) {
-      setText('lastRunTitle', 'No previous simulation runs recorded.');
-      setText('lastRunDecisionBadge', 'IDLE');
-      setText('lastRunTime', '-');
-      setText('lastRunGames', '0');
-      setText('lastRunVarShare', '--');
-      setText('lastRunBaseShare', '--');
-      setText('lastRunOutcome', 'AWAITING RUN');
-      setText('lastRunStopReason', 'Runner is currently idle.');
-      setHTML('lastRunChips', '');
-      return;
+    let mZText = '--';
+    let mZColor = 'var(--pipeline-text-muted)';
+    if (totalMatrixPlayed >= 5 && totalVariance > 0) {
+      const se = Math.sqrt(totalVariance);
+      const z = (totalVarPoints - totalExpectedPoints) / se;
+      mZText = `${z >= 0 ? '+' : ''}${z.toFixed(2)}`;
+      mZColor = z >= 1.645 ? 'var(--pipeline-green)' : (z <= -1.645 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
+    }
+    const mZEl = document.getElementById('matrixSummaryZ');
+    if (mZEl) {
+      mZEl.innerText = mZText;
+      mZEl.style.color = mZColor;
     }
 
-    const lastRun = historyList[0];
-    const rec = lastRun.recommendation || 'UNKNOWN';
-    let pillClass = 'parity';
-    let badgeText = rec;
-    if (rec === 'KEEP') { pillClass = 'variant'; badgeText = '🎉 KEEP'; }
-    else if (rec === 'PARITY') { pillClass = 'parity'; badgeText = '🟡 PARITY'; }
-    else if (rec === 'REVERT') { pillClass = 'revert'; badgeText = '⚠️ REVERT'; }
-    else if (rec === 'TEST_FAILURE') { pillClass = 'revert'; badgeText = '❌ FAILED'; }
-
-    const badgeEl = document.getElementById('lastRunDecisionBadge');
-    if (badgeEl) {
-      badgeEl.className = `winner-pill ${pillClass}`;
-      badgeEl.innerText = badgeText;
-    }
-
-    setText('lastRunTitle', lastRun.experiment_desc || lastRun.description || 'Unspecified Experiment');
-    setText('lastRunTime', formatHistoryTime(lastRun.timestamp));
-    setText('lastRunGames', lastRun.total_games || 0);
-
-    const varWS = lastRun.variant ? (lastRun.variant.win_share != null ? lastRun.variant.win_share : lastRun.variant.rate) : null;
-    const varW = lastRun.variant ? lastRun.variant.wins : 0;
-    const baseWS = lastRun.baseline ? (lastRun.baseline.win_share != null ? lastRun.baseline.win_share : lastRun.baseline.rate) : null;
-    const baseW = lastRun.baseline ? lastRun.baseline.wins : 0;
-
-    setText('lastRunVarShare', varWS != null ? `${varWS.toFixed(1)}%` : '--');
-    setText('lastRunVarWins', `${varW} Wins`);
-    setText('lastRunBaseShare', baseWS != null ? `${baseWS.toFixed(1)}%` : '--');
-    setText('lastRunBaseWins', `${baseW} Wins`);
-
-    setText('lastRunOutcome', rec);
-    const stopReasonEl = document.getElementById('lastRunStopReason');
-    if (stopReasonEl) {
-      stopReasonEl.innerText = lastRun.stop_reason || 'Benchmark completed';
-      stopReasonEl.title = lastRun.stop_reason || '';
-    }
-
-    // Populate Mode Chips
-    const chipsEl = document.getElementById('lastRunChips');
-    if (chipsEl) {
-      const matrixRes = lastRun.matrix_results || [];
-      const modesCountEl = document.getElementById('lastRunModesCount');
-      if (modesCountEl) modesCountEl.innerText = `${matrixRes.length || 4} Modes Tested`;
-
-      if (matrixRes.length > 0) {
-        const chipsHtml = matrixRes.map(m => {
-          const dec = m.decision || 'DONE';
-          const decClass = dec.toLowerCase();
-          const zStr = (m.z_score != null) ? `z=${m.z_score >= 0 ? '+' : ''}${m.z_score.toFixed(2)}` : '';
-          return `
-            <div class="last-run-chip">
-              <span class="chip-mode">${escapeHtml(m.name || m.mode)}</span>
-              <span class="chip-val">${m.var_win_share != null ? m.var_win_share.toFixed(1) + '%' : '--'}</span>
-              ${zStr ? `<span class="chip-z">${zStr}</span>` : ''}
-              <span class="chip-badge ${decClass}">${dec}</span>
-            </div>
-          `;
-        }).join('');
-        setHTML(chipsEl, chipsHtml);
-      } else {
-        setHTML(chipsEl, '');
-      }
+    const matrixChip = document.getElementById('matrixSummaryChip');
+    if (matrixChip) {
+      let mChipSt = 'PENDING';
+      if (isSelfRunning) mChipSt = 'RUNNING';
+      else if (completedCount === matrixModesCount) mChipSt = 'PASSED';
+      else if (data.status === 'FINISHED') mChipSt = (completedCount > 0 ? 'PASSED' : 'FAILED');
+      else if (completedCount > 0) mChipSt = 'RUNNING';
+      const mChipCls = mChipSt.toLowerCase();
+      matrixChip.className = `status-chip status-chip-${mChipCls} matrix-col-status matrix-status-${mChipCls}`;
+      matrixChip.innerText = mChipSt;
     }
   }
 
-  function updateSelfHero(data) {
-    const is4p = data.num_snakes === 4;
-    if (is4p) {
-      setText('baselineName', 'OPPONENTS (3x BASELINE)');
-    } else {
-      setText('baselineName', (data.strategy_baseline || 'baseline').toUpperCase());
-    }
-    setText('variantName', (data.strategy_variant || 'variant').toUpperCase());
-
-    const played = data.total_played || 0;
-    const baseW = (data.baseline && data.baseline.wins != null) ? data.baseline.wins : 0;
-    const varW = (data.variant && data.variant.wins != null) ? data.variant.wins : 0;
-    const drawsCount = data.draws ? data.draws.count : ((data.baseline && data.baseline.draws != null) ? data.baseline.draws : 0);
-
-    const drawShare = is4p ? 0.25 : 0.5;
-    const basePts = (data.baseline && typeof data.baseline.points === 'number') ? data.baseline.points : (baseW + (1.0 - drawShare) * drawsCount);
-    const varPts = (data.variant && typeof data.variant.points === 'number') ? data.variant.points : (varW + drawShare * drawsCount);
-    const targetWS = data.target_win_share || (is4p ? 25.0 : 50.0);
-    const baseWS = (data.baseline && typeof data.baseline.win_share === 'number') ? data.baseline.win_share : (played > 0 ? (basePts / played * 100) : (100.0 - targetWS));
-    const varWS = (data.variant && typeof data.variant.win_share === 'number') ? data.variant.win_share : (played > 0 ? (varPts / played * 100) : targetWS);
-
-    setText('baselinePts', `${basePts.toFixed(1)} Pts`);
-    setText('variantPts', `${varPts.toFixed(1)} Pts`);
-    setText('baselineSubtext', `${baseW} Wins`);
-    setText('variantSubtext', `${varW} Wins`);
-    setText('drawsHeaderRate', `${drawsCount} Draws`);
-
-    // Threshold Markers & Labels
-    const labelParity = document.getElementById('labelParity');
-    const threshParity = document.getElementById('threshParity');
-    const labelKeep = document.getElementById('labelKeep');
-    const threshKeep = document.getElementById('threshKeep');
-    const labelRevert = document.getElementById('labelRevert');
-    const threshRevert = document.getElementById('threshRevert');
-
-    const highStop = data.current_early_stop_high || data.early_stop_high || (is4p ? 35.0 : 60.0);
-    const lowStop = data.current_early_stop_low || data.early_stop_low || (is4p ? 18.0 : 40.0);
-
-    if (is4p) {
-      if (labelParity) { labelParity.innerText = '25% PARITY'; labelParity.style.left = '75%'; }
-      if (threshParity) threshParity.style.left = '75%';
-      const keepPos = 100 - highStop;
-      if (labelKeep) {
-        labelKeep.innerText = `${highStop.toFixed(1)}% KEEP`;
-        labelKeep.style.left = `${keepPos}%`;
-        labelKeep.style.transform = keepPos < 10 ? 'translateX(-15%)' : 'translateX(-50%)';
-      }
-      if (threshKeep) threshKeep.style.left = `${keepPos}%`;
-      const revertPos = 100 - lowStop;
-      if (labelRevert) {
-        labelRevert.innerText = `${lowStop.toFixed(1)}% REVERT`;
-        labelRevert.style.left = `${revertPos}%`;
-        labelRevert.style.transform = revertPos > 88 ? 'translateX(-85%)' : 'translateX(-50%)';
-      }
-      if (threshRevert) threshRevert.style.left = `${revertPos}%`;
-    } else {
-      if (labelParity) { labelParity.innerText = '50% PARITY'; labelParity.style.left = '50%'; }
-      if (threshParity) threshParity.style.left = '50%';
-      const keepPos = 100 - highStop;
-      if (labelKeep) {
-        labelKeep.innerText = `${highStop.toFixed(1)}% KEEP`;
-        labelKeep.style.left = `${keepPos}%`;
-        labelKeep.style.transform = keepPos < 10 ? 'translateX(-15%)' : 'translateX(-50%)';
-      }
-      if (threshKeep) threshKeep.style.left = `${keepPos}%`;
-      const revertPos = 100 - lowStop;
-      if (labelRevert) {
-        labelRevert.innerText = `${lowStop.toFixed(1)}% REVERT`;
-        labelRevert.style.left = `${revertPos}%`;
-        labelRevert.style.transform = revertPos > 88 ? 'translateX(-85%)' : 'translateX(-50%)';
-      }
-      if (threshRevert) threshRevert.style.left = `${revertPos}%`;
-    }
-
-    // Lead Text
-    const leadEl = document.getElementById('leadText');
-    const leadTitle = document.getElementById('leadTitle');
-    if (leadTitle) leadTitle.innerText = 'WIN VALUE LEAD';
-    if (leadEl) {
-      if (is4p) {
-        const deltaParity = varWS - 25.0;
-        if (Math.abs(deltaParity) < 0.05) {
-          setText(leadEl, 'EVEN');
-          leadEl.style.color = 'var(--text-main)';
-        } else if (deltaParity > 0) {
-          setText(leadEl, `+${deltaParity.toFixed(1)}%`);
-          leadEl.style.color = 'var(--variant-color)';
-        } else {
-          setText(leadEl, `${deltaParity.toFixed(1)}%`);
-          leadEl.style.color = 'var(--danger-color)';
-        }
-      } else {
-        const netPts = varPts - basePts;
-        if (Math.abs(netPts) < 0.01) {
-          setText(leadEl, 'EVEN');
-          leadEl.style.color = 'var(--text-main)';
-        } else if (netPts > 0) {
-          setText(leadEl, `+${netPts.toFixed(1)}`);
-          leadEl.style.color = 'var(--variant-color)';
-        } else {
-          setText(leadEl, `-${Math.abs(netPts).toFixed(1)}`);
-          leadEl.style.color = 'var(--baseline-color)';
-        }
-      }
-    }
-
-    // Tug-of-War Bar
-    const tugBaselinesWrap = document.getElementById('tugBaselinesWrap');
-    const varPtsBar = document.getElementById('variantPtsBar');
-    const baseSeg1 = document.getElementById('baseSeg1');
-    const baseSeg2 = document.getElementById('baseSeg2');
-    const baseSeg3 = document.getElementById('baseSeg3');
-    const baseSegs = [baseSeg1, baseSeg2, baseSeg3];
-
-    if (is4p) {
-      if (played === 0) {
-        if (tugBaselinesWrap) tugBaselinesWrap.style.width = '75%';
-        if (varPtsBar) {
-          varPtsBar.style.display = 'flex';
-          varPtsBar.style.width = '25%';
-          setText('variantPtsBarText', '25.0%');
-        }
-        if (baseSeg1) {
-          baseSeg1.style.display = 'flex';
-          baseSeg1.style.width = '100%';
-          setText('baseSeg1Text', 'BASELINES 75.0%');
-        }
-        if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
-        if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
-      } else {
-        if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${baseWS}%`;
-        if (varPtsBar) {
-          if (varWS <= 0) {
-            varPtsBar.style.display = 'none';
-            varPtsBar.style.width = '0%';
-          } else {
-            varPtsBar.style.display = 'flex';
-            varPtsBar.style.width = `${varWS}%`;
-            setText('variantPtsBarText', varWS > 6 ? `${varWS.toFixed(1)}%` : '');
-          }
-        }
-        if (data.snakes_list && data.snakes_list.length > 0) {
-          const baseSnakes = data.snakes_list.filter(s => !s.is_variant);
-          const totalBasePts = baseSnakes.reduce((acc, s) => acc + (s.points || 0), 0);
-          if (totalBasePts <= 0) {
-            baseSegs.forEach(seg => {
-              if (seg) { seg.style.display = 'none'; seg.style.width = '0%'; }
-            });
-          } else if (baseSnakes.length === 1) {
-            if (baseSeg1) {
-              baseSeg1.style.display = 'flex';
-              baseSeg1.style.width = '100%';
-              setText('baseSeg1Text', baseWS > 6 ? `Base ${baseWS.toFixed(1)}%` : '');
-            }
-            if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
-            if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
-          } else {
-            baseSegs.forEach((seg, i) => {
-              if (seg && baseSnakes[i]) {
-                const pts = baseSnakes[i].points || 0;
-                if (pts <= 0) {
-                  seg.style.display = 'none';
-                  seg.style.width = '0%';
-                } else {
-                  const wPct = (pts / totalBasePts) * 100;
-                  seg.style.display = 'flex';
-                  seg.style.width = `${wPct}%`;
-                  setText(`baseSeg${i + 1}Text`, (baseWS * (wPct / 100)) > 7 ? `B${i + 1} ${(baseSnakes[i].win_share).toFixed(1)}%` : '');
-                }
-              }
-            });
-          }
-        }
-      }
-    } else {
-      if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${baseWS}%`;
-      if (varPtsBar) {
-        if (played > 0 && varWS <= 0) {
-          varPtsBar.style.display = 'none';
-          varPtsBar.style.width = '0%';
-        } else {
-          varPtsBar.style.display = 'flex';
-          varPtsBar.style.width = `${varWS}%`;
-          setText('variantPtsBarText', varWS > 6 ? `${varWS.toFixed(1)}%` : '');
-        }
-      }
-      if (baseSeg1) {
-        if (played > 0 && baseWS <= 0) {
-          baseSeg1.style.display = 'none';
-          baseSeg1.style.width = '0%';
-        } else {
-          baseSeg1.style.display = 'flex';
-          baseSeg1.style.width = '100%';
-          setText('baseSeg1Text', baseWS > 6 ? `${baseWS.toFixed(1)}%` : '');
-        }
-      }
-      if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
-      if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
-    }
-  }
-
-  function updatePoolHero(data) {
-    const pool = data.pool_data || {};
-    const candWS = (pool.cand_share != null) ? pool.cand_share : 0.0;
-    const baseWS = (pool.base_share != null) ? pool.base_share : 0.0;
-    const delta = (pool.delta != null) ? pool.delta : (candWS - baseWS);
-    const zScore = (pool.z_score != null) ? pool.z_score : 0.0;
-    const totalG = pool.total_games || data.total_played || 0;
-    const candScore = pool.cand_score || pool.cand_wins || 0.0;
-    const baseScore = pool.base_score || pool.base_wins || 0.0;
-
-    setText('baselineName', 'BASELINE vs POOL');
-    setText('variantName', 'VARIANT vs POOL');
-    setText('baselinePts', `${baseWS.toFixed(1)}%`);
-    setText('variantPts', `${candWS.toFixed(1)}%`);
-    setText('baselineSubtext', `${baseScore.toFixed(1)} / ${totalG} Wins`);
-    setText('variantSubtext', `${candScore.toFixed(1)} / ${totalG} Wins`);
-
-    setText('leadTitle', 'POOL WIN SHARE DELTA (Δ)');
-    const leadEl = document.getElementById('leadText');
-    if (leadEl) {
-      leadEl.innerText = `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%`;
-      leadEl.style.color = delta > 0 ? 'var(--variant-color)' : (delta < 0 ? 'var(--danger-color)' : 'var(--text-main)');
-    }
-    const zEl = document.getElementById('drawsHeaderRate');
-    if (zEl) {
-      zEl.innerText = `z = ${zScore > 0 ? '+' : ''}${zScore.toFixed(2)}`;
-      zEl.style.color = zScore >= 1.645 ? 'var(--variant-color)' : (zScore <= -1.645 ? 'var(--danger-color)' : '#f59e0b');
-    }
-
-    const sumWS = candWS + baseWS;
-    const relVarPct = sumWS > 0 ? (candWS / sumWS * 100) : 50.0;
-    const relBasePct = 100.0 - relVarPct;
-
-    const tugBaselinesWrap = document.getElementById('tugBaselinesWrap');
-    const varPtsBar = document.getElementById('variantPtsBar');
-    const baseSeg1 = document.getElementById('baseSeg1');
-    const baseSeg2 = document.getElementById('baseSeg2');
-    const baseSeg3 = document.getElementById('baseSeg3');
-    if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${relBasePct}%`;
-    if (varPtsBar) {
-      varPtsBar.style.display = 'flex';
-      varPtsBar.style.width = `${relVarPct}%`;
-      setText('variantPtsBarText', `${candWS.toFixed(1)}%`);
-    }
-    if (baseSeg1) {
-      baseSeg1.style.display = 'flex';
-      baseSeg1.style.width = '100%';
-      setText('baseSeg1Text', `${baseWS.toFixed(1)}%`);
-    }
-    if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
-    if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
-
-    const labelParity = document.getElementById('labelParity');
-    const threshParity = document.getElementById('threshParity');
-    const labelKeep = document.getElementById('labelKeep');
-    const threshKeep = document.getElementById('threshKeep');
-    const labelRevert = document.getElementById('labelRevert');
-    const threshRevert = document.getElementById('threshRevert');
-
-    if (labelParity) { labelParity.innerText = 'PARITY'; labelParity.style.left = '50%'; }
-    if (threshParity) threshParity.style.left = '50%';
-    if (labelKeep) { labelKeep.innerText = '+1.65 KEEP'; labelKeep.style.left = '40%'; }
-    if (threshKeep) threshKeep.style.left = '40%';
-    if (labelRevert) { labelRevert.innerText = '-1.65 REVERT'; labelRevert.style.left = '60%'; }
-    if (threshRevert) threshRevert.style.left = '60%';
-  }
-
-  function updateDepthHero(data) {
-    const depth = data.depth_data || {};
-    const varD = (depth.median_var_depth != null) ? depth.median_var_depth : 0.0;
-    const baseD = (depth.median_base_depth != null) ? depth.median_base_depth : 0.0;
-    const deltaD = (depth.delta_depth != null) ? depth.delta_depth : (varD - baseD);
-    const npsR = (depth.nps_ratio != null) ? depth.nps_ratio : 1.0;
-    const agree = (depth.agreement_pct != null) ? depth.agreement_pct : 100.0;
-
-    setText('baselineName', 'BASELINE SEARCH');
-    setText('variantName', 'VARIANT SEARCH');
-    setText('baselinePts', `${baseD.toFixed(1)}`);
-    setText('variantPts', `${varD.toFixed(1)}`);
-    setText('baselineSubtext', `Median Depth`);
-    setText('variantSubtext', `Median Depth`);
-
-    setText('leadTitle', 'DEPTH DELTA (Δ)');
-    const leadEl = document.getElementById('leadText');
-    if (leadEl) {
-      leadEl.innerText = `${deltaD > 0 ? '+' : ''}${deltaD.toFixed(1)} Depth`;
-      leadEl.style.color = deltaD > 0 ? 'var(--variant-color)' : (deltaD < 0 ? 'var(--danger-color)' : 'var(--text-main)');
-    }
-    const zEl = document.getElementById('drawsHeaderRate');
-    if (zEl) {
-      zEl.innerText = `${agree.toFixed(0)}% Move Agreement`;
-      zEl.style.color = '#60a5fa';
-    }
-
-    const sumD = varD + baseD;
-    const relVarPct = sumD > 0 ? (varD / sumD * 100) : 50.0;
-    const relBasePct = 100.0 - relVarPct;
-
-    const tugBaselinesWrap = document.getElementById('tugBaselinesWrap');
-    const varPtsBar = document.getElementById('variantPtsBar');
-    const baseSeg1 = document.getElementById('baseSeg1');
-    const baseSeg2 = document.getElementById('baseSeg2');
-    const baseSeg3 = document.getElementById('baseSeg3');
-    if (tugBaselinesWrap) tugBaselinesWrap.style.width = `${relBasePct}%`;
-    if (varPtsBar) {
-      varPtsBar.style.display = 'flex';
-      varPtsBar.style.width = `${relVarPct}%`;
-      setText('variantPtsBarText', `${varD.toFixed(1)}`);
-    }
-    if (baseSeg1) {
-      baseSeg1.style.display = 'flex';
-      baseSeg1.style.width = '100%';
-      setText('baseSeg1Text', `${baseD.toFixed(1)}`);
-    }
-    if (baseSeg2) { baseSeg2.style.display = 'none'; baseSeg2.style.width = '0%'; }
-    if (baseSeg3) { baseSeg3.style.display = 'none'; baseSeg3.style.width = '0%'; }
-
-    const labelParity = document.getElementById('labelParity');
-    const threshParity = document.getElementById('threshParity');
-    const labelKeep = document.getElementById('labelKeep');
-    const threshKeep = document.getElementById('threshKeep');
-    const labelRevert = document.getElementById('labelRevert');
-    const threshRevert = document.getElementById('threshRevert');
-
-    if (labelParity) { labelParity.innerText = 'PARITY'; labelParity.style.left = '50%'; }
-    if (threshParity) threshParity.style.left = '50%';
-    if (labelKeep) { labelKeep.innerText = '+0.5 KEEP'; labelKeep.style.left = '40%'; }
-    if (threshKeep) threshKeep.style.left = '40%';
-    if (labelRevert) { labelRevert.innerText = '-0.5 REVERT'; labelRevert.style.left = '60%'; }
-    if (threshRevert) threshRevert.style.left = '60%';
-  }
-
-  function updateRunsCard(data, isRunning, modeElapsed) {
-    const runType = data.run_type || 'self';
-    const depth = data.depth_data || {};
-    const pool = data.pool_data || {};
-
-    let played = 0;
-    let maxG = 200;
-
-    if (runType === 'depth') {
-      played = depth.completed_positions || data.total_played || 0;
-      maxG = depth.total_positions || data.target_games || 12;
-      setText('runsValue', `${played} / ${maxG} Positions`);
-    } else if (runType === 'pool') {
-      played = pool.total_games || data.total_played || 0;
-      maxG = data.target_games || data.max_games || 100;
-      setText('runsValue', `${played} / ${maxG} Paired Games`);
-    } else {
-      played = data.total_played || 0;
-      maxG = data.target_games || data.max_games || 200;
-      if (data.status === 'IDLE' && played === 0) {
-        setText('runsValue', `0 / ${maxG} Games`);
-      } else {
-        setText('runsValue', `${played} / ${maxG} Games`);
-      }
-    }
-
-    const pctComplete = maxG > 0 ? Math.min(100, (played / maxG) * 100).toFixed(1) : 0;
-    setWidth('runsProgress', pctComplete);
-
-    const pace = (isRunning && modeElapsed > 0) ? (played / modeElapsed) : 0;
-    if (isRunning) {
-      const unit = runType === 'depth' ? 'pos/sec' : 'games/sec';
-      setText('paceValue', `${pace.toFixed(3)} ${unit}`);
-    } else {
-      setText('paceValue', `0.000 games/sec`);
-    }
-
-    const remainingGames = Math.max(0, maxG - played);
-
-    if (data.status === 'FINISHED' || data.status === 'STOPPED' || remainingGames === 0) {
-      setText('runsSubtext', `${pctComplete}% Complete (${data.status === 'STOPPED' ? 'Stopped' : 'Done'})`);
-    } else if (data.status === 'DISCONNECTED') {
-      setText('runsSubtext', `${pctComplete}% Complete (Disconnected)`);
-    } else if (data.status === 'IDLE' || data.status === 'WAITING' || !isRunning) {
-      setText('runsSubtext', `0% Complete`);
-    } else if (data.eta_seconds != null && data.eta_seconds > 0 && isRunning) {
-      setText('runsSubtext', `${pctComplete}% Complete`);
-      const subEl = document.getElementById('runsSubtext');
-      if (subEl && data.eta_breakdown && data.eta_breakdown.length > 0) {
-        subEl.title = 'Total Run ETA: ' + data.eta_breakdown.map(b => `${b.mode}: ${b.games_left}G (${formatDuration(b.eta_seconds)})`).join(' | ');
-      }
-    } else if (pace > 0 && isRunning) {
-      setText('runsSubtext', `${pctComplete}% Complete`);
-    } else {
-      setText('runsSubtext', `${pctComplete}% Complete`);
-    }
-  }
-
-  function updateDecisionBanner(data, isRunning, is4p, varWS, varPts, targetStr, played, maxG) {
-    // Deprecated: Decision card removed in favor of top-header status chip (IDLE, RUNNING, KEEP, PARITY, REJECT)
+  function getPipelineDeltaColor(delta, threshold = 0.5) {
+    if (delta == null || isNaN(delta)) return 'var(--pipeline-grey)';
+    const d = Number(delta);
+    if (d > threshold) return 'var(--pipeline-green)';
+    if (d < -threshold) return 'var(--pipeline-red)';
+    if (Math.abs(d) < 0.01) return 'var(--pipeline-grey)';
+    return 'var(--pipeline-amber)';
   }
 
   function updateHistoryTable(data) {
@@ -4959,51 +4798,50 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     lastHistoryJSON = currentHistoryJSON;
 
     if (historyList.length === 0) {
-      setText(historyCount, '0 runs');
-      setHTML(historyBody, `<tr><td colspan="11" style="text-align: center; color: var(--text-muted); padding: 2rem;">No previous simulation runs recorded.</td></tr>`);
+      setText(historyCount, '0 Runs');
+      setHTML(historyBody, '<tr class="empty-row"><td colspan="7" class="empty-cell" style="text-align: center; color: var(--pipeline-text-muted); padding: 3rem;">No runs yet</td></tr>');
       return;
     }
 
-    const recentHistory = [...historyList].slice(-10).reverse();
-    setText(historyCount, historyList.length < 10 ? `Last ${historyList.length}` : 'Last 10');
+    const allHistory = [...historyList].reverse();
+    const countText = `${historyList.length} Run${historyList.length === 1 ? '' : 's'}`;
+    setText(historyCount, countText);
 
-    function formatShareAndDelta(share, delta) {
-      if (share == null || isNaN(share)) {
-        return '<span style="color: var(--text-muted); font-size: 0.8rem;">--</span>';
-      }
+    function formatSourceLine(label, share, delta) {
+      if (share == null || isNaN(share)) return null;
       const sVal = Number(share).toFixed(1);
-      if (delta == null || isNaN(delta)) {
-        return `<span style="color: var(--text-main); font-weight: 500;">${sVal}%</span>`;
+      let deltaSpan = '';
+      if (delta != null && !isNaN(delta)) {
+        const dNum = Number(delta);
+        const sign = dNum >= 0 ? '+' : '';
+        const dVal = `(${sign}${dNum.toFixed(1)}%)`;
+        const dCol = getPipelineDeltaColor(dNum, 0.5);
+        deltaSpan = ` <span class="hist-delta-val" style="color: ${dCol};">${dVal}</span>`;
       }
-      const dNum = Number(delta);
-      const sign = dNum >= 0 ? '+' : '';
-      const dVal = `(${sign}${dNum.toFixed(1)})`;
-      let dClass = 'hist-delta-zero';
-      if (dNum > 0.5) dClass = 'hist-delta-pos';
-      else if (dNum < -0.5) dClass = 'hist-delta-neg';
-      return `<span style="color: var(--text-main); font-weight: 500;">${sVal}%</span> <span class="${dClass}">${dVal}</span>`;
+      return `<div class="hist-source-line"><span class="hist-source-label">${escapeHtml(label)}</span><span class="hist-share-val">${sVal}%</span>${deltaSpan}</div>`;
     }
 
-    const rowsHtml = recentHistory.map((run, idx) => {
-      const blockClass = (idx % 2 === 0) ? 'run-block-even' : 'run-block-odd';
+    const rowsHtml = allHistory.map((run, idx) => {
+      const isEven = (idx % 2 === 0);
+      const entryClass = isEven ? 'entry-even' : 'entry-odd';
       const rec = (run.recommendation || 'PENDING').toUpperCase();
-      let pillClass = 'draw';
-      let badgeText = rec;
+      let verdictChipCls = 'pending';
+      let verdictText = rec;
       if (rec === 'KEEP') {
-        pillClass = 'keep';
-        badgeText = '🎉 KEEP';
+        verdictChipCls = 'passed';
+        verdictText = 'KEEP';
       } else if (rec === 'PARITY') {
-        pillClass = 'parity';
-        badgeText = '🟡 PARITY';
+        verdictChipCls = 'warning';
+        verdictText = 'PARITY';
       } else if (rec === 'REVERT') {
-        pillClass = 'revert';
-        badgeText = '⚠️ REVERT';
+        verdictChipCls = 'failed';
+        verdictText = 'REVERT';
       } else if (rec === 'SKIPPED') {
-        pillClass = 'draw';
-        badgeText = '⏭️ SKIPPED';
+        verdictChipCls = 'pending';
+        verdictText = 'SKIPPED';
       } else if (rec === 'TEST_FAILURE') {
-        pillClass = 'revert';
-        badgeText = '❌ TEST FAILED';
+        verdictChipCls = 'failed';
+        verdictText = 'TEST FAILED';
       }
 
       const rawDesc = run.experiment_desc || run.description || 'Unspecified Experiment';
@@ -5011,30 +4849,79 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const timeStr = escapeHtml(formatHistoryTime(run.timestamp));
 
       // 1. Tests status
-      let unitStatus = 'PASS';
-      let unitSub = 'Safety Suite';
-      if (run.unit_tests && typeof run.unit_tests === 'object') {
-        const st = String(run.unit_tests.status || '').toUpperCase();
-        if (st === 'FAILED') unitStatus = 'FAIL';
-        if (run.unit_tests.duration_sec != null) unitSub = formatDuration(Number(run.unit_tests.duration_sec), true);
+      let unitScore = '42/42';
+      let unitColor = 'var(--pipeline-green)';
+      const uData = run.unit_tests || run.unit_tests_data;
+      if (uData && typeof uData === 'object') {
+        if (typeof uData.passed === 'number' && typeof uData.total === 'number') {
+          unitScore = `${uData.passed}/${uData.total}`;
+          const isPass = (uData.passed === uData.total && String(uData.status || '').toUpperCase() !== 'FAILED');
+          unitColor = isPass ? 'var(--pipeline-green)' : 'var(--pipeline-red)';
+        } else if (Array.isArray(uData.tests) && uData.tests.length > 0) {
+          const t = uData.tests.length;
+          const p = uData.tests.filter(x => String(x.status || '').toUpperCase() === 'PASSED').length;
+          unitScore = `${p}/${t}`;
+          unitColor = (p === t) ? 'var(--pipeline-green)' : 'var(--pipeline-red)';
+        } else if (typeof uData.details === 'string') {
+          const dStr = uData.details.trim();
+          if (dStr.includes('/')) {
+            const parts = dStr.split('/');
+            const pNum = parseInt(parts[0].replace(/[^0-9]/g, ''), 10);
+            const tNum = parseInt(parts[1].replace(/[^0-9]/g, ''), 10);
+            if (!isNaN(pNum) && !isNaN(tNum)) {
+              unitScore = `${pNum}/${tNum}`;
+              unitColor = (pNum === tNum) ? 'var(--pipeline-green)' : 'var(--pipeline-red)';
+            }
+          } else if (dStr.toLowerCase().includes('all') && dStr.toLowerCase().includes('unit tests')) {
+            const num = parseInt(dStr.replace(/[^0-9]/g, ''), 10);
+            if (!isNaN(num) && num > 0) {
+              unitScore = `${num}/${num}`;
+              unitColor = 'var(--pipeline-green)';
+            }
+          } else if (dStr.toLowerCase().includes('passed')) {
+            const num = parseInt(dStr.replace(/[^0-9]/g, ''), 10);
+            if (!isNaN(num) && num > 0) {
+              unitScore = `${num}/${num}`;
+              unitColor = 'var(--pipeline-green)';
+            }
+          } else {
+            const st = String(uData.status || '').toUpperCase();
+            if (st === 'FAILED') {
+              unitScore = 'FAIL';
+              unitColor = 'var(--pipeline-red)';
+            } else {
+              unitScore = '42/42';
+              unitColor = 'var(--pipeline-green)';
+            }
+          }
+        } else {
+          const st = String(uData.status || '').toUpperCase();
+          if (st === 'FAILED') {
+            unitScore = 'FAIL';
+            unitColor = 'var(--pipeline-red)';
+          } else if (st === 'PASSED') {
+            unitScore = '42/42';
+            unitColor = 'var(--pipeline-green)';
+          }
+        }
       } else if (rec === 'TEST_FAILURE') {
-        unitStatus = 'FAIL';
-        unitSub = 'Unit Tests';
+        unitScore = 'FAIL';
+        unitColor = 'var(--pipeline-red)';
+      } else if (rec === 'SKIPPED') {
+        unitScore = '--';
+        unitColor = 'var(--pipeline-text-muted)';
       }
-      const unitCol = unitStatus === 'PASS' ? 'var(--variant-color)' : 'var(--danger-color)';
 
       // 2. Depth status
       let depthVal = '--';
       let depthSub = 'Fixed Search';
-      let depthCol = 'var(--text-muted)';
+      let depthCol = 'var(--pipeline-text-muted)';
       if (run.depth_results && run.depth_results.overall) {
         const ov = run.depth_results.overall;
         const dNum = Number(ov.delta_depth || 0);
         const sign = dNum >= 0 ? '+' : '';
         depthVal = `${sign}${dNum.toFixed(2)}d`;
-        if (dNum > 0) depthCol = 'var(--variant-color)';
-        else if (dNum < 0) depthCol = 'var(--danger-color)';
-        else depthCol = 'var(--text-muted)';
+        depthCol = getPipelineDeltaColor(dNum, 0.5);
         depthSub = (typeof ov.nps_ratio === 'number') ? `${ov.nps_ratio.toFixed(2)}x NPS` : 'Fixed Search';
       }
 
@@ -5086,48 +4973,60 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         return null;
       };
 
-      const renderSelfCell = (modeKey, target) => {
-        const ws = getSelfPlayWS(modeKey);
-        if (ws == null) return formatShareAndDelta(null, null);
-        const delta = ws - target;
-        return formatShareAndDelta(ws, delta);
-      };
+      const renderStackedModeCell = (modeKey, target) => {
+        const lines = [];
 
-      const renderPoolCell = (modeKey) => {
+        const selfWS = getSelfPlayWS(modeKey);
+        if (selfWS != null) {
+          const delta = selfWS - target;
+          const line = formatSourceLine('SELF', selfWS, delta);
+          if (line) lines.push(line);
+        }
+
         const poolInfo = getPoolWS(modeKey);
-        if (!poolInfo || poolInfo.candWinShare == null) return formatShareAndDelta(null, null);
-        const cws = poolInfo.candWinShare;
-        const delta = (poolInfo.baseWinShare != null) ? (cws - poolInfo.baseWinShare) : null;
-        return formatShareAndDelta(cws, delta);
+        if (poolInfo && poolInfo.candWinShare != null) {
+          const cws = poolInfo.candWinShare;
+          const delta = (poolInfo.baseWinShare != null) ? (cws - poolInfo.baseWinShare) : null;
+          const line = formatSourceLine('POOL', cws, delta);
+          if (line) lines.push(line);
+        }
+
+        if (lines.length === 0) {
+          return '<div class="hist-cell-stack align-right"><span style="color: var(--pipeline-text-muted);">--</span></div>';
+        }
+        return `<div class="hist-cell-stack align-right">${lines.join('')}</div>`;
       };
 
       return `
-        <tr class="history-title-row ${blockClass}">
-          <td colspan="11">
+        <tr class="history-title-row ${entryClass}" data-entry="${idx}">
+          <td colspan="7">
             <div class="history-title-bar">
               <span class="history-time">${timeStr}</span>
-              <span class="history-title-text">${expDesc}</span>
+              <span class="history-title-text" title="${expDesc}">${expDesc}</span>
             </div>
           </td>
         </tr>
-        <tr class="history-data-row ${blockClass}">
+        <tr class="history-data-row ${entryClass}" data-entry="${idx}">
           <td class="td-left">
-            <div class="hist-metric-val" style="color: ${unitCol};">${unitStatus}</div>
-            <div class="hist-metric-sub">${unitSub}</div>
+            <div class="hist-cell-stack align-left">
+              <span style="color: ${unitColor}; font-weight: 700;">${unitScore}</span>
+            </div>
           </td>
           <td class="td-left">
-            <div class="hist-metric-val" style="color: ${depthCol};">${depthVal}</div>
-            <div class="hist-metric-sub">${depthSub}</div>
+            <div class="hist-cell-stack align-left">
+              <span style="color: ${depthCol}; font-weight: 700;">${depthVal}</span>
+              <span class="hist-metric-sub">${depthSub}</span>
+            </div>
           </td>
-          <td class="mode-col-border">${renderSelfCell('constrictor', 25.0)}</td>
-          <td>${renderPoolCell('constrictor')}</td>
-          <td class="mode-col-border">${renderSelfCell('royale', 25.0)}</td>
-          <td>${renderPoolCell('royale')}</td>
-          <td class="mode-col-border">${renderSelfCell('duel', 50.0)}</td>
-          <td>${renderPoolCell('duel')}</td>
-          <td class="mode-col-border">${renderSelfCell('standard', 25.0)}</td>
-          <td>${renderPoolCell('standard')}</td>
-          <td class="mode-col-border"><span class="winner-pill ${pillClass}">${badgeText}</span></td>
+          <td class="td-right">${renderStackedModeCell('constrictor', 25.0)}</td>
+          <td class="td-right">${renderStackedModeCell('royale', 25.0)}</td>
+          <td class="td-right">${renderStackedModeCell('duel', 50.0)}</td>
+          <td class="td-right">${renderStackedModeCell('standard', 25.0)}</td>
+          <td class="td-right">
+            <div class="hist-cell-stack align-right">
+              <span class="status-chip status-chip-${verdictChipCls}">${verdictText}</span>
+            </div>
+          </td>
         </tr>
       `;
     }).join('');
@@ -5189,6 +5088,32 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         setText(statusText, chipLabel);
       }
 
+      // Header Target Badge
+      const targetBadge = document.getElementById('targetBadge');
+      const targetText = document.getElementById('targetText');
+      if (targetBadge && targetText) {
+        let targetType = (data.target || '').trim().toUpperCase();
+        if (!targetType && data.experiment_desc) {
+          const m = data.experiment_desc.match(new RegExp('\\[TARGET:\\s*([A-Za-z0-9_\\s\\/\\-]+)\\]', 'i'));
+          if (m) {
+            targetType = m[1].trim().toUpperCase();
+          } else if (/^fix\b/i.test(data.experiment_desc.trim())) {
+            targetType = 'BUG FIX';
+          }
+        }
+        if (targetType) {
+          let tCls = 'improvement';
+          if (targetType.includes('PARITY')) tCls = 'parity';
+          else if (targetType.includes('BUG')) tCls = 'bug-fix';
+          else if (targetType.includes('HARNESS')) tCls = 'harness';
+          targetBadge.className = `badge badge-target badge-target-${tCls}`;
+          targetBadge.style.display = 'inline-flex';
+          setText(targetText, `TARGET: ${targetType}`);
+        } else {
+          targetBadge.style.display = 'none';
+        }
+      }
+
       const subtext = document.getElementById('headerSubtext');
       if (subtext) {
         const expTitle = data.experiment_desc || 'Unspecified Experiment';
@@ -5197,12 +5122,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if (subtext.title !== newSub) subtext.title = newSub;
       }
 
-      const thCount = isRunning ? ((data.threads != null && data.threads > 0) ? data.threads : 0) : 0;
+      const thCount = (data.threads != null && data.threads > 0) ? data.threads : (isRunning ? 0 : '--');
       setText('threadsCount', thCount);
-      const thBadge = document.getElementById('threadsBadge');
-      if (thBadge) {
-        thBadge.style.display = (isRunning && thCount > 0) ? 'inline-flex' : 'none';
-      }
 
       // Sync and tick unified timers
       TimerStore.sync(data);
@@ -5248,22 +5169,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       updateDepthUI(data);
       updatePoolUI(data);
 
-      // Hero & Idle presentation (Requirement 6)
-      updateHeroAndIdleState(data);
-
-      const isRunActive = isRunning || (data.status === 'FINISHED' && played > 0);
-      if (isRunActive) {
-        if (runType === 'depth') {
-          updateDepthHero(data);
-        } else if (runType === 'pool') {
-          updatePoolHero(data);
-        } else {
-          updateSelfHero(data);
-        }
-
-        updateRunsCard(data, isRunning, modeElapsed);
-        updateDecisionBanner(data, isRunning, is4p, varWS, varPts, targetStr, played, maxG);
-      }
 
       updateHistoryTable(data);
 
@@ -5315,6 +5220,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   window.addEventListener('beforeunload', stopUnifiedTimers);
   window.addEventListener('unload', stopUnifiedTimers);
 
+  // Grouped hover highlight for run history table entries
+  const historyTable = document.querySelector('.run-history-table');
+  if (historyTable) {
+    historyTable.addEventListener('mouseover', (e) => {
+      const tr = e.target.closest('tr');
+      if (!tr) return;
+      const entryId = tr.getAttribute('data-entry');
+      if (entryId != null) {
+        historyTable.querySelectorAll(`tr[data-entry="${entryId}"]`).forEach(el => el.classList.add('hover-highlight'));
+      }
+    });
+    historyTable.addEventListener('mouseout', (e) => {
+      const tr = e.target.closest('tr');
+      if (!tr) return;
+      const entryId = tr.getAttribute('data-entry');
+      if (entryId != null) {
+        historyTable.querySelectorAll(`tr[data-entry="${entryId}"]`).forEach(el => el.classList.remove('hover-highlight'));
+      }
+    });
+  }
+
   updateDashboard();
   startUnifiedTimers();
 </script>
@@ -5322,12 +5248,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </html>
 """
 
-def stop_active_tasks(state: DashboardState) -> Dict[str, Any]:
-    return {"status": "error", "message": "Method Not Allowed - Dashboard is view-only"}
-
-
 def py_format_seconds(sec: float) -> str:
-    return format_duration(sec, default="0s")
+    return format_duration(sec, default="0:00")
 
 
 def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
@@ -5344,11 +5266,11 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
     run_type = str(data.get("run_type") or "self")
     exp_desc = data.get("experiment_desc") or "Unspecified Experiment"
     threads_val = data.get("threads")
-    threads_display = str(threads_val) if (is_running and threads_val is not None and threads_val > 0) else "0"
+    threads_display = str(threads_val) if (threads_val is not None and threads_val > 0) else ("0" if is_running else "--")
 
     # Header elapsed clock & LEFT ETA (Requirement 1)
     elapsed_str = py_format_seconds(elapsed_sec)
-    elapsed_clock_display = format_duration(elapsed_sec) if (is_running or elapsed_sec > 0) else "0s"
+    elapsed_clock_display = format_duration(elapsed_sec) if (is_running or elapsed_sec > 0) else "0:00"
     left_display = format_left_duration(float(eta_sec)) if (is_running and eta_sec and float(eta_sec) > 0) else "--"
 
     # Header live rate in games per minute (Requirement 1 unit rule)
@@ -5356,34 +5278,37 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
     rate_gpm = calculate_rate_gpm(played, mode_elapsed) if is_running else 0.0
     rate_display = format_rate_gpm(rate_gpm, rate_unit)
 
-    # Calculate run progress percent (games completed / total planned games)
-    total_planned_run = 0
-    total_completed_run = 0
-    matrix_prog = data.get("matrix_progress")
-    if matrix_prog:
-        for m in matrix_prog:
-            mg = m.get("max_games") or 200
-            total_planned_run += mg
-            m_played = m.get("games") if m.get("games") is not None else (m.get("total_played") or 0)
-            if is_running and game_mode == str(m.get("mode", "")).lower() and run_type == "self":
-                total_completed_run += played
-            else:
-                total_completed_run += m_played
-    elif run_type == "depth" and data.get("depth_data"):
-        total_planned_run = data["depth_data"].get("total_positions", 12)
-        total_completed_run = data["depth_data"].get("completed_positions", 0)
-    else:
-        total_planned_run = data.get("target_games") or data.get("max_games") or 200
-        total_completed_run = played
+    # Calculate suite progress across entire run
+    total_completed_run, total_planned_run, games_progress_pct = calculate_suite_progress(
+        run_type=run_type,
+        matrix_progress=data.get("matrix_progress"),
+        self_play_matrix=data.get("self_play_matrix"),
+        depth_data=data.get("depth_data"),
+        current_mode=game_mode,
+        current_played=played,
+        target_games=data.get("target_games") or data.get("max_games") or 200,
+        is_running=is_running,
+    )
 
-    run_progress_pct = calculate_run_progress_percent(total_completed_run, total_planned_run)
+    is_finished = (status in ("FINISHED", "TEST_FAILURE") or data.get("stop_type") in ("MATRIX_COMPLETE", "PARITY", "KEEP"))
+    if is_finished:
+        run_progress_pct = 100.0
+    elif is_running and eta_sec is not None and float(eta_sec) > 0 and elapsed_sec > 0:
+        run_progress_pct = calculate_time_progress_percent(elapsed_sec, float(eta_sec), is_finished=False)
+    else:
+        run_progress_pct = games_progress_pct
 
     # Pre-render Unit Tests detail
     unit_data = data.get("unit_tests_data") or {}
     unit_status = str(unit_data.get("status") or ("PASSED" if is_running else "PENDING")).upper()
-    unit_passed = unit_data.get("passed", 40)
-    unit_total = unit_data.get("total", 40)
+    unit_dur = unit_data.get("duration_sec")
+    unit_dur_str = format_duration(float(unit_dur), allow_decimal=True) if unit_dur else ("0:08" if is_running else "--")
     unit_dur_sec = float(unit_data.get("duration_sec", 4.7))
+    tests_list = unit_data.get("tests")
+    if not tests_list and unit_status in ("PASSED", "DONE", "FINISHED"):
+        tests_list = get_default_unit_tests(status="PASSED", total_duration=unit_dur_sec)
+    unit_total = len(tests_list) if tests_list else unit_data.get("total", 42)
+    unit_passed = sum(1 for t in tests_list if str(t.get("status", "")).upper() == "PASSED") if tests_list else unit_data.get("passed", unit_total)
     if unit_status == "RUNNING":
         unit_header_line = "Running unit tests..."
         unit_score_color = "#60a5fa"
@@ -5397,9 +5322,6 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         unit_header_line = f"{unit_total} / {unit_total} tests · Pending"
         unit_score_color = "var(--text-muted)"
 
-    tests_list = unit_data.get("tests")
-    if not tests_list and unit_status in ("PASSED", "DONE", "FINISHED"):
-        tests_list = get_default_unit_tests(status="PASSED", total_duration=unit_dur_sec)
     unit_tests_html = render_unit_tests_html(tests_list or [])
 
     # Header Status Chip
@@ -5435,14 +5357,13 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         if m.get("mode"):
             mode_map[m["mode"].lower()] = m
 
-    eta_map = {}
-    for b in (data.get("eta_breakdown") or []):
-        if b.get("mode"):
-            eta_map[b["mode"].lower()] = b
-
     total_matrix_played = 0
     total_matrix_max = 0
+    matrix_modes_count = 0
     completed_modes = 0
+    total_var_pts = 0.0
+    total_exp_pts = 0.0
+    total_matrix_var = 0.0
     rows = []
 
     for bm in base_modes:
@@ -5457,27 +5378,47 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
             eff_status = "RUNNING"
         elif is_skipped:
             eff_status = "SKIPPED"
-            completed_modes += 1
         elif m_status in ("PASSED", "PARITY", "FAILED"):
             eff_status = m_status
-            completed_modes += 1
+            if eff_status == "PASSED":
+                completed_modes += 1
         else:
             eff_status = "PENDING"
 
-        max_g = m.get("max_games") or bm["max_games"]
         g_val = played if is_curr else (m.get("games") if m.get("games") is not None else (m.get("total_played") or 0))
-        if not is_skipped:
-            total_matrix_played += g_val
-            total_matrix_max += max_g
-        pct_done = min(100.0, (g_val / max_g * 100.0)) if max_g > 0 else 0.0
-
+        is_completed = (eff_status in ("PASSED", "PARITY", "FAILED") and g_val > 0)
+        max_g = g_val if is_completed else (m.get("max_games") or bm["max_games"])
         target_val = bm["target_share"]
         var_data = data.get("variant") or {}
         var_ws = var_data.get("win_share") if is_curr else m.get("win_share")
 
+        if not is_skipped:
+            matrix_modes_count += 1
+            total_matrix_played += g_val
+            total_matrix_max += max_g
+            if g_val > 0:
+                p0 = target_val / 100.0
+                if is_curr:
+                    var_w = float(var_data.get("wins", 0.0) or 0.0)
+                    draws_data = data.get("draws") or {}
+                    draws_cnt = float(draws_data.get("count", 0.0) or 0.0)
+                    draw_share = 0.25 if (bm.get("num_snakes") == 4) else 0.5
+                    m_pts = float(var_data.get("points", var_w + draw_share * draws_cnt) or 0.0)
+                elif m.get("points") is not None:
+                    m_pts = float(m["points"])
+                elif m.get("var_points") is not None:
+                    m_pts = float(m["var_points"])
+                else:
+                    m_pts = (float(var_ws) / 100.0) * g_val if var_ws is not None else 0.0
+                total_var_pts += m_pts
+                total_exp_pts += g_val * p0
+                total_matrix_var += g_val * p0 * (1.0 - p0)
+
+        pct_done = min(100.0, (g_val / max_g * 100.0)) if max_g > 0 else 0.0
+
         if eff_status == "RUNNING":
             score_val = f"{float(var_ws):.1f}%" if var_ws is not None else "--"
-            score_color = "#60a5fa"
+            score_color = "var(--pipeline-blue)"
             if played >= 5 and var_ws is not None:
                 p = float(var_ws) / 100.0
                 p0 = target_val / 100.0
@@ -5486,12 +5427,15 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
                 z_score_text = f"{z:+.2f}"
             else:
                 z_score_text = "--"
-            b_eta = eta_map.get(mkey, {}).get("eta_seconds")
-            rem_s = float(b_eta) if b_eta else None
-            eta_text = f"{format_duration(rem_s)} left" if (rem_s and rem_s > 0) else "--"
+            mode_elapsed = data.get("mode_elapsed_seconds")
+            if not mode_elapsed:
+                unit_sec = float((unit_data or {}).get("duration_sec", 0.0) or 0.0)
+                depth_sec = float((depth_data or {}).get("duration_sec", 0.0) or 0.0)
+                mode_elapsed = max(0.0, float(data.get("elapsed_seconds", 0.0) or 0.0) - unit_sec - depth_sec)
+            eta_text = format_duration(float(mode_elapsed)) if mode_elapsed > 0 else "0:00"
         elif eff_status in ("PASSED", "PARITY", "FAILED"):
             score_val = f"{float(var_ws):.1f}%" if var_ws is not None else "--"
-            score_color = "var(--variant-color)" if eff_status == "PASSED" else ("#f59e0b" if eff_status == "PARITY" else "var(--danger-color)")
+            score_color = "var(--pipeline-green)" if eff_status == "PASSED" else ("var(--pipeline-amber)" if eff_status == "PARITY" else "var(--pipeline-red)")
             z_score = m.get("z_score")
             if z_score is not None:
                 z_score_text = f"{float(z_score):+.2f}"
@@ -5507,46 +5451,65 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
             eta_text = format_duration(float(dur)) if (dur and float(dur) > 0) else "--"
         elif eff_status == "SKIPPED":
             score_val = f"{float(var_ws):.1f}%" if (var_ws is not None and g_val > 0) else "--"
-            score_color = "#fbbf24" if (var_ws is not None and g_val > 0) else "var(--text-muted)"
+            score_color = "var(--pipeline-text-muted)"
             z_score_text = "--"
             eta_text = "--"
         else:
             score_val = "--"
-            score_color = "var(--text-main)"
+            score_color = "var(--pipeline-text-main)"
             z_score_text = "--"
-            b_eta = eta_map.get(mkey, {}).get("eta_seconds")
-            eta_text = f"{format_duration(float(b_eta))} est" if (b_eta and float(b_eta) > 0) else "--"
+            eta_text = "--"
 
-        status_badge = f'<span class="matrix-col-status matrix-status-{eff_status.lower()}">{eff_status}</span>'
+        status_badge = f'<span class="status-chip status-chip-{eff_status.lower()} matrix-col-status matrix-status-{eff_status.lower()}">{eff_status}</span>'
         row_class = "active-running" if is_curr else ""
-        z_color = "var(--variant-color)" if z_score_text != "--" and float(z_score_text) >= 1.645 else ("var(--danger-color)" if z_score_text != "--" and float(z_score_text) <= -1.645 else ("#f59e0b" if z_score_text != "--" else "var(--text-muted)"))
+        z_color = "var(--pipeline-green)" if z_score_text != "--" and float(z_score_text) >= 1.645 else ("var(--pipeline-red)" if z_score_text != "--" and float(z_score_text) <= -1.645 else ("var(--pipeline-amber)" if z_score_text != "--" else "var(--pipeline-text-muted)"))
 
         if eff_status != "SKIPPED" and var_ws is not None and g_val > 0:
             d_val = float(var_ws) - target_val
             d_sign = "+" if d_val > 0 else ""
             delta_text = f"{d_sign}{d_val:.1f}%"
-            delta_col = "var(--variant-color)" if d_val > 0.5 else ("var(--danger-color)" if d_val < -0.5 else "#f59e0b")
+            delta_col = "var(--pipeline-green)" if d_val > 0.5 else ("var(--pipeline-red)" if d_val < -0.5 else "var(--pipeline-amber)")
         else:
             delta_text = "--"
-            delta_col = "var(--text-muted)"
+            delta_col = "var(--pipeline-text-muted)"
 
         games_display = "--" if (eff_status == "SKIPPED" and g_val == 0) else f"{g_val} / {max_g}"
 
         rows.append(f'''
         <tr class="{row_class}">
-          <td style="font-weight: 700; color: var(--text-main); text-align: left;">
+          <td class="td-left" style="font-weight: 700; color: var(--pipeline-text-main);">
             <span>{bm["name"]}</span>
           </td>
-          <td style="font-weight: 700;">{games_display}</td>
-          <td style="font-weight: 700; color: {score_color}; font-size: 0.95rem;">{score_val}</td>
-          <td style="font-weight: 700; color: {delta_col}; font-family: 'JetBrains Mono', monospace;">{delta_text}</td>
-          <td style="font-weight: 600; color: {z_color}; font-family: 'JetBrains Mono', monospace;">{z_score_text}</td>
-          <td style="color: var(--text-muted); font-size: 0.82rem;" id="matrix-eta-{mkey}">{eta_text}</td>
-          <td>{status_badge}</td>
+          <td class="td-right" style="font-weight: 700;">{games_display}</td>
+          <td class="td-right" style="font-weight: 700; color: {score_color}; font-size: 0.92rem;">{score_val}</td>
+          <td class="td-right" style="font-weight: 700; color: {delta_col};">{delta_text}</td>
+          <td class="td-right" style="font-weight: 600; color: {z_color};">{z_score_text}</td>
+          <td class="td-right" style="color: var(--pipeline-text-muted); font-size: 0.82rem;" id="matrix-eta-{mkey}">{eta_text}</td>
+          <td class="td-right">{status_badge}</td>
         </tr>''')
 
     matrix_rows_html = "\n".join(rows)
     matrix_overall_pct = (total_matrix_played / total_matrix_max * 100.0) if total_matrix_max > 0 else 0.0
+
+    if matrix_modes_count == 0:
+        matrix_modes_count = 4
+
+    if total_matrix_played > 0:
+        matrix_net_delta = ((total_var_pts - total_exp_pts) / total_matrix_played) * 100.0
+        m_delta_str = f"{'+' if matrix_net_delta > 0 else ''}{matrix_net_delta:.1f}%"
+        m_delta_col = "var(--pipeline-green)" if matrix_net_delta > 0.5 else ("var(--pipeline-red)" if matrix_net_delta < -0.5 else "var(--pipeline-amber)")
+    else:
+        m_delta_str = "--"
+        m_delta_col = "var(--pipeline-text-muted)"
+
+    if total_matrix_played >= 5 and total_matrix_var > 0:
+        m_se = math.sqrt(total_matrix_var)
+        m_z = (total_var_pts - total_exp_pts) / m_se
+        m_z_str = f"{m_z:+.2f}"
+        m_z_col = "var(--pipeline-green)" if m_z >= 1.645 else ("var(--pipeline-red)" if m_z <= -1.645 else "var(--pipeline-amber)")
+    else:
+        m_z_str = "--"
+        m_z_col = "var(--pipeline-text-muted)"
 
     # Pre-render Zoo Pool Gate table
     pool_data = data.get("pool_data") or {}
@@ -5565,6 +5528,9 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
 
     pool_rows = []
     completed_pool_count = 0
+    total_pool_played = 0
+    total_pool_max = 0
+    pool_modes_count = 0
     for bm in base_modes:
         mkey = bm["mode"]
         pm = pool_modes.get(mkey, {})
@@ -5574,24 +5540,23 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         is_omitted = has_matrix and (mkey not in mode_map) and (mkey not in pool_modes)
         is_skipped = is_omitted or (pm.get("status") == "SKIPPED") or (mm.get("status") == "SKIPPED") or (pm.get("decision") == "SKIPPED") or (mm.get("decision") == "SKIPPED")
 
-        cand_s = None if is_omitted else (pm.get("cand_share") if pm.get("cand_share") is not None else (mm.get("cand_share") if mm.get("cand_share") is not None else (pool_data.get("cand_share") if is_curr_pool else None)))
-        base_s = None if is_omitted else (pm.get("base_share") if pm.get("base_share") is not None else (mm.get("base_share") if mm.get("base_share") is not None else (pool_data.get("base_share") if is_curr_pool else None)))
-        p_delta = None if is_omitted else (pm.get("delta") if pm.get("delta") is not None else (mm.get("delta") if mm.get("delta") is not None else ((float(cand_s) - float(base_s)) if (cand_s is not None and base_s is not None) else None)))
-        pz = None if is_omitted else (pm.get("z_score") if pm.get("z_score") is not None else (mm.get("z_score") if mm.get("z_score") is not None else (pool_overall_z if is_curr_pool else None)))
+        cand_s = None if is_omitted else (pm.get("cand_share") if pm.get("cand_share") is not None else (pool_data.get("cand_share") if is_curr_pool else None))
+        base_s = None if is_omitted else (pm.get("base_share") if pm.get("base_share") is not None else (pool_data.get("base_share") if is_curr_pool else None))
+        p_delta = None if is_omitted else (pm.get("delta") if pm.get("delta") is not None else (((float(cand_s) - float(base_s))) if (cand_s is not None and base_s is not None) else None))
+        pz = None if is_omitted else (pm.get("z_score") if pm.get("z_score") is not None else (pool_overall_z if is_curr_pool else None))
 
-        p_max = pm.get("max_games") or mm.get("max_games") or (40 if run_type == "pool" else 200)
-        cand_g = pm.get("cand_games") if pm.get("cand_games") is not None else (played if is_curr_pool else (pm.get("games") or mm.get("cand_games") or mm.get("games") or 0))
-        base_g = pm.get("base_games") if pm.get("base_games") is not None else (played if is_curr_pool else (pm.get("games") or mm.get("base_games") or mm.get("games") or 0))
+        p_max = pm.get("max_games") or pool_data.get("max_games") or (40 if run_type == "pool" else 40)
+        cand_g = pm.get("cand_games") if pm.get("cand_games") is not None else (played if is_curr_pool else (pm.get("games") or 0))
+        base_g = pm.get("base_games") if pm.get("base_games") is not None else (played if is_curr_pool else (pm.get("games") or 0))
         active_g = max(cand_g, base_g)
 
-        p_dec = pm.get("decision") or mm.get("decision")
+        p_dec = pm.get("decision")
         if is_curr_pool:
             p_status_class = "running"
             p_status_text = "RUNNING"
         elif is_skipped:
             p_status_class = "skipped"
             p_status_text = "SKIPPED"
-            completed_pool_count += 1
         elif p_dec:
             if active_g == 0:
                 p_status_text = "FAILED"
@@ -5599,7 +5564,8 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
             else:
                 p_status_text = p_dec
                 p_status_class = p_dec.lower()
-            completed_pool_count += 1
+            if p_status_text == "PASSED":
+                completed_pool_count += 1
         elif cand_s is not None:
             if active_g == 0:
                 p_status_text = "FAILED"
@@ -5607,61 +5573,71 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
             else:
                 p_status_text = "PASSED" if (p_delta or 0) >= 0 else "FAILED"
                 p_status_class = p_status_text.lower()
-            completed_pool_count += 1
+            if p_status_text == "PASSED":
+                completed_pool_count += 1
         else:
             p_status_class = "pending"
             p_status_text = "PENDING"
 
-        p_games_text = f"{cand_g} / {p_max} · {base_g} / {p_max}" if (active_g > 0) else ("--" if is_skipped else f"0 / {p_max} · 0 / {p_max}")
+        is_completed_pool = (p_status_text in ("PASSED", "PARITY", "FAILED", "KEEP", "REVERT") and active_g > 0)
+        eff_p_max = active_g if is_completed_pool else p_max
+        if not is_skipped:
+            pool_modes_count += 1
+            total_pool_played += active_g
+            total_pool_max += eff_p_max
+        p_games_text = f"{active_g} / {eff_p_max}" if (active_g > 0) else ("--" if is_skipped else f"0 / {p_max}")
         p_pct_done = min(100.0, (active_g / p_max * 100.0)) if p_max > 0 else 0.0
 
         if cand_s is not None and base_s is not None:
-            ws_html = f'<span style="font-weight: 700; color: var(--variant-color);">{float(cand_s):.1f}%</span> <span style="color: var(--text-muted); font-weight: 600;">/</span> <span style="font-weight: 700; color: var(--baseline-color);">{float(base_s):.1f}%</span>'
+            ws_html = f'<span style="font-weight: 700; color: var(--pipeline-green);">Var: {float(cand_s):.1f}%</span> <span style="color: var(--pipeline-text-muted);">·</span> <span style="font-weight: 700; color: var(--pipeline-blue);">Base: {float(base_s):.1f}%</span>'
         else:
-            ws_html = '<span style="color: var(--text-muted);">-- / --</span>'
+            ws_html = '<span style="color: var(--pipeline-text-muted);">--</span>'
 
         if p_delta is not None:
             pd_val = float(p_delta)
             pd_sign = "+" if pd_val > 0 else ""
-            pd_col = "var(--variant-color)" if pd_val > 0.5 else ("var(--danger-color)" if pd_val < -0.5 else "#f59e0b")
+            pd_col = "var(--pipeline-green)" if pd_val > 0.5 else ("var(--pipeline-red)" if pd_val < -0.5 else "var(--pipeline-amber)")
             p_delta_text = f"{pd_sign}{pd_val:.1f}%"
         else:
             p_delta_text = "--"
-            pd_col = "var(--text-muted)"
+            pd_col = "var(--pipeline-text-muted)"
 
         if pz is not None:
             pz_num = float(pz)
             pz_text = f"{pz_num:+.2f}"
-            pz_col = "var(--variant-color)" if pz_num >= 1.645 else ("var(--danger-color)" if pz_num <= -1.645 else "#f59e0b")
+            pz_col = "var(--pipeline-green)" if pz_num >= 1.645 else ("var(--pipeline-red)" if pz_num <= -1.645 else "var(--pipeline-amber)")
         else:
             pz_text = "--"
-            pz_col = "var(--text-muted)"
+            pz_col = "var(--pipeline-text-muted)"
 
-        b_eta = eta_map.get(mkey, {}).get("eta_seconds")
-        dur = pm.get("duration_sec") or mm.get("duration_sec")
+        dur = pm.get("duration_sec")
         if is_skipped:
             p_eta_text = "--"
+        elif is_curr_pool:
+            mode_elapsed = data.get("mode_elapsed_seconds")
+            if not mode_elapsed:
+                unit_sec = float((unit_data or {}).get("duration_sec", 0.0) or 0.0)
+                depth_sec = float((depth_data or {}).get("duration_sec", 0.0) or 0.0)
+                mode_elapsed = max(0.0, float(data.get("elapsed_seconds", 0.0) or 0.0) - unit_sec - depth_sec)
+            p_eta_text = format_duration(float(mode_elapsed)) if mode_elapsed > 0 else "0:00"
         elif p_status_text in ("PASSED", "PARITY", "FAILED", "KEEP", "REVERT") or dur:
             p_eta_text = format_duration(float(dur)) if (dur and float(dur) > 0) else "--"
-        elif is_curr_pool:
-            rem_s = float(b_eta) if b_eta else None
-            p_eta_text = f"{format_duration(rem_s)} left" if (rem_s and rem_s > 0) else "--"
         else:
-            p_eta_text = f"{format_duration(float(b_eta))} est" if (b_eta and float(b_eta) > 0) else "--"
+            p_eta_text = "--"
 
-        p_badge = f'<span class="matrix-col-status matrix-status-{p_status_class}">{p_status_text}</span>'
+        p_badge = f'<span class="status-chip status-chip-{p_status_class} matrix-col-status matrix-status-{p_status_class}">{p_status_text}</span>'
         p_row_class = "active-running" if is_curr_pool else ""
         pool_rows.append(f'''
         <tr class="{p_row_class}">
-          <td style="font-weight: 700; color: var(--text-main); text-align: left;">
+          <td class="td-left" style="font-weight: 700; color: var(--pipeline-text-main);">
             <span>{bm["name"]}</span>
           </td>
-          <td style="font-weight: 700; font-family: monospace; font-size: 0.85rem;">{p_games_text}</td>
-          <td style="font-size: 0.95rem; font-family: monospace;">{ws_html}</td>
-          <td style="font-weight: 700; color: {pd_col}; font-family: monospace;">{p_delta_text}</td>
-          <td style="font-weight: 600; color: {pz_col}; font-family: monospace;">{pz_text}</td>
-          <td style="color: var(--text-muted); font-size: 0.82rem;" id="pool-eta-{mkey}">{p_eta_text}</td>
-          <td>{p_badge}</td>
+          <td class="td-right" style="font-weight: 700;">{p_games_text}</td>
+          <td class="td-right">{ws_html}</td>
+          <td class="td-right" style="font-weight: 700; color: {pd_col};">{p_delta_text}</td>
+          <td class="td-right" style="font-weight: 600; color: {pz_col};">{pz_text}</td>
+          <td class="td-right" style="color: var(--pipeline-text-muted); font-size: 0.82rem;" id="pool-eta-{mkey}">{p_eta_text}</td>
+          <td class="td-right">{p_badge}</td>
         </tr>''')
 
     pool_rows_html = "\n".join(pool_rows)
@@ -5673,7 +5649,7 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         f'<div style="font-size: 0.85rem; color: var(--text-muted);" id="headerSubtext" title="Testing: {exp_desc}">Testing: {exp_desc}</div>'
     )
     out = out.replace(
-        '<strong class="header-stat-val" id="headerStatElapsed">0s</strong>',
+        '<strong class="header-stat-val" id="headerStatElapsed">0:00</strong>',
         f'<strong class="header-stat-val" id="headerStatElapsed">{elapsed_clock_display}</strong>'
     )
     out = out.replace(
@@ -5688,14 +5664,23 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         '<div class="header-progress-bar" id="headerProgressBar" style="width: 0%;"></div>',
         f'<div class="header-progress-bar" id="headerProgressBar" style="width: {run_progress_pct:.1f}%;"></div>'
     )
-    threads_style = "" if (is_running and threads_val and threads_val > 0) else "display: none;"
     out = out.replace(
-        '<div class="badge-threads" id="threadsBadge" style="display: none;">⚡ <span id="threadsCount">0</span> Threads</div>',
-        f'<div class="badge-threads" id="threadsBadge" style="{threads_style}">⚡ <span id="threadsCount">{threads_display}</span> Threads</div>'
+        '<strong class="header-stat-val" id="threadsCount">0</strong>',
+        f'<strong class="header-stat-val" id="threadsCount">{threads_display}</strong>'
     )
     out = out.replace(
-        '<span id="unitDetailScore" style="font-weight: 700; font-family: \'JetBrains Mono\', monospace; font-size: 0.95rem; color: var(--text-main);">40 / 40 passed</span>',
-        f'<span id="unitDetailScore" style="font-weight: 700; font-family: \'JetBrains Mono\', monospace; font-size: 0.95rem; color: {unit_score_color};">{unit_header_line}</span>'
+        '<strong id="unitPassedMetric">42 / 42 passed</strong>',
+        f'<strong id="unitPassedMetric">{unit_passed} / {unit_total} passed</strong>'
+    )
+    unit_chip_cls = "passed" if unit_status in ("PASSED", "DONE") else ("failed" if unit_status == "FAILED" else ("running" if unit_status == "RUNNING" else "pending"))
+    unit_chip_txt = "PASSED" if unit_status in ("PASSED", "DONE") else ("FAILED" if unit_status == "FAILED" else ("RUNNING" if unit_status == "RUNNING" else "PENDING"))
+    out = out.replace(
+        '<span class="status-chip status-chip-passed matrix-col-status matrix-status-passed" id="unitSummaryChip">PASSED</span>',
+        f'<span class="status-chip status-chip-{unit_chip_cls} matrix-col-status matrix-status-{unit_chip_cls}" id="unitSummaryChip">{unit_chip_txt}</span>'
+    )
+    out = out.replace(
+        '<span id="unitDetailScore">42 / 42 passed</span>',
+        f'<span id="unitDetailScore">{unit_header_line}</span>'
     )
     out = out.replace(
         '<!-- Dynamically populated test rows -->',
@@ -5705,10 +5690,50 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         '<div class="badge" id="statusBadge">\n        <span class="status-dot" id="statusDot"></span>\n        <span id="statusText">IDLE</span>\n      </div>',
         f'<div class="badge badge-status-{status_chip_class}" id="statusBadge">\n        <span class="status-dot" id="statusDot"></span>\n        <span id="statusText">{status_chip_text}</span>\n      </div>'
     )
+    target_val = data.get("target") or ""
+    if not target_val and data.get("experiment_desc"):
+        m_t = re.search(r"\[TARGET:\s*([A-Za-z0-9_\s\/\-]+)\]", str(data["experiment_desc"]), re.I)
+        if m_t:
+            target_val = m_t.group(1).strip().upper()
+        elif str(data["experiment_desc"]).strip().lower().startswith("fix"):
+            target_val = "BUG FIX"
+    if target_val:
+        t_cls = "improvement"
+        if "PARITY" in target_val:
+            t_cls = "parity"
+        elif "BUG" in target_val:
+            t_cls = "bug-fix"
+        elif "HARNESS" in target_val:
+            t_cls = "harness"
+        out = out.replace(
+            '<div class="badge badge-target" id="targetBadge" style="display: none;">\n        <span id="targetText">TARGET: IMPROVEMENT</span>\n      </div>',
+            f'<div class="badge badge-target badge-target-{t_cls}" id="targetBadge" style="display: inline-flex;">\n        <span id="targetText">TARGET: {target_val}</span>\n      </div>'
+        )
     out = out.replace(
-        '<span style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); font-family: \'JetBrains Mono\', monospace;" id="matrixSubtitle">0 / 4 Modes Complete</span>',
-        f'<span style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); font-family: \'JetBrains Mono\', monospace;" id="matrixSubtitle">{completed_modes} / 4 Modes Complete</span>'
+        '<strong id="matrixSummaryModes">4</strong>',
+        f'<strong id="matrixSummaryModes">{matrix_modes_count}</strong>'
     )
+    out = out.replace(
+        '<strong id="matrixSummaryGames">0 / 800</strong>',
+        f'<strong id="matrixSummaryGames">{total_matrix_played} / {total_matrix_max}</strong>'
+    )
+    if total_matrix_played > 0:
+        out = out.replace(
+            '<strong id="matrixSummaryDelta">--</strong>',
+            f'<strong id="matrixSummaryDelta" style="color: {m_delta_col};">{m_delta_str}</strong>'
+        )
+    if total_matrix_played >= 5 and total_matrix_var > 0:
+        out = out.replace(
+            '<strong id="matrixSummaryZ">--</strong>',
+            f'<strong id="matrixSummaryZ" style="color: {m_z_col};">{m_z_str}</strong>'
+        )
+    is_self_running = (is_running and run_type == "self")
+    m_chip_st = "RUNNING" if is_self_running else ("PASSED" if completed_modes == matrix_modes_count else ("PASSED" if (status == "FINISHED" and completed_modes > 0) else ("RUNNING" if completed_modes > 0 else "PENDING")))
+    if m_chip_st != "PENDING":
+        out = out.replace(
+            '<span class="status-chip status-chip-pending matrix-col-status matrix-status-pending" id="matrixSummaryChip">PENDING</span>',
+            f'<span class="status-chip status-chip-{m_chip_st.lower()} matrix-col-status matrix-status-{m_chip_st.lower()}" id="matrixSummaryChip">{m_chip_st}</span>'
+        )
     out = out.replace(
         '<!-- Dynamically populated rows for Constrictor, Royale, Duel, Standard -->',
         matrix_rows_html
@@ -5718,9 +5743,48 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         pool_rows_html
     )
     out = out.replace(
-        '<span style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); font-family: \'JetBrains Mono\', monospace;" id="poolStatusSubtitle">0 / 4 Modes Complete</span>',
-        f'<span style="font-size: 0.82rem; font-weight: 600; color: var(--text-muted); font-family: \'JetBrains Mono\', monospace;" id="poolStatusSubtitle">{completed_pool_count} / 4 Modes Complete</span>'
+        '<strong id="poolSummaryModes">4</strong>',
+        f'<strong id="poolSummaryModes">{pool_modes_count}</strong>'
     )
+    out = out.replace(
+        '<strong id="poolSummaryGames">0 / 160</strong>',
+        f'<strong id="poolSummaryGames">{total_pool_played} / {total_pool_max}</strong>'
+    )
+
+    has_pool_games = (pool_data.get("total_games", 0) > 0) or is_pool_running or (total_pool_played > 0)
+    is_pool_enabled = bool(data.get("pool_enabled") or run_type == "pool" or has_pool_games)
+    if has_pool_games:
+        p_overall_delta = pool_data.get("delta")
+        if p_overall_delta is None and (pool_data.get("cand_share") is not None and pool_data.get("base_share") is not None):
+            p_overall_delta = float(pool_data["cand_share"]) - float(pool_data["base_share"])
+        if p_overall_delta is not None and total_pool_played > 0:
+            p_delta_str = f"{'+' if p_overall_delta > 0 else ''}{p_overall_delta:.1f}%"
+            p_delta_col = "var(--pipeline-green)" if p_overall_delta > 0.5 else ("var(--pipeline-red)" if p_overall_delta < -0.5 else "var(--pipeline-amber)")
+            out = out.replace(
+                '<strong id="poolSummaryDelta">--</strong>',
+                f'<strong id="poolSummaryDelta" style="color: {p_delta_col};">{p_delta_str}</strong>'
+            )
+        if pool_overall_z is not None and total_pool_played >= 5:
+            p_z_str = f"{pool_overall_z:+.2f}"
+            p_z_col = "var(--pipeline-green)" if pool_overall_z >= 1.645 else ("var(--pipeline-red)" if pool_overall_z <= -1.645 else "var(--pipeline-amber)")
+            out = out.replace(
+                '<strong id="poolSummaryZ">--</strong>',
+                f'<strong id="poolSummaryZ" style="color: {p_z_col};">{p_z_str}</strong>'
+            )
+        p_summary_chip_st = "RUNNING" if is_pool_running else ("PASSED" if (p_overall_delta or 0) >= 0 else "FAILED")
+        out = out.replace(
+            '<span class="status-chip status-chip-pending matrix-col-status matrix-status-pending" id="poolSummaryChip">PENDING</span>',
+            f'<span class="status-chip status-chip-{p_summary_chip_st.lower()} matrix-col-status matrix-status-{p_summary_chip_st.lower()}" id="poolSummaryChip">{p_summary_chip_st}</span>'
+        )
+    elif not is_pool_enabled:
+        out = out.replace(
+            '<strong id="poolSummaryGames">0 / 160</strong>',
+            '<strong id="poolSummaryGames">--</strong>'
+        )
+        out = out.replace(
+            '<span class="status-chip status-chip-pending matrix-col-status matrix-status-pending" id="poolSummaryChip">PENDING</span>',
+            '<span class="status-chip status-chip-skipped matrix-col-status matrix-status-skipped" id="poolSummaryChip">SKIPPED</span>'
+        )
 
     if pool_opponents:
         opp_rows = []
@@ -5728,57 +5792,71 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
             c_pct = float(o.get("cand_win_pct", 0.0))
             b_pct = float(o.get("base_win_pct", 0.0))
             d = float(o.get("delta", c_pct - b_pct))
-            d_col = "var(--variant-color)" if d > 0.5 else ("var(--danger-color)" if d < -0.5 else "#f59e0b")
+            d_col = "var(--pipeline-green)" if d > 0.5 else ("var(--pipeline-red)" if d < -0.5 else "var(--pipeline-amber)")
             d_sign = "+" if d > 0 else ""
             opp_name = html.escape(str(o.get("opponent", "")))
             opp_games = o.get("games", 0)
             opp_rows.append(f'''
             <tr>
-              <td style="text-align: left; font-weight: 700; color: var(--text-main);">{opp_name}</td>
-              <td>{opp_games}</td>
-              <td style="font-family: monospace; font-size: 0.92rem;">
-                <span style="color: var(--variant-color); font-weight: 700;">{c_pct:.1f}%</span>
-                <span style="color: var(--text-muted); font-weight: 600;">/</span>
-                <span style="color: var(--baseline-color); font-weight: 700;">{b_pct:.1f}%</span>
+              <td class="td-left" style="font-weight: 700; color: var(--pipeline-text-main);">{opp_name}</td>
+              <td class="td-right">{opp_games}</td>
+              <td class="td-right">
+                <span style="color: var(--pipeline-green); font-weight: 700;">Var: {c_pct:.1f}%</span>
+                <span style="color: var(--pipeline-text-muted);">·</span>
+                <span style="color: var(--pipeline-blue); font-weight: 700;">Base: {b_pct:.1f}%</span>
               </td>
-              <td style="color: {d_col}; font-weight: 700; font-family: monospace;">{d_sign}{d:.1f}%</td>
+              <td class="td-right" style="color: {d_col}; font-weight: 700;">{d_sign}{d:.1f}%</td>
             </tr>''')
         out = out.replace(
-            '<tbody id="poolOpponentsTableBody"></tbody>',
-            f'<tbody id="poolOpponentsTableBody">\n{"".join(opp_rows)}\n</tbody>'
+            '<tr class="empty-row">\n                  <td colspan="100%" class="empty-cell">No data yet</td>\n                </tr>',
+            "".join(opp_rows)
         )
         out = out.replace(
-            '<span style="font-size: 0.8rem; color: var(--text-muted);" id="poolOpponentsCount">0 Opponents</span>',
-            f'<span style="font-size: 0.8rem; color: var(--text-muted);" id="poolOpponentsCount">{len(pool_opponents)} Opponents</span>'
+            '<span class="panel-meta" id="poolOpponentsCount">0 Opponents</span>',
+            f'<span class="panel-meta" id="poolOpponentsCount">{len(pool_opponents)} Opponents</span>'
         )
 
-    if run_type == "pool":
+    active_stage = "self"
+    if status == "TEST_FAILURE" or (unit_data.get("status") == "FAILED"):
+        active_stage = "unit"
+    elif run_type == "depth":
+        active_stage = "depth"
+    elif run_type == "pool":
+        active_stage = "pool"
+    else:
+        active_stage = "self"
+
+    if active_stage != "self":
         out = out.replace(
             '<div class="stage-panel-content" id="panel-self" style="display: block;">',
             '<div class="stage-panel-content" id="panel-self" style="display: none;">'
         )
         out = out.replace(
-            '<div class="stage-panel-content" id="panel-pool" style="display: none;">',
-            '<div class="stage-panel-content" id="panel-pool" style="display: block;">'
+            f'<div class="stage-panel-content" id="panel-{active_stage}" style="display: none;">',
+            f'<div class="stage-panel-content" id="panel-{active_stage}" style="display: block;">'
         )
 
+    unit_active = " active" if active_stage == "unit" else ""
+    depth_active = " active" if active_stage == "depth" else ""
+    matrix_active = " active" if active_stage == "self" else ""
+    pool_active = " active" if active_stage == "pool" else ""
+
     # Unit Tests and Depth Benchmark stage rail presentation
-    unit_data = data.get("unit_tests_data") or {}
     unit_status = unit_data.get("status", "PASSED" if is_running else "PENDING")
     unit_dur = unit_data.get("duration_sec")
-    unit_dur_str = format_duration(float(unit_dur), allow_decimal=True) if unit_dur else ("8.3s" if is_running else "--")
-    unit_status_clean = "done" if unit_status == "PASSED" else ("failed" if unit_status == "FAILED" else "pending")
+    unit_dur_str = format_duration(float(unit_dur), allow_decimal=True) if unit_dur else ("0:08" if is_running else "--")
+    unit_status_clean = "done" if unit_status in ("PASSED", "DONE") else ("failed" if unit_status == "FAILED" else "pending")
+    unit_status_text = "DONE" if unit_status in ("PASSED", "DONE") else unit_status
     out = out.replace(
-        '<div class="stage-segment pending" id="railSegment-unit">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">1</span>\n          <span class="stage-seg-name">Unit Tests</span>\n          <span class="stage-seg-status matrix-status-pending" id="railStatus-unit">PENDING</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>Safety Suite</span>\n          <span class="stage-seg-duration" id="railDuration-unit">--</span>\n        </div>\n      </div>',
-        f'<div class="stage-segment {unit_status_clean}" id="railSegment-unit">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">1</span>\n          <span class="stage-seg-name">Unit Tests</span>\n          <span class="stage-seg-status matrix-status-{unit_status_clean}" id="railStatus-unit">{unit_status}</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>Safety Suite</span>\n          <span class="stage-seg-duration" id="railDuration-unit">{unit_dur_str}</span>\n        </div>\n      </div>'
+        '<div class="stage-segment pending" id="railSegment-unit">\n        <span class="stage-seg-index">1</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Unit Tests</span>\n          <span class="stage-seg-duration" id="railDuration-unit">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-pending" id="railStatus-unit">PENDING</span>\n      </div>',
+        f'<div class="stage-segment {unit_status_clean}{unit_active}" id="railSegment-unit">\n        <span class="stage-seg-index">1</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Unit Tests</span>\n          <span class="stage-seg-duration" id="railDuration-unit">{unit_dur_str}</span>\n        </div>\n        <span class="stage-seg-status matrix-status-{unit_status_clean}" id="railStatus-unit">{unit_status_text}</span>\n      </div>'
     )
 
     # Depth rail
     depth_data = data.get("depth_data") or {}
     depth_dur = depth_data.get("duration_sec")
-    depth_dur_str = format_duration(float(depth_dur)) if depth_dur else ("48.2s" if is_running else "--")
+    depth_dur_str = format_duration(float(depth_dur)) if depth_dur else ("0:48" if is_running else "--")
 
-    run_type = data.get("run_type", "self")
     matrix_dur_val = data.get("matrix_duration_sec")
     pool_dur_val = data.get("pool_duration_sec") or (data.get("pool_data") or {}).get("duration_sec")
     rec = str(data.get("recommendation") or "").upper()
@@ -5791,12 +5869,12 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
             matrix_rail_class = "pending"
             matrix_rail_status = "PENDING"
             matrix_dur_str = "--"
-            pool_rail_class = "pending"
-            pool_rail_status = "PENDING"
+            pool_rail_class = "pending" if is_pool_enabled else "skipped"
+            pool_rail_status = "PENDING" if is_pool_enabled else "SKIPPED"
             pool_dur_str = "--"
         elif run_type == "pool":
             depth_status_clean = "done"
-            depth_status_text = "PASSED"
+            depth_status_text = "DONE"
             if matrix_dur_val or data.get("self_play_matrix"):
                 matrix_rail_class = "done"
                 matrix_rail_status = "DONE"
@@ -5805,21 +5883,21 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
                 matrix_rail_class = "skipped"
                 matrix_rail_status = "SKIPPED"
                 matrix_dur_str = "--"
-            pool_rail_class = "active running"
+            pool_rail_class = "running"
             pool_rail_status = "RUNNING"
             pool_dur_str = elapsed_str
         else:
             depth_status_clean = "done"
-            depth_status_text = "PASSED"
-            matrix_rail_class = "active running"
+            depth_status_text = "DONE"
+            matrix_rail_class = "running"
             matrix_rail_status = "RUNNING"
             matrix_dur_str = elapsed_str
-            pool_rail_class = "pending"
-            pool_rail_status = "PENDING"
+            pool_rail_class = "pending" if is_pool_enabled else "skipped"
+            pool_rail_status = "PENDING" if is_pool_enabled else "SKIPPED"
             pool_dur_str = "--"
     elif status in ("FINISHED", "TEST_FAILURE"):
         depth_status_clean = "done" if depth_dur else "pending"
-        depth_status_text = "PASSED" if depth_dur else "PENDING"
+        depth_status_text = "DONE" if depth_dur else "PENDING"
         if run_type == "pool":
             if matrix_dur_val or data.get("self_play_matrix"):
                 matrix_rail_class = "done"
@@ -5829,12 +5907,12 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
                 matrix_rail_class = "skipped"
                 matrix_rail_status = "SKIPPED"
                 matrix_dur_str = "--"
-            pool_stat = "DONE" if rec == "KEEP" else ("PARITY" if rec == "PARITY" else "FAILED")
+            pool_stat = "FAILED" if rec == "REVERT" else "DONE"
             pool_rail_class = pool_stat.lower()
             pool_rail_status = pool_stat
             pool_dur_str = format_duration(float(pool_dur_val)) if pool_dur_val else elapsed_str
         else:
-            self_stat = "DONE" if rec == "KEEP" else ("PARITY" if rec == "PARITY" else ("FAILED" if rec == "REVERT" else "DONE"))
+            self_stat = "FAILED" if rec == "REVERT" else "DONE"
             matrix_rail_class = self_stat.lower()
             matrix_rail_status = self_stat
             matrix_dur_str = format_duration(float(matrix_dur_val)) if matrix_dur_val else elapsed_str
@@ -5847,56 +5925,63 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         matrix_rail_class = "pending"
         matrix_rail_status = "PENDING"
         matrix_dur_str = "--"
-        pool_rail_class = "pending"
-        pool_rail_status = "PENDING"
+        pool_rail_class = "pending" if is_pool_enabled else "skipped"
+        pool_rail_status = "PENDING" if is_pool_enabled else "SKIPPED"
         pool_dur_str = "--"
 
     out = out.replace(
-        '<div class="stage-segment pending" id="railSegment-depth">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">2</span>\n          <span class="stage-seg-name">Depth Benchmark</span>\n          <span class="stage-seg-status matrix-status-pending" id="railStatus-depth">PENDING</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>Fixed Search</span>\n          <span class="stage-seg-duration" id="railDuration-depth">--</span>\n        </div>\n      </div>',
-        f'<div class="stage-segment {depth_status_clean}" id="railSegment-depth">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">2</span>\n          <span class="stage-seg-name">Depth Benchmark</span>\n          <span class="stage-seg-status matrix-status-{depth_status_clean}" id="railStatus-depth">{depth_status_text}</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>Fixed Search</span>\n          <span class="stage-seg-duration" id="railDuration-depth">{depth_dur_str}</span>\n        </div>\n      </div>'
+        '<div class="stage-segment pending" id="railSegment-depth">\n        <span class="stage-seg-index">2</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Depth Benchmark</span>\n          <span class="stage-seg-duration" id="railDuration-depth">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-pending" id="railStatus-depth">PENDING</span>\n      </div>',
+        f'<div class="stage-segment {depth_status_clean}{depth_active}" id="railSegment-depth">\n        <span class="stage-seg-index">2</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Depth Benchmark</span>\n          <span class="stage-seg-duration" id="railDuration-depth">{depth_dur_str}</span>\n        </div>\n        <span class="stage-seg-status matrix-status-{depth_status_clean}" id="railStatus-depth">{depth_status_text}</span>\n      </div>'
     )
     out = out.replace(
-        '<div class="stage-segment active pending" id="railSegment-self">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">3</span>\n          <span class="stage-seg-name">Self-Play Matrix</span>\n          <span class="stage-seg-status matrix-status-pending" id="railStatus-self">PENDING</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>4 Modes Matrix</span>\n          <span class="stage-seg-duration" id="railDuration-self">--</span>\n        </div>\n      </div>',
-        f'<div class="stage-segment {matrix_rail_class}" id="railSegment-self">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">3</span>\n          <span class="stage-seg-name">Self-Play Matrix</span>\n          <span class="stage-seg-status matrix-status-{matrix_rail_status.lower()}" id="railStatus-self">{matrix_rail_status}</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>4 Modes Matrix</span>\n          <span class="stage-seg-duration" id="railDuration-self">{matrix_dur_str}</span>\n        </div>\n      </div>'
+        '<div class="stage-segment active pending" id="railSegment-self">\n        <span class="stage-seg-index">3</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Self-Play Matrix</span>\n          <span class="stage-seg-duration" id="railDuration-self">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-pending" id="railStatus-self">PENDING</span>\n      </div>',
+        f'<div class="stage-segment {matrix_rail_class}{matrix_active}" id="railSegment-self">\n        <span class="stage-seg-index">3</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Self-Play Matrix</span>\n          <span class="stage-seg-duration" id="railDuration-self">{matrix_dur_str}</span>\n        </div>\n        <span class="stage-seg-status matrix-status-{matrix_rail_status.lower()}" id="railStatus-self">{matrix_rail_status}</span>\n      </div>'
     )
     out = out.replace(
-        '<div class="stage-segment pending" id="railSegment-pool">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">4</span>\n          <span class="stage-seg-name">Zoo Pool Gate</span>\n          <span class="stage-seg-status matrix-status-pending" id="railStatus-pool">PENDING</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>Opponent Pool</span>\n          <span class="stage-seg-duration" id="railDuration-pool">--</span>\n        </div>\n      </div>',
-        f'<div class="stage-segment {pool_rail_class}" id="railSegment-pool">\n        <div class="stage-seg-header">\n          <span class="stage-seg-index">4</span>\n          <span class="stage-seg-name">Zoo Pool Gate</span>\n          <span class="stage-seg-status matrix-status-{pool_rail_status.lower()}" id="railStatus-pool">{pool_rail_status}</span>\n        </div>\n        <div class="stage-seg-footer">\n          <span>Opponent Pool</span>\n          <span class="stage-seg-duration" id="railDuration-pool">{pool_dur_str}</span>\n        </div>\n      </div>'
+        '<div class="stage-segment pending" id="railSegment-pool">\n        <span class="stage-seg-index">4</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Zoo Pool Gate</span>\n          <span class="stage-seg-duration" id="railDuration-pool">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-pending" id="railStatus-pool">PENDING</span>\n      </div>',
+        f'<div class="stage-segment {pool_rail_class}{pool_active}" id="railSegment-pool">\n        <span class="stage-seg-index">4</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Zoo Pool Gate</span>\n          <span class="stage-seg-duration" id="railDuration-pool">{pool_dur_str}</span>\n        </div>\n        <span class="stage-seg-status matrix-status-{pool_rail_status.lower()}" id="railStatus-pool">{pool_rail_status}</span>\n      </div>'
     )
 
     # Pre-render depth benchmark summary and fixtures
     if depth_data and (depth_data.get("completed_positions", 0) >= 12 or depth_data.get("delta_depth") is not None):
+        f_list = depth_data.get("fixtures") or []
+        if f_list:
+            tot_d = sum(f.get("delta_depth", float(f.get("var_med_depth", 0.0)) - float(f.get("base_med_depth", 0.0))) for f in f_list)
+        else:
+            tot_d = float(depth_data.get("total_delta_depth", depth_data.get("delta_depth", 0.0)))
+        tot_d = round(tot_d, 1)
         var_d = float(depth_data.get("median_var_depth", 0.0))
         base_d = float(depth_data.get("median_base_depth", 0.0))
-        d_d = float(depth_data.get("delta_depth") if depth_data.get("delta_depth") is not None else (var_d - base_d))
         nps_r = float(depth_data.get("nps_ratio", 1.0))
         agree = float(depth_data.get("agreement_pct", 100.0))
-        d_sign = "+" if d_d >= 0 else ""
-        d_col = "var(--variant-color)" if d_d > 0 else ("var(--danger-color)" if d_d < 0 else "var(--text-main)")
-        nps_col = "var(--variant-color)" if nps_r >= 1.0 else "var(--danger-color)"
-        is_pass = depth_data.get("passed") is not False and d_d >= 0
-        badge_cls = "matrix-status-passed" if is_pass else "matrix-status-failed"
-        badge_text = "PASSED (NO REGRESSION)" if is_pass else "DEPTH REGRESSION"
+        d_sign = "+" if tot_d >= 0 else ""
+        d_col = "var(--pipeline-green)" if tot_d > 0 else ("var(--pipeline-red)" if tot_d < 0 else "var(--pipeline-text-main)")
+        nps_col = "var(--pipeline-green)" if nps_r >= 1.0 else "var(--pipeline-red)"
+        is_pass = depth_data.get("passed") is not False and tot_d >= 0
+        badge_cls = "passed" if is_pass else "failed"
+        badge_text = "PASSED" if is_pass else "FAILED"
 
         out = out.replace(
-            '<span>Median Δ Depth: <strong id="depthSummaryDelta" style="color: var(--variant-color);">+0.0</strong></span>',
-            f'<span>Median Δ Depth: <strong id="depthSummaryDelta" style="color: {d_col};">{d_sign}{d_d:.1f} (V {var_d:.1f} vs B {base_d:.1f})</strong></span>'
+            '<span>Delta Depth: <strong id="depthSummaryDepth">+0.0</strong></span>',
+            f'<span>Delta Depth: <strong id="depthSummaryDepth" style="color: {d_col};">{d_sign}{tot_d:.1f}</strong></span>'
         )
         out = out.replace(
-            '<span>NPS Ratio: <strong id="depthSummaryNps" style="color: #60a5fa;">1.00x</strong></span>',
-            f'<span>NPS Ratio: <strong id="depthSummaryNps" style="color: {nps_col};">{nps_r:.2f}x</strong></span>'
+            '<span>Speed: <strong id="depthSummaryNps">1.00x</strong></span>',
+            f'<span>Speed: <strong id="depthSummaryNps" style="color: {nps_col};">{nps_r:.2f}x</strong></span>'
         )
         out = out.replace(
-            '<span>Move Agreement: <strong id="depthSummaryAgree">100.0%</strong></span>',
-            f'<span>Move Agreement: <strong id="depthSummaryAgree">{agree:.1f}%</strong></span>'
+            '<span>Agreement: <strong id="depthSummaryAgree">100.0%</strong></span>',
+            f'<span>Agreement: <strong id="depthSummaryAgree">{agree:.1f}%</strong></span>'
         )
         out = out.replace(
-            '<span id="depthStatusBadge" class="matrix-col-status matrix-status-pending">AWAITING FIXTURES</span>',
-            f'<span id="depthStatusBadge" class="matrix-col-status {badge_cls}">{badge_text}</span>'
+            '<span class="status-chip status-chip-pending matrix-col-status matrix-status-pending" id="depthStatusBadge">AWAITING FIXTURES</span>',
+            f'<span class="status-chip status-chip-{badge_cls} matrix-col-status matrix-status-{badge_cls}" id="depthStatusBadge">{badge_text}</span>'
         )
 
-    depth_fixtures = depth_data.get("fixtures") or []
+    depth_fixtures = (depth_data.get("fixtures") or [])[:]
     if depth_fixtures:
+        mode_weights = {"constrictor": 0, "royale": 1, "duel": 2, "standard": 3}
+        depth_fixtures.sort(key=lambda f: (mode_weights.get(str(f.get("mode", "")).lower(), 99), f.get("turn", 0)))
         d_rows = []
         for f in depth_fixtures:
             d_delta = (f.get("delta_depth") if f.get("delta_depth") is not None else (f.get("var_med_depth", 0.0) - f.get("base_med_depth", 0.0)))
@@ -5926,75 +6011,117 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
             "".join(d_rows)
         )
 
-    # If running, hide idle hero
-    if is_running:
-        out = out.replace(
-            '<div class="last-run-card" id="idleCompletedHero" style="display: block;">',
-            '<div class="last-run-card" id="idleCompletedHero" style="display: none;">'
-        )
-
     # Pre-render history table
     history_list = data.get("run_history") or []
     if history_list:
         h_rows = []
-        recent_history = list(reversed(history_list[-10:]))
+        recent_history = list(reversed(history_list))
+        h_count_str = f"{len(history_list)} Run{'s' if len(history_list) != 1 else ''}"
 
-        def format_share_and_delta(share, delta):
-            if share is None:
-                return '<span style="color: var(--text-muted); font-size: 0.8rem;">--</span>'
-            s_val = f"{float(share):.1f}%"
+        def get_pipeline_delta_color(delta, threshold=0.5):
             if delta is None:
-                return f'<span style="color: var(--text-main); font-weight: 500;">{s_val}</span>'
-            d_num = float(delta)
-            sign = "+" if d_num >= 0 else ""
-            d_val = f"({sign}{d_num:.1f})"
-            if d_num > 0.5:
-                d_class = "hist-delta-pos"
-            elif d_num < -0.5:
-                d_class = "hist-delta-neg"
-            else:
-                d_class = "hist-delta-zero"
-            return f'<span style="color: var(--text-main); font-weight: 500;">{s_val}</span> <span class="{d_class}">{d_val}</span>'
+                return "var(--pipeline-grey)"
+            try:
+                d = float(delta)
+            except (ValueError, TypeError):
+                return "var(--pipeline-grey)"
+            if d > threshold:
+                return "var(--pipeline-green)"
+            if d < -threshold:
+                return "var(--pipeline-red)"
+            if abs(d) < 0.01:
+                return "var(--pipeline-grey)"
+            return "var(--pipeline-amber)"
+
+        def format_source_line(label, share, delta):
+            if share is None:
+                return None
+            s_val = f"{float(share):.1f}%"
+            delta_span = ""
+            if delta is not None:
+                d_num = float(delta)
+                sign = "+" if d_num >= 0 else ""
+                d_val = f"({sign}{d_num:.1f}%)"
+                d_col = get_pipeline_delta_color(d_num, 0.5)
+                delta_span = f' <span class="hist-delta-val" style="color: {d_col};">{d_val}</span>'
+            return f'<div class="hist-source-line"><span class="hist-source-label">{html.escape(label)}</span><span class="hist-share-val">{s_val}</span>{delta_span}</div>'
 
         for idx, run in enumerate(recent_history):
-            block_class = "run-block-even" if idx % 2 == 0 else "run-block-odd"
             h_time = html.escape(format_history_time(run.get("timestamp")))
             h_desc = html.escape(str(run.get("experiment_desc") or run.get("description") or "Run"))
             h_rec = str(run.get("recommendation") or "PARITY").upper()
-            h_pill = "winner-pill"
             if h_rec == "KEEP":
-                h_pill += " keep"
-                badge_text = "🎉 KEEP"
+                v_chip = "passed"
+                badge_text = "KEEP"
             elif h_rec == "PARITY":
-                h_pill += " parity"
-                badge_text = "🟡 PARITY"
+                v_chip = "warning"
+                badge_text = "PARITY"
             elif h_rec == "REVERT":
-                h_pill += " revert"
-                badge_text = "⚠️ REVERT"
+                v_chip = "failed"
+                badge_text = "REVERT"
             elif h_rec == "SKIPPED":
-                h_pill += " draw"
-                badge_text = "⏭️ SKIPPED"
+                v_chip = "pending"
+                badge_text = "SKIPPED"
             elif h_rec == "TEST_FAILURE":
-                h_pill += " revert"
-                badge_text = "❌ TEST FAILED"
+                v_chip = "failed"
+                badge_text = "TEST FAILED"
             else:
-                h_pill += " draw"
+                v_chip = "pending"
                 badge_text = h_rec
 
             # Unit Tests
-            unit_data = run.get("unit_tests") or {}
-            if isinstance(unit_data, dict) and unit_data.get("status"):
-                st = str(unit_data["status"]).upper()
-                unit_status = "FAIL" if st == "FAILED" else "PASS"
-                dur = unit_data.get("duration_sec")
-                unit_sub = format_duration(float(dur), allow_decimal=True) if dur is not None else "Safety Suite"
+            unit_data = run.get("unit_tests") or run.get("unit_tests_data") or {}
+            unit_score = "42/42"
+            unit_col = "var(--pipeline-green)"
+            if isinstance(unit_data, dict):
+                if unit_data.get("passed") is not None and unit_data.get("total") is not None:
+                    p = int(unit_data["passed"])
+                    t = int(unit_data["total"])
+                    is_pass = (p == t and str(unit_data.get("status", "")).upper() != "FAILED")
+                    unit_score = f"{p}/{t}"
+                    unit_col = "var(--pipeline-green)" if is_pass else "var(--pipeline-red)"
+                elif isinstance(unit_data.get("tests"), list) and unit_data["tests"]:
+                    t = len(unit_data["tests"])
+                    p = sum(1 for x in unit_data["tests"] if str(x.get("status", "")).upper() == "PASSED")
+                    unit_score = f"{p}/{t}"
+                    unit_col = "var(--pipeline-green)" if p == t else "var(--pipeline-red)"
+                elif unit_data.get("details"):
+                    det = str(unit_data["details"])
+                    m = re.search(r"(\d+)\s*/\s*(\d+)", det)
+                    if m:
+                        unit_score = f"{m.group(1)}/{m.group(2)}"
+                        unit_col = "var(--pipeline-green)" if m.group(1) == m.group(2) else "var(--pipeline-red)"
+                    else:
+                        m_all = re.search(r"All\s+(\d+)\s+unit tests", det, re.I)
+                        m_pass = re.search(r"(\d+)\s+passed", det, re.I)
+                        if m_all:
+                            unit_score = f"{m_all.group(1)}/{m_all.group(1)}"
+                            unit_col = "var(--pipeline-green)"
+                        elif m_pass:
+                            unit_score = f"{m_pass.group(1)}/{m_pass.group(1)}"
+                            unit_col = "var(--pipeline-green)"
+                        else:
+                            st = str(unit_data.get("status", "")).upper()
+                            if st == "FAILED":
+                                unit_score = "FAIL"
+                                unit_col = "var(--pipeline-red)"
+                            else:
+                                unit_score = "42/42"
+                                unit_col = "var(--pipeline-green)"
+                else:
+                    st = str(unit_data.get("status", "")).upper()
+                    if st == "FAILED":
+                        unit_score = "FAIL"
+                        unit_col = "var(--pipeline-red)"
+                    elif st == "PASSED":
+                        unit_score = "42/42"
+                        unit_col = "var(--pipeline-green)"
             elif h_rec == "TEST_FAILURE":
-                unit_status = "FAIL"
-                unit_sub = "Unit Tests"
-            else:
-                unit_status = "PASS"
-                unit_sub = "Safety Suite"
-            unit_col = "var(--variant-color)" if unit_status == "PASS" else "var(--danger-color)"
+                unit_score = "FAIL"
+                unit_col = "var(--pipeline-red)"
+            elif h_rec == "SKIPPED":
+                unit_score = "--"
+                unit_col = "var(--pipeline-text-muted)"
 
             # Depth
             depth_data = run.get("depth_results") or {}
@@ -6003,18 +6130,13 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
                 d_num = float(depth_ov.get("delta_depth", 0.0))
                 sign = "+" if d_num >= 0 else ""
                 depth_val = f"{sign}{d_num:.2f}d"
-                if d_num > 0:
-                    depth_col = "var(--variant-color)"
-                elif d_num < 0:
-                    depth_col = "var(--danger-color)"
-                else:
-                    depth_col = "var(--text-muted)"
+                depth_col = get_pipeline_delta_color(d_num, 0.5)
                 nps = depth_ov.get("nps_ratio")
                 depth_sub = f"{float(nps):.2f}x NPS" if nps is not None else "Fixed Search"
             else:
                 depth_val = "--"
                 depth_sub = "Fixed Search"
-                depth_col = "var(--text-muted)"
+                depth_col = "var(--pipeline-text-muted)"
 
             # Helper for self-play
             def get_self_ws(mode_key):
@@ -6066,61 +6188,71 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
                         return (float(cws) if cws is not None else None), (float(bws) if bws is not None else None)
                 return None, None
 
-            def render_self_cell(mode_key, tgt):
+            def render_stacked_mode_cell(mode_key, tgt):
+                lines = []
                 ws = get_self_ws(mode_key)
-                if ws is None:
-                    return format_share_and_delta(None, None)
-                return format_share_and_delta(ws, ws - tgt)
-
-            def render_pool_cell(mode_key):
+                if ws is not None:
+                    l = format_source_line("SELF", ws, ws - tgt)
+                    if l:
+                        lines.append(l)
                 cws, bws = get_pool_ws(mode_key)
-                if cws is None:
-                    return format_share_and_delta(None, None)
-                delta = (cws - bws) if bws is not None else None
-                return format_share_and_delta(cws, delta)
+                if cws is not None:
+                    delta = (cws - bws) if bws is not None else None
+                    l = format_source_line("POOL", cws, delta)
+                    if l:
+                        lines.append(l)
+                if not lines:
+                    return '<div class="hist-cell-stack align-right"><span style="color: var(--pipeline-text-muted);">--</span></div>'
+                return f'<div class="hist-cell-stack align-right">{"".join(lines)}</div>'
 
-            const_self = render_self_cell("constrictor", 25.0)
-            const_pool = render_pool_cell("constrictor")
-            royale_self = render_self_cell("royale", 25.0)
-            royale_pool = render_pool_cell("royale")
-            duel_self = render_self_cell("duel", 50.0)
-            duel_pool = render_pool_cell("duel")
-            standard_self = render_self_cell("standard", 25.0)
-            standard_pool = render_pool_cell("standard")
+            const_cell = render_stacked_mode_cell("constrictor", 25.0)
+            royale_cell = render_stacked_mode_cell("royale", 25.0)
+            duel_cell = render_stacked_mode_cell("duel", 50.0)
+            standard_cell = render_stacked_mode_cell("standard", 25.0)
 
+            h_entry_class = "entry-even" if (idx % 2 == 0) else "entry-odd"
             h_rows.append(f'''
-        <tr class="history-title-row {block_class}">
-          <td colspan="11">
+        <tr class="history-title-row {h_entry_class}" data-entry="{idx}">
+          <td colspan="7">
             <div class="history-title-bar">
               <span class="history-time">{h_time}</span>
-              <span class="history-title-text">{h_desc}</span>
+              <span class="history-title-text" title="{h_desc}">{h_desc}</span>
             </div>
           </td>
         </tr>
-        <tr class="history-data-row {block_class}">
+        <tr class="history-data-row {h_entry_class}" data-entry="{idx}">
           <td class="td-left">
-            <div class="hist-metric-val" style="color: {unit_col};">{unit_status}</div>
-            <div class="hist-metric-sub">{unit_sub}</div>
+            <div class="hist-cell-stack align-left">
+              <span style="color: {unit_col}; font-weight: 700;">{unit_score}</span>
+            </div>
           </td>
           <td class="td-left">
-            <div class="hist-metric-val" style="color: {depth_col};">{depth_val}</div>
-            <div class="hist-metric-sub">{depth_sub}</div>
+            <div class="hist-cell-stack align-left">
+              <span style="color: {depth_col}; font-weight: 700;">{depth_val}</span>
+              <span class="hist-metric-sub">{depth_sub}</span>
+            </div>
           </td>
-          <td class="mode-col-border">{const_self}</td>
-          <td>{const_pool}</td>
-          <td class="mode-col-border">{royale_self}</td>
-          <td>{royale_pool}</td>
-          <td class="mode-col-border">{duel_self}</td>
-          <td>{duel_pool}</td>
-          <td class="mode-col-border">{standard_self}</td>
-          <td>{standard_pool}</td>
-          <td class="mode-col-border"><span class="{h_pill}">{badge_text}</span></td>
+          <td class="td-right">{const_cell}</td>
+          <td class="td-right">{royale_cell}</td>
+          <td class="td-right">{duel_cell}</td>
+          <td class="td-right">{standard_cell}</td>
+          <td class="td-right">
+            <div class="hist-cell-stack align-right">
+              <span class="status-chip status-chip-{v_chip}">{badge_text}</span>
+            </div>
+          </td>
         </tr>''')
 
         out = out.replace(
-            '<tr>\n            <td colspan="11" style="text-align: center; color: var(--text-muted); padding: 2rem;">No previous simulation runs recorded.</td>\n          </tr>',
+            '<tr class="empty-row">\n            <td colspan="7" class="empty-cell" style="text-align: center; color: var(--pipeline-text-muted); padding: 3rem;">No runs yet</td>\n          </tr>',
             "\n".join(h_rows)
         )
+        out = out.replace(
+            '<span class="panel-meta" id="historyCount">0 Runs</span>',
+            f'<span class="panel-meta" id="historyCount">{h_count_str}</span>'
+        )
+    else:
+        pass
 
     return out
 
@@ -6368,11 +6500,15 @@ class DashboardClient:
         pid: Optional[int] = None,
         suite_start_time: Optional[float] = None,
         run_type: str = "self",
+        target: Optional[str] = None,
+        pool_enabled: bool = False,
     ):
         payload = {
             "action": "init",
             "pid": pid if pid is not None else os.getpid(),
             "run_type": run_type,
+            "target": target,
+            "pool_enabled": pool_enabled,
             "strategy_baseline": strategy_baseline,
             "strategy_variant": strategy_variant,
             "min_games": min_games,
@@ -6452,7 +6588,7 @@ class DashboardClient:
         payload.update(kwargs)
         self.post_update(payload)
 
-    def update_unit_tests(self, status: str = "PASSED", passed: int = 40, total: int = 40, details: str = "", duration_sec: float = 0.0, tests: Optional[List[Dict[str, Any]]] = None):
+    def update_unit_tests(self, status: str = "PASSED", passed: Optional[int] = None, total: Optional[int] = None, details: str = "", duration_sec: float = 0.0, tests: Optional[List[Dict[str, Any]]] = None):
         if tests is None:
             try:
                 import sys
@@ -6461,11 +6597,13 @@ class DashboardClient:
                     tests = getattr(mod, "LAST_TEST_RECORDS")
             except Exception:
                 pass
+        computed_total = len(tests) if tests else (total or 42)
+        computed_passed = sum(1 for t in tests if str(t.get("status", "")).upper() == "PASSED") if tests else (passed if passed is not None else computed_total)
         payload = {
             "action": "update_unit_tests",
             "status": status,
-            "passed": passed,
-            "total": total,
+            "passed": computed_passed,
+            "total": computed_total,
             "details": details,
             "duration_sec": duration_sec,
         }

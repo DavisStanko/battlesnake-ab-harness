@@ -407,6 +407,20 @@ def _evaluate_position_worker(args: Tuple[str, str, str, int, int, str, int, str
 
 # ── Full Benchmark Suite ─────────────────────────────────────────────────────
 
+def is_parity_target(target: Optional[str]) -> bool:
+    """
+    Returns True if target indicates a parity, bug-fix, refactor, or verification task
+    where search throughput and depth must remain strictly non-regressed.
+    Returns False for improvement tasks where evaluation accuracy may trade throughput.
+    """
+    if not target:
+        return False
+    t = target.strip().upper()
+    return t in ("PARITY", "BUG FIX", "PARITY / IMPROVEMENT", "HARNESS VERIFICATION") or any(
+        k in t for k in ("PARITY", "BUG", "FIX", "VERIFICATION", "REFACTOR")
+    )
+
+
 def run_depth_test(
     baseline_strat: str = "strategies.strategy_baseline",
     variant_strat: str = "strategies.strategy_variant",
@@ -420,16 +434,21 @@ def run_depth_test(
     dash_client: Optional[Any] = None,
     is_stage: bool = False,
     workers: int = DEFAULT_WORKERS,
+    target: Optional[str] = None,
 ) -> Tuple[bool, Dict[str, Any]]:
     """
     Executes fixed-position depth test suite across all requested modes in parallel across CPU workers.
     Returns (all_passed, results_dict).
     """
+    parity_mode = is_parity_target(target)
     print("=" * 86)
     print(f" Battlesnake Fixed-Position Depth Tester")
     print(f" Baseline: {baseline_strat}")
     print(f" Variant:  {variant_strat}")
     print(f" Budget:   {time_ms} ms | Repeats: {repeats} per position | Workers: {workers}")
+    if target:
+        gate_desc = "Strict Non-Regression Gate (Depth >= 0, Mode NPS >= 0.90x, Overall NPS >= 0.95x)" if parity_mode else "Informational Diagnostic (Matrix Win-Share Decides)"
+        print(f" Target:   {target} [{gate_desc}]")
     print(f" Fixtures: {fixtures_dir}")
     print("=" * 86)
 
@@ -606,9 +625,19 @@ def run_depth_test(
         mean_agree = statistics.mean(m_agrees) if m_agrees else 100.0
         delta_d = med_var_d - med_base_d
 
-        is_regression = med_var_d < med_base_d
+        depth_regressed = med_var_d < med_base_d
+        nps_mode_regressed = parity_mode and (med_nps_r < 0.90)
+
+        # In parity mode, either depth regression or mode NPS drop (<0.90x) is an automated failure.
+        # In improvement mode, evaluation accuracy may trade throughput; decision deferred to self-play matrix.
+        is_regression = (depth_regressed or nps_mode_regressed) if parity_mode else False
         if is_regression:
-            flagged_regressions.append(mode)
+            reasons = []
+            if depth_regressed:
+                reasons.append(f"depth {med_var_d:.1f} < {med_base_d:.1f}")
+            if nps_mode_regressed:
+                reasons.append(f"NPS ratio {med_nps_r:.2f}x < 0.90x")
+            flagged_regressions.append(f"{mode} ({', '.join(reasons)})")
 
         matrix_progress[idx]["status"] = "PASSED" if not is_regression else "FAILED"
         matrix_progress[idx]["delta"] = delta_d
@@ -623,6 +652,8 @@ def run_depth_test(
             "nps_ratio": med_nps_r,
             "agreement_pct": mean_agree,
             "regression": is_regression,
+            "depth_regressed": depth_regressed,
+            "nps_regressed": nps_mode_regressed,
         }
 
     # ── Report Generation ────────────────────────────────────────────────────
@@ -633,7 +664,7 @@ def run_depth_test(
     for mode in modes:
         rows = mode_results[mode]
         summary = mode_summaries[mode]
-        status_str = "PASS" if not summary["regression"] else "FLAG: DEPTH REGRESSION"
+        status_str = "PASS" if not summary["regression"] else "FLAG: REGRESSION"
 
         print(f"\n[MODE: {mode.upper()}]  Status: {status_str}")
         print(f"{'Title':<20} | {'Base Depth':>10} | {'Var Depth':>10} | {'Base NPS':>10} | {'Var NPS':>10} | {'NPS Ratio':>9} | {'Base Move':>9} | {'Var Move':>9} | {'Agree %':>8}")
@@ -670,6 +701,13 @@ def run_depth_test(
     overall_delta_d = overall_var_d - overall_base_d
     overall_nps_r = statistics.median(all_nps_ratios)
     overall_agree = statistics.mean(all_agrees)
+
+    if parity_mode:
+        if overall_nps_r < 0.95:
+            flagged_regressions.append(f"overall throughput ({overall_nps_r:.2f}x < 0.95x)")
+        if overall_var_d < overall_base_d and not any("overall depth" in f for f in flagged_regressions):
+            flagged_regressions.append(f"overall depth ({overall_var_d:.1f} < {overall_base_d:.1f})")
+
     overall_pass = len(flagged_regressions) == 0
 
     print("=" * 94)
@@ -705,12 +743,11 @@ def run_depth_test(
     print("=" * 94)
 
     if flagged_regressions:
-        print(f"\n[WARNING] Flagged {len(flagged_regressions)} mode(s) with variant median depth below baseline:")
+        print(f"\n[WARNING] Flagged {len(flagged_regressions)} regression(s):")
         for fm in flagged_regressions:
-            s = mode_summaries[fm]
-            print(f"  - {fm}: Variant depth ({s['var_med_depth']:.1f}) < Baseline depth ({s['base_med_depth']:.1f})")
+            print(f"  - {fm}")
     else:
-        print("\n[SUCCESS] No depth regressions detected across any mode.")
+        print("\n[SUCCESS] No depth or throughput regressions detected across tested modes.")
 
     if dash_client is not None:
         t_depth_duration = time.time() - t_suite_start
@@ -729,7 +766,7 @@ def run_depth_test(
         if not is_stage:
             dash_client.set_finished(
                 stop_type="KEEP" if overall_pass else "REVERT",
-                stop_reason="All modes depth-passed" if overall_pass else f"Depth regression in {', '.join(flagged_regressions)}",
+                stop_reason="All modes depth-passed" if overall_pass else f"Regression in {', '.join(flagged_regressions)}",
                 recommendation="KEEP" if overall_pass else "REVERT",
                 csv_path="",
             )
@@ -745,6 +782,7 @@ def run_depth_test(
             "agreement_pct": overall_agree,
             "passed": overall_pass,
         },
+        "flagged_regressions": flagged_regressions,
     }
 
 
@@ -837,6 +875,13 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_WORKERS,
         help="Number of worker processes for parallel position benchmarking (default: min(cores, 7)).",
     )
+    parser.add_argument(
+        "--target",
+        type=str,
+        default=None,
+        choices=["IMPROVEMENT", "PARITY", "BUG FIX", "PARITY / IMPROVEMENT", "HARNESS VERIFICATION"],
+        help="Target outcome classification (enforces strict NPS and depth gating for parity modes).",
+    )
     return parser.parse_args()
 
 
@@ -859,6 +904,7 @@ def main() -> None:
         dashboard_port=args.dashboard_port,
         enable_dashboard=not args.no_dashboard,
         workers=args.workers,
+        target=args.target,
     )
 
     sys.exit(0 if passed else 1)

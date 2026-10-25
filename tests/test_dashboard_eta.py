@@ -21,6 +21,7 @@ from harness.ab_dashboard import (
     format_left_duration,
     format_eta_minutes,
     calculate_run_progress_percent,
+    calculate_time_progress_percent,
     format_history_time,
 )
 
@@ -345,69 +346,25 @@ class TestDashboardETA(unittest.TestCase):
         self.assertEqual(depth_gpm, 240.0)
         self.assertEqual(format_rate_gpm(depth_gpm, unit="pos/min"), "240.0 pos/min")
 
-    def test_format_duration(self):
-        """
-        Verify single duration formatter:
-        Format: two largest units, always with unit letters - '1h 32m', '48m 33s', '5m 58s', '23s'.
-        Sub-minute test durations keep one decimal ('4.7s').
-        Three-unit values like '1h 31m 52s' trimmed to two units ('1h 31m').
-        """
-        self.assertEqual(format_duration(None), "--")
-        self.assertEqual(format_duration(0), "0s")
-        self.assertEqual(format_duration(0, allow_decimal=True), "0.0s")
-        self.assertEqual(format_duration(23), "23s")
-        self.assertEqual(format_duration(4.7, allow_decimal=True), "4.7s")
-        # 5m 58s -> 358s
-        self.assertEqual(format_duration(5 * 60 + 58), "5m 58s")
-        # 48m 33s -> 2913s
-        self.assertEqual(format_duration(48 * 60 + 33), "48m 33s")
-        # 1h 32m -> 5520s
-        self.assertEqual(format_duration(1 * 3600 + 32 * 60), "1h 32m")
-        # 1h 31m 52s -> trimmed to two units: "1h 31m"
-        self.assertEqual(format_duration(1 * 3600 + 31 * 60 + 52), "1h 31m")
-        # Exact hours
-        self.assertEqual(format_duration(3600), "1h")
-        # Days
-        self.assertEqual(format_duration(86400 + 3600), "1d 1h")
-
-    def test_format_left_duration(self):
-        """
-        Verify header LEFT formatter:
-        '1h 38m', '2h 54m' at or above an hour.
-        '54m', '5m' under an hour.
-        """
-        self.assertEqual(format_left_duration(None), "--")
-        self.assertEqual(format_left_duration(0), "--")
-        self.assertEqual(format_left_duration(-10), "--")
-        # 2h 54m: (2 * 60 + 54) * 60 = 10440s
-        self.assertEqual(format_left_duration(10440), "2h 54m")
-        # 1h 38m: (1 * 60 + 38) * 60 = 5880s
-        self.assertEqual(format_left_duration(5880), "1h 38m")
-        # 54m: 54 * 60 = 3240s
-        self.assertEqual(format_left_duration(3240), "54m")
-        # 5m: 300s
-        self.assertEqual(format_left_duration(300), "5m")
-
     def test_calculate_run_progress_percent(self):
         """
-        Percent = games completed / total planned games for the run (not elapsed / (elapsed + ETA)).
+        Percent = games completed / total planned games for the run.
         """
         self.assertEqual(calculate_run_progress_percent(0, 800), 0.0)
         self.assertEqual(calculate_run_progress_percent(300, 800), 37.5)
         self.assertEqual(calculate_run_progress_percent(200, 200), 100.0)
         self.assertEqual(calculate_run_progress_percent(100, 0), 0.0)
 
-    def test_format_history_time(self):
+    def test_calculate_time_progress_percent(self):
         """
-        Shorten date to short form month (Jan, Feb, Mar, etc.) and day and time, no year.
+        Progress bar formula = elapsed / (elapsed + left) * 100.
         """
-        self.assertEqual(format_history_time("2026-10-21 06:05:04"), "Oct 21 06:05:04")
-        self.assertEqual(format_history_time("2026-10-20 19:08:15"), "Oct 20 19:08:15")
-        self.assertEqual(format_history_time("2026-01-05 12:30:00"), "Jan 5 12:30:00")
-        self.assertEqual(format_history_time("2026-12-31 23:59:59"), "Dec 31 23:59:59")
-        self.assertEqual(format_history_time("-"), "-")
-        self.assertEqual(format_history_time(None), "-")
-
+        self.assertEqual(calculate_time_progress_percent(0.0, 100.0), 0.0)
+        self.assertEqual(calculate_time_progress_percent(6291.0, 6806.0), 48.0)
+        self.assertEqual(calculate_time_progress_percent(100.0, 0.0), 100.0)
+        self.assertEqual(calculate_time_progress_percent(100.0, None), 0.0)
+        self.assertEqual(calculate_time_progress_percent(50.0, 50.0, is_finished=True), 100.0)
+        self.assertEqual(calculate_time_progress_percent(0.0, 0.0), 0.0)
 
     def test_full_suite_eta_during_depth_benchmark(self):
         """

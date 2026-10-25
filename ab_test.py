@@ -159,6 +159,7 @@ THRESHOLD_IMPROVEMENT = 51.5  # Win share threshold (%) required for general imp
 THRESHOLD_BUG_FIX = 50.0      # Win share threshold (%) required for bug fixes in 1v1
 THRESHOLD_4P_IMPROVEMENT = 25.5 # Win share threshold (%) required for general improvements in 4p
 THRESHOLD_4P_BUG_FIX = 25.0     # Win share threshold (%) required for bug fixes in 4p
+DEFAULT_POOL_GAMES = 50       # Default paired games per mode for external pool evaluation (Updated per user instruction: 50)
 MOVE_TIMEOUT_SEC = 0.500   # 500ms official Battlesnake turn time limit
 
 
@@ -248,12 +249,6 @@ def classify_max_games_outcome(
 
     return decision, passed, stop_reason
 
-
-def get_tiered_thresholds(total_played: int, num_snakes: int) -> Tuple[float, float]:
-    """
-    Backwards-compatible wrapper calling get_statistical_thresholds with z_crit=Z_CRIT_EARLY.
-    """
-    return get_statistical_thresholds(total_played, num_snakes, z_crit=Z_CRIT_EARLY)
 
 # Smoke Test Ports & Services
 PORT_BASELINE = 8000
@@ -1169,20 +1164,7 @@ def save_run_history(
         except Exception:
             history = []
 
-    run_entry = {
-        "run_id": len(history) + 1,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "experiment_desc": experiment_desc,
-        "strategy_baseline": strategy_baseline,
-        "strategy_variant": strategy_variant,
-        "game_mode": game_mode,
-        "total_games": total_games,
-        "baseline": {"wins": w_base, "losses": l_base, "draws": d_base, "rate": rate_base},
-        "variant": {"wins": w_var, "losses": l_var, "draws": d_var, "rate": rate_var},
-        "recommendation": recommendation,
-        "stop_type": stop_type,
-        "stop_reason": stop_reason,
-    }
+    sanitized_matrix = None
     if matrix_results is not None:
         sanitized_matrix = []
         for mr in matrix_results:
@@ -1196,15 +1178,67 @@ def save_run_history(
                     for s, s_res in mr_copy["results"].items()
                 }
             sanitized_matrix.append(mr_copy)
-        run_entry["matrix_results"] = sanitized_matrix
-    if depth_results is not None:
-        run_entry["depth_results"] = depth_results
-    if unit_tests_data is not None:
-        run_entry["unit_tests"] = unit_tests_data
-    if pool_data is not None:
-        run_entry["pool_data"] = pool_data
 
-    history.append(run_entry)
+    # Check if this run should merge into an existing recent entry with the same description
+    # (e.g., external pool benchmark following self-play matrix for the same experiment)
+    matched_idx = None
+    if history:
+        for i in range(len(history) - 1, max(-1, len(history) - 6), -1):
+            prev = history[i]
+            prev_desc = prev.get("experiment_desc") or prev.get("description")
+            if experiment_desc and prev_desc == experiment_desc:
+                has_mr_prev = prev.get("matrix_results") is not None
+                has_mr_curr = sanitized_matrix is not None
+                has_pool_prev = prev.get("pool_data") is not None
+                has_pool_curr = pool_data is not None
+
+                if (has_mr_prev and not has_pool_prev and has_pool_curr) or \
+                   (has_pool_prev and not has_mr_prev and has_mr_curr):
+                    matched_idx = i
+                    break
+
+    if matched_idx is not None:
+        existing = history[matched_idx]
+        if pool_data is not None:
+            existing["pool_data"] = pool_data
+        if sanitized_matrix is not None:
+            existing["matrix_results"] = sanitized_matrix
+        if depth_results is not None:
+            existing["depth_results"] = depth_results
+        if total_games > existing.get("total_games", 0):
+            existing["total_games"] = total_games
+            existing["baseline"] = {"wins": w_base, "losses": l_base, "draws": d_base, "rate": rate_base}
+            existing["variant"] = {"wins": w_var, "losses": l_var, "draws": d_var, "rate": rate_var}
+        existing["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        existing["recommendation"] = recommendation
+        existing["stop_type"] = stop_type
+        existing["stop_reason"] = stop_reason
+        if unit_tests_data is not None and existing.get("unit_tests") is None:
+            existing["unit_tests"] = unit_tests_data
+    else:
+        run_entry = {
+            "run_id": len(history) + 1,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "experiment_desc": experiment_desc,
+            "strategy_baseline": strategy_baseline,
+            "strategy_variant": strategy_variant,
+            "game_mode": game_mode,
+            "total_games": total_games,
+            "baseline": {"wins": w_base, "losses": l_base, "draws": d_base, "rate": rate_base},
+            "variant": {"wins": w_var, "losses": l_var, "draws": d_var, "rate": rate_var},
+            "recommendation": recommendation,
+            "stop_type": stop_type,
+            "stop_reason": stop_reason,
+        }
+        if sanitized_matrix is not None:
+            run_entry["matrix_results"] = sanitized_matrix
+        if depth_results is not None:
+            run_entry["depth_results"] = depth_results
+        if unit_tests_data is not None:
+            run_entry["unit_tests"] = unit_tests_data
+        if pool_data is not None:
+            run_entry["pool_data"] = pool_data
+        history.append(run_entry)
     history = history[-100:]
 
     with history_file.open("w", encoding="utf-8") as f:
@@ -2278,7 +2312,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pool-games",
         type=int,
-        default=20,
+        default=DEFAULT_POOL_GAMES,
         help="Number of paired games per mode to evaluate against the pool",
     )
     parser.add_argument(
@@ -2291,6 +2325,13 @@ def parse_args() -> argparse.Namespace:
         "--resume",
         action="store_true",
         help="Resume an interrupted A/B benchmark run from the last saved checkpoint in ab_results/",
+    )
+    parser.add_argument(
+        "--target",
+        type=str,
+        default=None,
+        choices=["IMPROVEMENT", "PARITY", "BUG FIX", "PARITY / IMPROVEMENT", "HARNESS VERIFICATION"],
+        help="Target outcome classification (default: auto-detected from --desc)",
     )
     return parser.parse_args()
 
@@ -2312,8 +2353,18 @@ def run_ab_test_engine(
     port_var: int = PORT_VARIANT,
     dashboard_port: int = DASHBOARD_PORT,
     pool: Optional[str] = None,
-    pool_games: int = 20,
+    pool_games: int = DEFAULT_POOL_GAMES,
+    target: Optional[str] = None,
 ) -> None:
+    if target is None:
+        m = re.search(r"\[TARGET:\s*([A-Za-z0-9_\s\/\-]+)\]", desc, re.I)
+        if m:
+            target = m.group(1).strip().upper()
+        elif any(k in desc.lower() for k in ("fix", "bug", "blunder", "issue", "patch", "repair")):
+            target = "BUG FIX"
+        else:
+            target = "IMPROVEMENT"
+
     if pool is not None:
         run_pool_benchmark(
             pool_config_path=pool,
@@ -2325,6 +2376,7 @@ def run_ab_test_engine(
             threads=threads,
             skip_smoke=skip_smoke,
             dashboard_port=dashboard_port,
+            target=target,
         )
         return
     if baseline_module is None:
@@ -2396,6 +2448,8 @@ def run_ab_test_engine(
             matrix_progress=init_matrix_progress,
             suite_start_time=t_suite_start,
             run_type="self",
+            target=target,
+            pool_enabled=False,
         )
 
     # ── Step 1: Tactical Unit Tests ──
@@ -2416,12 +2470,15 @@ def run_ab_test_engine(
         t_unit_start = time.perf_counter()
         passed, test_msg = test_strategy.run_variant_unit_tests()
         unit_dur = round(time.perf_counter() - t_unit_start, 2)
-        unit_tests_result = {"status": "PASSED" if passed else "FAILED", "details": test_msg, "duration_sec": unit_dur}
+        tests_list = getattr(test_strategy, "LAST_TEST_RECORDS", [])
+        total_tests = len(tests_list) or 42
+        passed_tests = sum(1 for t in tests_list if str(t.get("status", "")).upper() == "PASSED") if tests_list else (total_tests if passed else 0)
+        unit_tests_result = {"status": "PASSED" if passed else "FAILED", "passed": passed_tests, "total": total_tests, "details": test_msg, "duration_sec": unit_dur, "tests": tests_list}
         if not passed:
             print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
             print(f"     Details: {test_msg}\n")
             if dash_client is not None:
-                dash_client.update_unit_tests(status="FAILED", details=test_msg, duration_sec=unit_dur)
+                dash_client.update_unit_tests(status="FAILED", passed=passed_tests, total=total_tests, details=test_msg, duration_sec=unit_dur, tests=tests_list)
             stop_type = "TEST_FAILURE"
             stop_reason = f"Unit test suite failed: {test_msg}"
             recommendation = "TEST_FAILURE"
@@ -2515,6 +2572,7 @@ def run_ab_test_engine(
     depth_results = checkpoint_data.get("depth_results")
     if depth_results:
         print("[2/3] Stage 2 Depth Benchmark Suite (Loaded from checkpoint)...")
+        depth_ok = depth_results.get("overall", {}).get("passed", True)
     else:
         print("[2/3] Executing Stage 2 Fixed-Position Depth Benchmark Suite...")
         print("      Testing 12 standard position fixtures (450ms, 5 interleaved repeats per side)...")
@@ -2533,6 +2591,7 @@ def run_ab_test_engine(
             enable_dashboard=(dash_client is not None),
             dash_client=dash_client,
             is_stage=True,
+            target=target,
         )
         if not depth_results:
             raise RuntimeError("CRITICAL: Depth benchmark suite failed to produce results.")
@@ -2541,6 +2600,31 @@ def run_ab_test_engine(
         print("\n  [✓] Depth benchmark table formatted for PR body:")
         print(format_depth_markdown_table(depth_results))
         print()
+
+    if not depth_ok:
+        flagged = depth_results.get("flagged_regressions") or []
+        flagged_str = ", ".join(flagged) if flagged else "depth or throughput regression"
+        print("\n[❌] CRITICAL: Stage 2 Fixed-Position Depth Benchmark FAILED!")
+        print(f"     Flagged regressions: {flagged_str}")
+        print(f"     Target '{target}' mandates zero throughput or depth regressions. Aborting before matrix self-play.\n")
+
+        stop_type = "REVERT"
+        stop_reason = f"Stage 2 Depth Benchmark failed ({flagged_str})"
+        recommendation = "REVERT"
+        results = {
+            STRATEGY_BASELINE: {"wins": 0, "losses": 0, "draws": 0},
+            STRATEGY_VARIANT: {"wins": 0, "losses": 0, "draws": 0},
+        }
+        history_path = save_run_history(
+            STRATEGY_BASELINE, STRATEGY_VARIANT, 0, results,
+            stop_type, stop_reason, recommendation, experiment_desc=desc,
+            depth_results=depth_results,
+            unit_tests_data=unit_tests_result,
+        )
+        if dash_client is not None:
+            dash_client.set_finished(stop_type, stop_reason, recommendation, str(history_path), duration_sec=time.perf_counter() - t_wall_start)
+        print_summary(0, results, stop_type, stop_reason, history_path, experiment_desc=desc, recommendation=recommendation)
+        return
 
     print(f"[3/3] Executing {matrix_title}...")
     matrix_progress = [
@@ -2795,7 +2879,7 @@ def run_ab_test_engine(
 
 def run_pool_benchmark(
     pool_config_path: str,
-    pool_games: int = 20,
+    pool_games: int = DEFAULT_POOL_GAMES,
     desc: str = "Unspecified Pool Experiment",
     modes: str = "all",
     baseline_module: Optional[str] = None,
@@ -2803,12 +2887,20 @@ def run_pool_benchmark(
     threads: int = THREADS,
     skip_smoke: bool = False,
     dashboard_port: int = DASHBOARD_PORT,
+    target: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Evaluates candidate strategy vs pool and baseline strategy vs pool using the same seed stream.
     Reports win share per mode for both, the difference, and the paired z-score.
     Appends experiment results to harness/results_ledger.csv.
     """
+    if target is None:
+        m = re.search(r"\[TARGET:\s*([A-Za-z0-9_\s\/\-]+)\]", desc, re.I)
+        if m:
+            target = m.group(1).strip().upper()
+        else:
+            target = "IMPROVEMENT"
+
     if baseline_module is None:
         baseline_module = DEFAULT_BASELINE_MODULE
     if variant_module is None:
@@ -2898,15 +2990,18 @@ def run_pool_benchmark(
             t_unit_start = time.perf_counter()
             passed, test_msg = test_strategy.run_variant_unit_tests()
             unit_dur = round(time.perf_counter() - t_unit_start, 2)
-            unit_tests_result = {"status": "PASSED" if passed else "FAILED", "details": test_msg, "duration_sec": unit_dur}
+            tests_list = getattr(test_strategy, "LAST_TEST_RECORDS", [])
+            total_tests = len(tests_list) or 42
+            passed_tests = sum(1 for t in tests_list if str(t.get("status", "")).upper() == "PASSED") if tests_list else (total_tests if passed else 0)
+            unit_tests_result = {"status": "PASSED" if passed else "FAILED", "passed": passed_tests, "total": total_tests, "details": test_msg, "duration_sec": unit_dur, "tests": tests_list}
             if not passed:
                 if dash_client is not None:
-                    dash_client.update_unit_tests(status="FAILED", details=test_msg, duration_sec=unit_dur)
+                    dash_client.update_unit_tests(status="FAILED", passed=passed_tests, total=total_tests, details=test_msg, duration_sec=unit_dur, tests=tests_list)
                 print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
                 print(f"     Details: {test_msg}\n")
                 sys.exit(1)
             if dash_client is not None:
-                dash_client.update_unit_tests(status="PASSED", details=test_msg, duration_sec=unit_dur)
+                dash_client.update_unit_tests(status="PASSED", passed=passed_tests, total=total_tests, details=test_msg, duration_sec=unit_dur, tests=tests_list)
             print("  [✓] Strategy variant passed all tactical unit tests.\n")
         else:
             unit_tests_result = {"status": "PASSED", "details": "Tactical unit tests skipped (standalone harness mode)"}
@@ -2939,6 +3034,8 @@ def run_pool_benchmark(
             matrix_progress=matrix_progress,
             suite_start_time=t_suite_start,
             run_type="pool",
+            target=target,
+            pool_enabled=True,
         )
 
     for idx, m_spec in enumerate(active_matrix):
@@ -2965,6 +3062,8 @@ def run_pool_benchmark(
                 matrix_progress=matrix_progress,
                 suite_start_time=t_suite_start,
                 run_type="pool",
+                target=target,
+                pool_enabled=True,
             )
             dash_client.update_matrix(matrix_progress)
 
@@ -3281,6 +3380,7 @@ def main():
         dashboard_port=args.dashboard_port,
         pool=args.pool,
         pool_games=args.pool_games,
+        target=args.target,
     )
 
 

@@ -290,6 +290,57 @@ class TestBlunderExtractor(unittest.TestCase):
         parsed = ast.parse(wrapped_code)
         self.assertIsNotNone(parsed)
 
+    def test_hazard_starvation_not_marked_safe(self):
+        """Verify that moves into hazard squares with insufficient health are excluded as safe alternatives."""
+        meta = {
+            "id": "hazard_game",
+            "ruleset": {"name": "royale", "settings": {"hazardDamagePerTurn": 14}},
+            "width": 11,
+            "height": 11,
+        }
+        # Snake at (1, 5) with health 10. (0, 5) is in hazard.
+        # Down (1, 4) has opponent head-to-head danger.
+        # Moving left into hazard would kill snake instantly (10 - 15 <= 0).
+        frames = [
+            {
+                "turn": 1,
+                "hazards": [{"x": 0, "y": 5}],
+                "snakes": [
+                    {
+                        "id": "my_snake",
+                        "health": 10,
+                        "body": [{"x": 1, "y": 5}, {"x": 1, "y": 6}, {"x": 2, "y": 6}],
+                    },
+                    {
+                        "id": "opp",
+                        "health": 100,
+                        "body": [{"x": 2, "y": 4}, {"x": 2, "y": 3}, {"x": 2, "y": 2}, {"x": 2, "y": 1}],
+                    },
+                ],
+            },
+            {
+                "turn": 2,
+                "hazards": [{"x": 0, "y": 5}],
+                "snakes": [
+                    {
+                        "id": "my_snake",
+                        "health": 9,
+                        "body": [{"x": 2, "y": 5}, {"x": 1, "y": 5}, {"x": 1, "y": 6}],
+                        "death": {"cause": "head-collision", "eliminatedBy": "opp", "turn": 2},
+                    },
+                    {
+                        "id": "opp",
+                        "health": 99,
+                        "body": [{"x": 2, "y": 5}, {"x": 2, "y": 4}, {"x": 2, "y": 3}, {"x": 2, "y": 2}],
+                    },
+                ],
+            },
+        ]
+        blunders = find_blunders(meta, frames, target_snake="my_snake")
+        # Since left is fatal hazard (10hp <= 15dmg) and up is neck and down/right are opponent head-to-head,
+        # there are NO safe moves, so it is an unavoidable situation, not an avoidable blunder.
+        self.assertEqual(len(blunders), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
