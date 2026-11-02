@@ -1997,7 +1997,7 @@ def _run_single_mode_simulation(
         active_pool = pool
 
     try:
-        iterator = active_pool.imap_unordered(_worker_wrapper, task_args)
+        iterator = active_pool.imap_unordered(_worker_wrapper, task_args, chunksize=1)
         last_skip_check = time.time()
         try:
             while True:
@@ -3098,7 +3098,7 @@ def run_pool_benchmark(
                 initializer=_pool_worker_init,
                 initargs=(pool_snakes, variant_module, baseline_module),
             ) as pool:
-                for res in pool.imap_unordered(_pool_worker_run, tasks):
+                for res in pool.imap_unordered(_pool_worker_run, tasks, chunksize=1):
                     mode_results.append(res)
                     g_num = res["game_num"]
                     opp_str = ", ".join(res["opponents"])

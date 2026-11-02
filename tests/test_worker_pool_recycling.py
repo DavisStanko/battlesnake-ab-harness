@@ -40,7 +40,7 @@ class _InlinePool:
         self.closed = False
         self.joined = False
 
-    def imap_unordered(self, function, items):
+    def imap_unordered(self, function, items, chunksize=1):
         return _InlineResultIterator(function, items)
 
     def close(self):
