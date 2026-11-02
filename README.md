@@ -23,10 +23,10 @@ The harness is engineered specifically for **in-process Python execution**. Stra
 
 ```bash
 # Benchmark starter variant against baseline snake (Duel 1v1)
-python ab_test.py --desc "Starter variant baseline test" --modes duel --skip-smoke
+python ab_test.py --desc "Starter variant baseline test" --target IMPROVEMENT --modes duel --skip-smoke
 
 # Benchmark across all active modes (Constrictor 4P, Royale 4P, Duel 1v1, Standard 4P)
-python ab_test.py --desc "Full regression suite" --modes all --skip-smoke
+python ab_test.py --desc "Full regression suite" --target PARITY --modes all --skip-smoke
 ```
 
 ## Pool Mode & Snake Zoo Adapter

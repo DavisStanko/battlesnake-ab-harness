@@ -30,7 +30,7 @@ class TestDashboardSkip(unittest.TestCase):
         self.assertTrue(self.state.to_dict()["skip_requested"])
 
         # Reset on init
-        self.state.handle_update({"action": "init"})
+        self.state.handle_update({"action": "init", "target": "PARITY"})
         self.assertFalse(self.state.skip_requested)
         self.assertFalse(self.state.to_dict()["skip_requested"])
 
@@ -98,6 +98,7 @@ class TestDashboardSkip(unittest.TestCase):
                 desc="Test Skip Mode",
                 is_bug_fix=False,
                 keep_threshold=51.5,
+                target="PARITY",
                 base_seed=12345,
             )
 
@@ -172,6 +173,7 @@ class TestDashboardSkip(unittest.TestCase):
                     desc="Test Multi Matrix Skip",
                     is_bug_fix=False,
                     keep_threshold=m["target_share"],
+                    target="PARITY",
                     matrix_progress=matrix_progress,
                     base_seed=1000 + idx * 100,
                 )
@@ -203,6 +205,7 @@ class TestDashboardSkip(unittest.TestCase):
     def test_live_matrix_progress_update(self):
         self.state.handle_update({
             "action": "init",
+            "target": "PARITY",
             "num_snakes": 4,
             "strategy_variant": "variant",
             "strategy_baseline": "baseline",
@@ -235,6 +238,7 @@ class TestDashboardSkip(unittest.TestCase):
         # Simulate race condition where matrix_progress has duel as PENDING even though duel is running
         self.state.handle_update({
             "action": "init",
+            "target": "PARITY",
             "game_mode": "duel",
             "num_snakes": 2,
             "strategy_variant": "variant",
@@ -287,6 +291,7 @@ class TestDashboardSkip(unittest.TestCase):
     def test_4p_initial_and_zero_win_display(self):
         self.state.handle_update({
             "action": "init",
+            "target": "PARITY",
             "num_snakes": 4,
             "strategy_variant": "variant",
             "strategy_baseline": "baseline",
@@ -482,6 +487,7 @@ class TestDashboardSkip(unittest.TestCase):
         ]
         self.state.handle_update({
             "action": "init",
+            "target": "PARITY",
             "game_mode": "duel",
             "matrix_progress": matrix_prog,
         })
@@ -618,6 +624,7 @@ class TestDashboardSkip(unittest.TestCase):
         # 1. Self-play matrix run
         self.state.handle_update({
             "action": "init",
+            "target": "PARITY",
             "run_type": "self",
             "experiment_desc": "Test Freeze Stages",
         })
@@ -640,6 +647,7 @@ class TestDashboardSkip(unittest.TestCase):
         # 2. Transition to Pool within same experiment
         self.state.handle_update({
             "action": "init",
+            "target": "PARITY",
             "run_type": "pool",
             "experiment_desc": "Test Freeze Stages",
         })
@@ -690,6 +698,7 @@ class TestDashboardSkip(unittest.TestCase):
     def test_pool_modes_and_opponents_in_set_finished(self):
         self.state.handle_update({
             "action": "init",
+            "target": "PARITY",
             "run_type": "pool",
             "experiment_desc": "Pool Finished Test",
         })
@@ -828,6 +837,7 @@ class TestDashboardSkip(unittest.TestCase):
         self.state.depth_data = {"passed": True, "duration_sec": 25.0, "completed_positions": 12}
         self.state.handle_update({
             "action": "init",
+            "target": "PARITY",
             "run_type": "self",
             "experiment_desc": "Full Suite Continuity Test",
             "pid": os.getpid(),
@@ -845,6 +855,7 @@ class TestDashboardSkip(unittest.TestCase):
         # Pool starts on same experiment: suite elapsed must start at >= 330.0s, NOT 0.0s!
         self.state.handle_update({
             "action": "init",
+            "target": "PARITY",
             "run_type": "pool",
             "experiment_desc": "Full Suite Continuity Test",
             "game_mode": "constrictor",
@@ -855,7 +866,7 @@ class TestDashboardSkip(unittest.TestCase):
         self.assertGreaterEqual(d_pool_start["suite_elapsed_seconds"], 330.0)
         self.assertEqual(d_pool_start["matrix_duration_sec"], 300.0)
         self.assertAlmostEqual(d_pool_start["games_progress_percent"], 78.6, places=1)
-        self.assertAlmostEqual(d_pool_start["progress_percent"], 95.0, places=1)
+        self.assertAlmostEqual(d_pool_start["progress_percent"], 12.3, places=1)
 
     def test_target_and_pool_enabled_in_dashboard_state(self):
         """Test target classification and pool_enabled status tracking."""

@@ -46,20 +46,16 @@ def load_mode_timings(timings_path: Optional[Path] = None) -> list:
     p = timings_path or MODE_TIMINGS_FILE
     if not p.is_file():
         return []
-    try:
-        mtime = p.stat().st_mtime
-        if _MODE_TIMINGS_CACHE is not None and mtime == _MODE_TIMINGS_MTIME and timings_path is None:
-            return _MODE_TIMINGS_CACHE
-        with p.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                if timings_path is None:
-                    _MODE_TIMINGS_CACHE = data
-                    _MODE_TIMINGS_MTIME = mtime
-                return data
-    except Exception:
-        if _MODE_TIMINGS_CACHE is not None and timings_path is None:
-            return _MODE_TIMINGS_CACHE
+    mtime = p.stat().st_mtime
+    if _MODE_TIMINGS_CACHE is not None and mtime == _MODE_TIMINGS_MTIME and timings_path is None:
+        return _MODE_TIMINGS_CACHE
+    with p.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+        if isinstance(data, list):
+            if timings_path is None:
+                _MODE_TIMINGS_CACHE = data
+                _MODE_TIMINGS_MTIME = mtime
+            return data
     return []
 
 
@@ -85,13 +81,10 @@ def append_mode_timing(
 
     entries = []
     if p.is_file():
-        try:
-            with p.open("r", encoding="utf-8") as f:
-                d = json.load(f)
-                if isinstance(d, list):
-                    entries = d
-        except Exception:
-            entries = []
+        with p.open("r", encoding="utf-8") as f:
+            d = json.load(f)
+            if isinstance(d, list):
+                entries = d
 
     # Deduplicate if last entry is identical
     if entries:
@@ -106,16 +99,9 @@ def append_mode_timing(
 
     entries.append(new_entry)
     tmp_path = p.with_suffix(".tmp")
-    try:
-        with tmp_path.open("w", encoding="utf-8") as f:
-            json.dump(entries, f, indent=2)
-        os.replace(tmp_path, p)
-    except Exception:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except Exception:
-                pass
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(entries, f, indent=2)
+    os.replace(tmp_path, p)
 
 
 def get_mode_medians(
@@ -484,37 +470,33 @@ def load_run_history(max_entries: Optional[int] = None) -> list:
     if not history_file.exists():
         history_file = Path(__file__).parent / "ab_results" / "ab_history.json"
     if history_file.exists():
-        try:
-            mtime = history_file.stat().st_mtime
-            if _HISTORY_CACHE is not None and mtime == _HISTORY_MTIME:
-                return _HISTORY_CACHE
-            with history_file.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    consolidated = consolidate_run_history(data)
-                    sliced = consolidated[-max_entries:] if (max_entries is not None and len(consolidated) > max_entries) else consolidated
-                    for entry in sliced:
-                        if isinstance(entry, dict):
-                            entry.pop("games", None)
-                            if "matrix_results" in entry and isinstance(entry["matrix_results"], list):
-                                for mr in entry["matrix_results"]:
-                                    if isinstance(mr, dict):
-                                        mr.pop("games", None)
-                                        mr.pop("rows", None)
-                            for key in ("baseline", "variant"):
-                                sub = entry.get(key)
-                                if isinstance(sub, dict):
-                                    for num_k in ("wins", "losses", "draws"):
-                                        if isinstance(sub.get(num_k), float):
-                                            sub[num_k] = round(sub[num_k], 2)
-                            if isinstance(entry.get("draws"), float):
-                                entry["draws"] = round(entry["draws"], 2)
-                    _HISTORY_CACHE = sliced
-                    _HISTORY_MTIME = mtime
-                    return sliced
-        except Exception:
-            if _HISTORY_CACHE is not None:
-                return _HISTORY_CACHE
+        mtime = history_file.stat().st_mtime
+        if _HISTORY_CACHE is not None and mtime == _HISTORY_MTIME:
+            return _HISTORY_CACHE
+        with history_file.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                consolidated = consolidate_run_history(data)
+                sliced = consolidated[-max_entries:] if (max_entries is not None and len(consolidated) > max_entries) else consolidated
+                for entry in sliced:
+                    if isinstance(entry, dict):
+                        entry.pop("games", None)
+                        if "matrix_results" in entry and isinstance(entry["matrix_results"], list):
+                            for mr in entry["matrix_results"]:
+                                if isinstance(mr, dict):
+                                    mr.pop("games", None)
+                                    mr.pop("rows", None)
+                        for key in ("baseline", "variant"):
+                            sub = entry.get(key)
+                            if isinstance(sub, dict):
+                                for num_k in ("wins", "losses", "draws"):
+                                    if isinstance(sub.get(num_k), float):
+                                        sub[num_k] = round(sub[num_k], 2)
+                        if isinstance(entry.get("draws"), float):
+                            entry["draws"] = round(entry["draws"], 2)
+                _HISTORY_CACHE = sliced
+                _HISTORY_MTIME = mtime
+                return sliced
     return []
 
 
@@ -705,63 +687,6 @@ def format_history_time(raw: Any) -> str:
         return f"{month_str} {day} {time_part}"
     except (ValueError, IndexError):
         return s
-
-
-def get_default_unit_tests(status: str = "PASSED", total_duration: float = 4.7) -> List[Dict[str, Any]]:
-    test_names = [
-        "test_avoid_dead_end_when_boxed_in_corner",
-        "test_avoid_larger_opponent_corridor_trap_prefer_tail_recession_pocket",
-        "test_avoid_risky_head_kill_chase",
-        "test_avoid_running_into_opponent_if_open_space",
-        "test_c_engine_loads_without_compiler_if_binary_exists",
-        "test_c_engine_mandatory_fail_fast",
-        "test_concurrent_move_requests_under_timeout_cap",
-        "test_concurrent_thread_safety_no_segfault",
-        "test_constrictor_7x7_turn_11_must_take_right_for_tie",
-        "test_constrictor_turn_22_must_take_right",
-        "test_constrictor_turn_30_must_take_down",
-        "test_dont_run_into_tail_if_constrictor",
-        "test_dont_run_into_tail_if_just_ate",
-        "test_duel_turn_172_avoid_wall_pocket_tunnel_left",
-        "test_duel_turn_208_avoid_dead_end_pocket_suicide",
-        "test_duel_turn_78_must_keep_opponent_cornered",
-        "test_duel_turn_79_avoid_corner_trap_wall_collision",
-        "test_execute_adjacent_head_kill_on_smaller_opponent",
-        "test_failure_case_turn_45_avoid_contested_head_collision",
-        "test_game_de138756_turn_106_avoid_suicidal_head_threat_override",
-        "test_multiplayer_turn_108_avoid_opponent_body_suicide",
-        "test_multiplayer_turn_10_avoid_non_receding_tail_collision",
-        "test_multiplayer_turn_116_avoid_flibba_head_to_head_trap",
-        "test_multiplayer_turn_119_avoid_wall_down",
-        "test_multiplayer_turn_194_pocket_trap_follow_tail",
-        "test_multiplayer_turn_29_avoid_wall_left",
-        "test_multiplayer_turn_31_avoid_wall_collision",
-        "test_multiplayer_turn_321_cornered_down_into_tail",
-        "test_multiplayer_turn_61_avoid_wall_and_opponent_body_suicide",
-        "test_multiplayer_turn_61_avoid_wall_corner_pocket_trap",
-        "test_multiplayer_turn_63_avoid_self_collision",
-        "test_multiplayer_turn_85_avoid_wall_up",
-        "test_multiplayer_turn_97_avoid_opponent_body_suicide",
-        "test_never_run_into_wall",
-        "test_never_run_into_yourself",
-        "test_prefer_opponent_over_wall_or_self",
-        "test_royale_danger_zone_low_health_must_seek_food",
-        "test_search_diagnostics",
-        "test_trap_avoidance_dead_end_pocket",
-        "test_urgent_food_eating_on_critical_health",
-        "test_wrap_mode_boundary_escape",
-        "test_wrap_mode_flood_fill_modulo",
-    ]
-    per_test_dur = round(total_duration / max(len(test_names), 1), 3)
-    return [
-        {
-            "name": name,
-            "status": status,
-            "duration_sec": per_test_dur,
-            "message": "",
-        }
-        for name in test_names
-    ]
 
 
 def render_unit_tests_html(tests: List[Dict[str, Any]]) -> str:
@@ -955,7 +880,10 @@ class DashboardState:
                 self.early_stop_low = payload.get("early_stop_low", 18.0)
                 self.threads = payload.get("threads", self.threads)
                 self.experiment_desc = new_desc
-                self.target = payload.get("target")
+                target_val = payload.get("target")
+                if not target_val:
+                    raise ValueError("Missing mandatory parameter: 'target'")
+                self.target = str(target_val).strip().upper()
                 self.pool_enabled = bool(payload.get("pool_enabled", new_run_type == "pool"))
                 self.game_mode = payload.get("game_mode", "standard")
                 self.num_snakes = payload.get("num_snakes", 4)
@@ -1306,16 +1234,13 @@ class DashboardState:
                         self.suite_start_time = self.start_time
                 tests_list = payload.get("tests")
                 if not tests_list:
-                    try:
-                        import sys
-                        mod = sys.modules.get("tests.test_strategy")
-                        if mod and hasattr(mod, "LAST_TEST_RECORDS") and getattr(mod, "LAST_TEST_RECORDS"):
-                            tests_list = getattr(mod, "LAST_TEST_RECORDS")
-                    except Exception:
-                        pass
-                if not tests_list and payload.get("status") in ("PASSED", "DONE"):
-                    tests_list = get_default_unit_tests(status="PASSED", total_duration=float(payload.get("duration_sec", 4.7)))
-                tot = len(tests_list) if tests_list else payload.get("total", 42)
+                    import sys
+                    mod = sys.modules.get("tests.test_strategy")
+                    if mod and hasattr(mod, "LAST_TEST_RECORDS") and getattr(mod, "LAST_TEST_RECORDS"):
+                        tests_list = getattr(mod, "LAST_TEST_RECORDS")
+                if not tests_list:
+                    tests_list = []
+                tot = len(tests_list) if tests_list else payload.get("total", 0)
                 pas = sum(1 for t in tests_list if str(t.get("status", "")).upper() == "PASSED") if tests_list else payload.get("passed", tot)
                 self.unit_tests_data = {
                     "status": payload.get("status", "PASSED"),
@@ -1752,11 +1677,11 @@ class DashboardState:
             else:
                 suite_progress_pct = suite_games_pct
 
-            unit_d = getattr(self, "unit_tests_data", {"status": "PENDING", "passed": 0, "total": 42, "details": ""})
+            unit_d = getattr(self, "unit_tests_data", {"status": "PENDING", "passed": 0, "total": 0, "details": ""})
             if isinstance(unit_d, dict):
                 unit_d_copy = dict(unit_d)
-                if not unit_d_copy.get("tests") and unit_d_copy.get("status") in ("PASSED", "DONE"):
-                    unit_d_copy["tests"] = get_default_unit_tests(status="PASSED", total_duration=float(unit_d_copy.get("duration_sec", 4.7)))
+                if not unit_d_copy.get("tests"):
+                    unit_d_copy["tests"] = []
             else:
                 unit_d_copy = unit_d
 
@@ -3171,10 +3096,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
           <div class="summary-strip" id="unitSummaryStrip">
             <div class="summary-metrics">
-              <span>Tests: <strong id="unitPassedMetric">42 / 42 passed</strong></span>
+              <span>Tests: <strong id="unitPassedMetric">-- / -- passed</strong></span>
             </div>
             <div class="summary-status">
-              <span class="status-chip status-chip-passed matrix-col-status matrix-status-passed" id="unitSummaryChip">PASSED</span>
+              <span class="status-chip status-chip-pending matrix-col-status matrix-status-pending" id="unitSummaryChip">PENDING</span>
             </div>
           </div>
 
@@ -4326,10 +4251,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     const unitDurationMetric = document.getElementById('unitDurationMetric');
     const unitChip = document.getElementById('unitSummaryChip');
 
-    const totalCount = (unitData.tests && unitData.tests.length) ? unitData.tests.length : (unitData.total != null ? unitData.total : 42);
-    const passedCount = unitData.passed != null ? unitData.passed : (unitData.tests ? unitData.tests.filter(t => t.status === 'PASSED').length : totalCount);
-    const durSec = (unitData.duration_sec != null && unitData.duration_sec > 0) ? Number(unitData.duration_sec) : 4.7;
-    const durStr = formatDuration(durSec, true);
+    const totalCount = (unitData.tests && unitData.tests.length) ? unitData.tests.length : (unitData.total != null ? unitData.total : 0);
+    const passedCount = unitData.passed != null ? unitData.passed : (unitData.tests ? unitData.tests.filter(t => t.status === 'PASSED').length : 0);
+    const durSec = (unitData.duration_sec != null && unitData.duration_sec > 0) ? Number(unitData.duration_sec) : 0;
+    const durStr = durSec > 0 ? formatDuration(durSec, true) : '--';
 
     if (unitPassedMetric) {
       unitPassedMetric.innerText = `${passedCount} / ${totalCount} passed`;
@@ -4849,8 +4774,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const timeStr = escapeHtml(formatHistoryTime(run.timestamp));
 
       // 1. Tests status
-      let unitScore = '42/42';
-      let unitColor = 'var(--pipeline-green)';
+      let unitScore = '--';
+      let unitColor = 'var(--pipeline-text-muted)';
       const uData = run.unit_tests || run.unit_tests_data;
       if (uData && typeof uData === 'object') {
         if (typeof uData.passed === 'number' && typeof uData.total === 'number') {
@@ -4889,9 +4814,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             if (st === 'FAILED') {
               unitScore = 'FAIL';
               unitColor = 'var(--pipeline-red)';
-            } else {
-              unitScore = '42/42';
+            } else if (st === 'PASSED') {
+              unitScore = 'PASS';
               unitColor = 'var(--pipeline-green)';
+            } else {
+              unitScore = '--';
+              unitColor = 'var(--pipeline-text-muted)';
             }
           }
         } else {
@@ -4900,7 +4828,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             unitScore = 'FAIL';
             unitColor = 'var(--pipeline-red)';
           } else if (st === 'PASSED') {
-            unitScore = '42/42';
+            unitScore = 'PASS';
             unitColor = 'var(--pipeline-green)';
           }
         }
@@ -5093,15 +5021,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const targetText = document.getElementById('targetText');
       if (targetBadge && targetText) {
         let targetType = (data.target || '').trim().toUpperCase();
-        if (!targetType && data.experiment_desc) {
-          const m = data.experiment_desc.match(new RegExp('\\[TARGET:\\s*([A-Za-z0-9_\\s\\/\\-]+)\\]', 'i'));
-          if (m) {
-            targetType = m[1].trim().toUpperCase();
-          } else if (/^fix\b/i.test(data.experiment_desc.trim())) {
-            targetType = 'BUG FIX';
-          }
-        }
-        if (targetType) {
+        if (isRunning && !targetType) {
+          targetBadge.className = 'badge badge-target badge-target-bug-fix';
+          targetBadge.style.display = 'inline-flex';
+          setText(targetText, 'ERROR: MISSING TARGET');
+        } else if (targetType) {
           let tCls = 'improvement';
           if (targetType.includes('PARITY')) tCls = 'parity';
           else if (targetType.includes('BUG')) tCls = 'bug-fix';
@@ -5300,14 +5224,11 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
 
     # Pre-render Unit Tests detail
     unit_data = data.get("unit_tests_data") or {}
-    unit_status = str(unit_data.get("status") or ("PASSED" if is_running else "PENDING")).upper()
+    unit_status = str(unit_data.get("status") or ("RUNNING" if is_running else "PENDING")).upper()
     unit_dur = unit_data.get("duration_sec")
-    unit_dur_str = format_duration(float(unit_dur), allow_decimal=True) if unit_dur else ("0:08" if is_running else "--")
-    unit_dur_sec = float(unit_data.get("duration_sec", 4.7))
-    tests_list = unit_data.get("tests")
-    if not tests_list and unit_status in ("PASSED", "DONE", "FINISHED"):
-        tests_list = get_default_unit_tests(status="PASSED", total_duration=unit_dur_sec)
-    unit_total = len(tests_list) if tests_list else unit_data.get("total", 42)
+    unit_dur_str = format_duration(float(unit_dur), allow_decimal=True) if unit_dur else "--"
+    tests_list = unit_data.get("tests") or []
+    unit_total = len(tests_list) if tests_list else unit_data.get("total", 0)
     unit_passed = sum(1 for t in tests_list if str(t.get("status", "")).upper() == "PASSED") if tests_list else unit_data.get("passed", unit_total)
     if unit_status == "RUNNING":
         unit_header_line = "Running unit tests..."
@@ -5669,13 +5590,13 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         f'<strong class="header-stat-val" id="threadsCount">{threads_display}</strong>'
     )
     out = out.replace(
-        '<strong id="unitPassedMetric">42 / 42 passed</strong>',
+        '<strong id="unitPassedMetric">-- / -- passed</strong>',
         f'<strong id="unitPassedMetric">{unit_passed} / {unit_total} passed</strong>'
     )
     unit_chip_cls = "passed" if unit_status in ("PASSED", "DONE") else ("failed" if unit_status == "FAILED" else ("running" if unit_status == "RUNNING" else "pending"))
     unit_chip_txt = "PASSED" if unit_status in ("PASSED", "DONE") else ("FAILED" if unit_status == "FAILED" else ("RUNNING" if unit_status == "RUNNING" else "PENDING"))
     out = out.replace(
-        '<span class="status-chip status-chip-passed matrix-col-status matrix-status-passed" id="unitSummaryChip">PASSED</span>',
+        '<span class="status-chip status-chip-pending matrix-col-status matrix-status-pending" id="unitSummaryChip">PENDING</span>',
         f'<span class="status-chip status-chip-{unit_chip_cls} matrix-col-status matrix-status-{unit_chip_cls}" id="unitSummaryChip">{unit_chip_txt}</span>'
     )
     out = out.replace(
@@ -5690,13 +5611,9 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
         '<div class="badge" id="statusBadge">\n        <span class="status-dot" id="statusDot"></span>\n        <span id="statusText">IDLE</span>\n      </div>',
         f'<div class="badge badge-status-{status_chip_class}" id="statusBadge">\n        <span class="status-dot" id="statusDot"></span>\n        <span id="statusText">{status_chip_text}</span>\n      </div>'
     )
-    target_val = data.get("target") or ""
-    if not target_val and data.get("experiment_desc"):
-        m_t = re.search(r"\[TARGET:\s*([A-Za-z0-9_\s\/\-]+)\]", str(data["experiment_desc"]), re.I)
-        if m_t:
-            target_val = m_t.group(1).strip().upper()
-        elif str(data["experiment_desc"]).strip().lower().startswith("fix"):
-            target_val = "BUG FIX"
+    target_val = str(data.get("target") or "").strip().upper()
+    if is_running and not target_val:
+        raise ValueError("Missing mandatory parameter: 'target' in dashboard state")
     if target_val:
         t_cls = "improvement"
         if "PARITY" in target_val:
@@ -6071,8 +5988,8 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
 
             # Unit Tests
             unit_data = run.get("unit_tests") or run.get("unit_tests_data") or {}
-            unit_score = "42/42"
-            unit_col = "var(--pipeline-green)"
+            unit_score = "--"
+            unit_col = "var(--pipeline-text-muted)"
             if isinstance(unit_data, dict):
                 if unit_data.get("passed") is not None and unit_data.get("total") is not None:
                     p = int(unit_data["passed"])
@@ -6105,16 +6022,19 @@ def render_html_with_state(template_html: str, data: Dict[str, Any]) -> str:
                             if st == "FAILED":
                                 unit_score = "FAIL"
                                 unit_col = "var(--pipeline-red)"
-                            else:
-                                unit_score = "42/42"
+                            elif st == "PASSED":
+                                unit_score = "PASS"
                                 unit_col = "var(--pipeline-green)"
+                            else:
+                                unit_score = "--"
+                                unit_col = "var(--pipeline-text-muted)"
                 else:
                     st = str(unit_data.get("status", "")).upper()
                     if st == "FAILED":
                         unit_score = "FAIL"
                         unit_col = "var(--pipeline-red)"
                     elif st == "PASSED":
-                        unit_score = "42/42"
+                        unit_score = "PASS"
                         unit_col = "var(--pipeline-green)"
             elif h_rec == "TEST_FAILURE":
                 unit_score = "FAIL"
@@ -6503,6 +6423,8 @@ class DashboardClient:
         target: Optional[str] = None,
         pool_enabled: bool = False,
     ):
+        if not target:
+            raise ValueError("Missing mandatory parameter: 'target'")
         payload = {
             "action": "init",
             "pid": pid if pid is not None else os.getpid(),
@@ -6597,8 +6519,8 @@ class DashboardClient:
                     tests = getattr(mod, "LAST_TEST_RECORDS")
             except Exception:
                 pass
-        computed_total = len(tests) if tests else (total or 42)
-        computed_passed = sum(1 for t in tests if str(t.get("status", "")).upper() == "PASSED") if tests else (passed if passed is not None else computed_total)
+        computed_total = len(tests) if tests else (total or 0)
+        computed_passed = sum(1 for t in tests if str(t.get("status", "")).upper() == "PASSED") if tests else (passed if passed is not None else 0)
         payload = {
             "action": "update_unit_tests",
             "status": status,

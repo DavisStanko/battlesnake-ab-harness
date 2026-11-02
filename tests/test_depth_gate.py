@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from depth_test import is_parity_target, run_depth_test
 
@@ -130,13 +131,14 @@ class TestDepthGate(unittest.TestCase):
             flagged = results.get("flagged_regressions", [])
             self.assertEqual(len(flagged), 0)
 
+    @patch("tests.test_strategy.run_variant_unit_tests", return_value=(True, "All passed"))
     @patch("ab_test.ensure_dashboard_running")
     @patch("ab_test.PROJECT_ROOT")
     @patch("ab_test._run_single_mode_simulation")
     @patch("harness.depth_test.run_depth_test")
     @patch("ab_test.save_run_history")
     def test_ab_engine_halts_on_depth_failure(
-        self, mock_save_history, mock_run_depth, mock_sim_mode, mock_root, mock_dash
+        self, mock_save_history, mock_run_depth, mock_sim_mode, mock_root, mock_dash, mock_unit_tests
     ):
         """
         Verifies that when Stage 2 depth/throughput fails, ab_test aborts with REVERT

@@ -136,10 +136,7 @@ def create_worker_pool(
 
 
 # Pre-initialize defaults so imported helpers work unconditionally
-try:
-    init_strategies(_baseline_module_name, _variant_module_name)
-except Exception:
-    pass
+init_strategies(_baseline_module_name, _variant_module_name)
 
 # ---------------------------------------------------------------------------
 # Project Configuration Constants
@@ -793,15 +790,9 @@ def simulate_single_pool_game(
         )
         if sn["id"] == eval_id:
             if hasattr(eval_strategy, "start"):
-                try:
-                    eval_strategy.start(init_state)
-                except Exception:
-                    pass
+                eval_strategy.start(init_state)
         else:
-            try:
-                zoo_adapter.start(init_state)
-            except Exception:
-                pass
+            zoo_adapter.start(init_state)
 
     turn = 1
     winner = None
@@ -1156,13 +1147,10 @@ def save_run_history(
 
     history = []
     if history_file.exists():
-        try:
-            with history_file.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    history = data
-        except Exception:
-            history = []
+        with history_file.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                history = data
 
     sanitized_matrix = None
     if matrix_results is not None:
@@ -1295,38 +1283,29 @@ def load_checkpoint(results_dir: Path) -> Optional[Dict[str, Any]]:
     path = get_checkpoint_path(results_dir)
     if not path.is_file():
         return None
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, dict):
+        return data
     return None
 
 
 def save_checkpoint(results_dir: Path, data: Dict[str, Any]) -> None:
-    try:
-        results_dir.mkdir(parents=True, exist_ok=True)
-        path = get_checkpoint_path(results_dir)
-        tmp_path = path.with_suffix(".json.tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, default=str)
-        tmp_path.replace(path)
-    except Exception:
-        pass
+    results_dir.mkdir(parents=True, exist_ok=True)
+    path = get_checkpoint_path(results_dir)
+    tmp_path = path.with_suffix(".json.tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, default=str)
+    tmp_path.replace(path)
 
 
 def clear_checkpoint(results_dir: Path) -> None:
-    try:
-        path = get_checkpoint_path(results_dir)
-        if path.is_file():
-            path.unlink()
-        tmp_path = path.with_suffix(".json.tmp")
-        if tmp_path.is_file():
-            tmp_path.unlink()
-    except Exception:
-        pass
+    path = get_checkpoint_path(results_dir)
+    if path.is_file():
+        path.unlink()
+    tmp_path = path.with_suffix(".json.tmp")
+    if tmp_path.is_file():
+        tmp_path.unlink()
 
 
 def print_summary(
@@ -1493,13 +1472,10 @@ def print_matrix_summary(
     print(f"Final Matrix Decision:  {overall_recommendation} ({matrix_status_note})")
     print(f"History File:           {history_path}")
     if depth_results:
-        try:
-            from harness.depth_test import format_depth_markdown_table
-            print()
-            print("Depth Benchmark Scorecard (Stage 2 - Table for PR body):")
-            print(format_depth_markdown_table(depth_results))
-        except Exception:
-            pass
+        from harness.depth_test import format_depth_markdown_table
+        print()
+        print("Depth Benchmark Scorecard (Stage 2 - Table for PR body):")
+        print(format_depth_markdown_table(depth_results))
     print(sep)
     print()
 
@@ -1725,34 +1701,31 @@ def extract_post_benchmark_blunders(
     detected_blunders: List[Dict[str, Any]] = []
 
     for loss in target_losses:
-        try:
-            _, blunders = replay_game_for_blunders(
-                game_num=loss["game"],
-                seed=loss["seed"],
-                mode=loss["mode"],
-                max_turns=loss["turns"] + 2,
-                target_snake=STRATEGY_VARIANT,
-            )
-            for b in blunders:
-                clean_mode = re.sub(r"[^a-zA-Z0-9_]", "_", loss["mode"].lower())
-                clean_cause = re.sub(r"[^a-zA-Z0-9_]", "_", b.blunder_cause)
-                method_name = f"test_blunder_{clean_mode}_g{loss['game']}_t{b.turn}_{clean_cause}"
-                test_code = generate_unit_test_code(b, method_name=method_name)
-                detected_blunders.append({
-                    "game": loss["game"],
-                    "seed": loss["seed"],
-                    "mode": loss["mode"],
-                    "mode_name": loss["mode_name"],
-                    "loss_turns": loss["turns"],
-                    "blunder_turn": b.turn,
-                    "blunder_move": b.blunder_move,
-                    "blunder_cause": b.blunder_cause,
-                    "safe_moves": b.safe_moves,
-                    "test_code": test_code,
-                    "method_name": method_name,
-                })
-        except Exception as err:
-            print(f"  [⚠️] Could not replay Game #{loss['game']} ({loss['mode_name']}, Seed {loss['seed']}): {err}")
+        _, blunders = replay_game_for_blunders(
+            game_num=loss["game"],
+            seed=loss["seed"],
+            mode=loss["mode"],
+            max_turns=loss["turns"] + 2,
+            target_snake=STRATEGY_VARIANT,
+        )
+        for b in blunders:
+            clean_mode = re.sub(r"[^a-zA-Z0-9_]", "_", loss["mode"].lower())
+            clean_cause = re.sub(r"[^a-zA-Z0-9_]", "_", b.blunder_cause)
+            method_name = f"test_blunder_{clean_mode}_g{loss['game']}_t{b.turn}_{clean_cause}"
+            test_code = generate_unit_test_code(b, method_name=method_name)
+            detected_blunders.append({
+                "game": loss["game"],
+                "seed": loss["seed"],
+                "mode": loss["mode"],
+                "mode_name": loss["mode_name"],
+                "loss_turns": loss["turns"],
+                "blunder_turn": b.turn,
+                "blunder_move": b.blunder_move,
+                "blunder_cause": b.blunder_cause,
+                "safe_moves": b.safe_moves,
+                "test_code": test_code,
+                "method_name": method_name,
+            })
 
     output_test_file: Optional[Path] = None
     if detected_blunders and results_dir:
@@ -1870,6 +1843,7 @@ def _run_single_mode_simulation(
     desc: str,
     is_bug_fix: bool,
     keep_threshold: float,
+    target: str,
     threads: int = THREADS,
     matrix_progress: Optional[List[dict]] = None,
     results_dir: Optional[Path] = None,
@@ -1879,6 +1853,8 @@ def _run_single_mode_simulation(
     pool: Optional[mp.pool.Pool] = None,
     suite_start_time: Optional[float] = None,
 ) -> Dict[str, Any]:
+    if not target:
+        raise ValueError("Missing mandatory parameter: 'target'")
     if results_dir is None:
         results_dir = PROJECT_ROOT / "ab_results"
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -1900,6 +1876,7 @@ def _run_single_mode_simulation(
         game_mode=mode,
         num_snakes=num_snakes,
         target_win_share=target_share,
+        target=target,
         matrix_progress=matrix_progress,
         suite_start_time=suite_start_time,
     )
@@ -2329,9 +2306,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target",
         type=str,
-        default=None,
+        required=True,
         choices=["IMPROVEMENT", "PARITY", "BUG FIX", "PARITY / IMPROVEMENT", "HARNESS VERIFICATION"],
-        help="Target outcome classification (default: auto-detected from --desc)",
+        help="Mandatory target outcome classification (e.g. --target PARITY, --target IMPROVEMENT)",
     )
     return parser.parse_args()
 
@@ -2356,14 +2333,12 @@ def run_ab_test_engine(
     pool_games: int = DEFAULT_POOL_GAMES,
     target: Optional[str] = None,
 ) -> None:
-    if target is None:
-        m = re.search(r"\[TARGET:\s*([A-Za-z0-9_\s\/\-]+)\]", desc, re.I)
-        if m:
-            target = m.group(1).strip().upper()
-        elif any(k in desc.lower() for k in ("fix", "bug", "blunder", "issue", "patch", "repair")):
-            target = "BUG FIX"
-        else:
-            target = "IMPROVEMENT"
+    if not target:
+        raise ValueError("Missing mandatory parameter: 'target'. Must specify --target (e.g. PARITY or IMPROVEMENT).")
+    target = target.strip().upper()
+
+    # Clean any [TARGET: ...] tag from desc so it never appears in the title
+    desc = re.sub(r"\s*\[TARGET:\s*[^\]]+\]", "", desc, flags=re.I).strip()
 
     if pool is not None:
         run_pool_benchmark(
@@ -2454,54 +2429,47 @@ def run_ab_test_engine(
 
     # ── Step 1: Tactical Unit Tests ──
     print("[1/3] Running strategy safety unit tests on variant...")
-    test_strategy = None
     try:
         from tests import test_strategy
     except ImportError:
-        try:
-            import test_strategy
-        except ImportError:
-            test_strategy = None
+        import test_strategy
+
+    if not hasattr(test_strategy, "run_variant_unit_tests"):
+        raise AttributeError("Module 'test_strategy' does not define 'run_variant_unit_tests'.")
 
     unit_tests_result: Optional[Dict[str, Any]] = None
-    if test_strategy and hasattr(test_strategy, "run_variant_unit_tests"):
+    if dash_client is not None:
+        dash_client.update_unit_tests(status="RUNNING")
+    t_unit_start = time.perf_counter()
+    passed, test_msg = test_strategy.run_variant_unit_tests()
+    unit_dur = round(time.perf_counter() - t_unit_start, 2)
+    tests_list = getattr(test_strategy, "LAST_TEST_RECORDS", [])
+    total_tests = len(tests_list)
+    passed_tests = sum(1 for t in tests_list if str(t.get("status", "")).upper() == "PASSED")
+    unit_tests_result = {"status": "PASSED" if passed else "FAILED", "passed": passed_tests, "total": total_tests, "details": test_msg, "duration_sec": unit_dur, "tests": tests_list}
+    if not passed:
+        print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
+        print(f"     Details: {test_msg}\n")
         if dash_client is not None:
-            dash_client.update_unit_tests(status="RUNNING")
-        t_unit_start = time.perf_counter()
-        passed, test_msg = test_strategy.run_variant_unit_tests()
-        unit_dur = round(time.perf_counter() - t_unit_start, 2)
-        tests_list = getattr(test_strategy, "LAST_TEST_RECORDS", [])
-        total_tests = len(tests_list) or 42
-        passed_tests = sum(1 for t in tests_list if str(t.get("status", "")).upper() == "PASSED") if tests_list else (total_tests if passed else 0)
-        unit_tests_result = {"status": "PASSED" if passed else "FAILED", "passed": passed_tests, "total": total_tests, "details": test_msg, "duration_sec": unit_dur, "tests": tests_list}
-        if not passed:
-            print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
-            print(f"     Details: {test_msg}\n")
-            if dash_client is not None:
-                dash_client.update_unit_tests(status="FAILED", passed=passed_tests, total=total_tests, details=test_msg, duration_sec=unit_dur, tests=tests_list)
-            stop_type = "TEST_FAILURE"
-            stop_reason = f"Unit test suite failed: {test_msg}"
-            recommendation = "TEST_FAILURE"
-            results = {
-                STRATEGY_BASELINE: {"wins": 0, "losses": 0, "draws": 0},
-                STRATEGY_VARIANT: {"wins": 0, "losses": 0, "draws": 0},
-            }
-            history_path = save_run_history(
-                STRATEGY_BASELINE, STRATEGY_VARIANT, 0, results,
-                stop_type, stop_reason, recommendation, experiment_desc=desc,
-                unit_tests_data=unit_tests_result,
-            )
-            dash_client.set_finished(stop_type, stop_reason, recommendation, str(history_path), duration_sec=unit_dur)
-            print_summary(0, results, stop_type, stop_reason, history_path, experiment_desc=desc, recommendation=recommendation)
-            return
-        if dash_client is not None:
-            dash_client.update_unit_tests(status="PASSED", details=test_msg, duration_sec=unit_dur)
-        print("  [✓] Strategy variant passed all tactical unit tests.\n")
-    else:
-        unit_tests_result = {"status": "PASSED", "details": "Tactical unit tests skipped (standalone harness mode)"}
-        if dash_client is not None:
-            dash_client.update_unit_tests(status="PASSED", details="Tactical unit tests skipped (standalone harness mode)")
-        print("  [✓] No tactical unit tests registered (standalone harness mode).\n")
+            dash_client.update_unit_tests(status="FAILED", passed=passed_tests, total=total_tests, details=test_msg, duration_sec=unit_dur, tests=tests_list)
+        stop_type = "TEST_FAILURE"
+        stop_reason = f"Unit test suite failed: {test_msg}"
+        recommendation = "TEST_FAILURE"
+        results = {
+            STRATEGY_BASELINE: {"wins": 0, "losses": 0, "draws": 0},
+            STRATEGY_VARIANT: {"wins": 0, "losses": 0, "draws": 0},
+        }
+        history_path = save_run_history(
+            STRATEGY_BASELINE, STRATEGY_VARIANT, 0, results,
+            stop_type, stop_reason, recommendation, experiment_desc=desc,
+            unit_tests_data=unit_tests_result,
+        )
+        dash_client.set_finished(stop_type, stop_reason, recommendation, str(history_path), duration_sec=unit_dur)
+        print_summary(0, results, stop_type, stop_reason, history_path, experiment_desc=desc, recommendation=recommendation)
+        return
+    if dash_client is not None:
+        dash_client.update_unit_tests(status="PASSED", details=test_msg, duration_sec=unit_dur)
+    print("  [✓] Strategy variant passed all tactical unit tests.\n")
 
     # ── Pre-flight Binary Smoke Test (skippable via --skip-smoke) ──
     if not skip_smoke:
@@ -2510,9 +2478,10 @@ def run_ab_test_engine(
             print("  --> Running pre-flight binary smoke test with official Battlesnake CLI...")
             smoke_ok, smoke_err = run_binary_smoke_test(cli_path, python_bin, port_base, port_var)
             if not smoke_ok:
-                print(f"  [⚠️] Pre-flight smoke test skipped/warning: {smoke_err}\n")
-            else:
-                print("  [✓] Battlesnake CLI smoke test passed.\n")
+                if dash_client is not None:
+                    dash_client.set_finished("TEST_FAILURE", f"CLI smoke test failed: {smoke_err}", "TEST_FAILURE")
+                raise RuntimeError(f"Pre-flight binary smoke test FAILED: {smoke_err}")
+            print("  [✓] Battlesnake CLI smoke test passed.\n")
         else:
             print("  [i] Pre-flight binary smoke test skipped (CLI binary or main.py not found).\n")
     else:
@@ -2651,11 +2620,7 @@ def run_ab_test_engine(
         STRATEGY_VARIANT: {"wins": 0, "losses": 0, "draws": 0},
     }
 
-    shared_pool = None
-    try:
-        shared_pool = create_worker_pool(threads, _baseline_module_name, _variant_module_name)
-    except Exception as e:
-        print(f"[!] Warning: Could not pre-allocate shared worker pool: {e}")
+    shared_pool = create_worker_pool(threads, _baseline_module_name, _variant_module_name)
 
     try:
         for idx, m_spec in enumerate(active_matrix):
@@ -2694,11 +2659,7 @@ def run_ab_test_engine(
                     resume_mode_state = checkpoint_data["current_mode_state"]
 
                 if shared_pool is None or getattr(shared_pool, "_state", None) != mp.pool.RUN:
-                    try:
-                        shared_pool = create_worker_pool(threads, _baseline_module_name, _variant_module_name)
-                    except Exception as e:
-                        print(f"[!] Warning: Could not allocate shared worker pool for {m_name}: {e}")
-                        shared_pool = None
+                    shared_pool = create_worker_pool(threads, _baseline_module_name, _variant_module_name)
 
                 res = _run_single_mode_simulation(
                     mode=m_mode,
@@ -2715,6 +2676,7 @@ def run_ab_test_engine(
                     desc=desc,
                     is_bug_fix=is_bug_fix,
                     keep_threshold=m_keep_thresh,
+                    target=target,
                     matrix_progress=matrix_progress,
                     results_dir=results_dir,
                     base_seed=42_000 + idx * 10_000,
@@ -2733,16 +2695,13 @@ def run_ab_test_engine(
 
             matrix_results.append(res)
             total_games_all += res["total_played"]
-            try:
-                from ab_dashboard import append_mode_timing
-                append_mode_timing(
-                    mode=res["mode"],
-                    run_type="self",
-                    games=res["total_played"],
-                    elapsed_seconds=res["duration_sec"],
-                )
-            except Exception:
-                pass
+            from ab_dashboard import append_mode_timing
+            append_mode_timing(
+                mode=res["mode"],
+                run_type="self",
+                games=res["total_played"],
+                elapsed_seconds=res["duration_sec"],
+            )
             for k in ("wins", "losses", "draws"):
                 agg_results[STRATEGY_BASELINE][k] += res["results"][STRATEGY_BASELINE][k]
                 agg_results[STRATEGY_VARIANT][k] += res["results"][STRATEGY_VARIANT][k]
@@ -2849,32 +2808,26 @@ def run_ab_test_engine(
     )
 
     # Automated post-benchmark blunder extraction on worst variant losses
-    try:
-        run_post_benchmark_blunder_pipeline(
-            matrix_results=matrix_results,
-            max_losses=5,
-            results_dir=results_dir,
-        )
-    except Exception as e:
-        print(f"\n[⚠️] Post-benchmark blunder extraction encountered an error: {e}\n")
+    run_post_benchmark_blunder_pipeline(
+        matrix_results=matrix_results,
+        max_losses=5,
+        results_dir=results_dir,
+    )
 
     # Simulation suite finished; clean up active checkpoint
     clear_checkpoint(results_dir)
 
     # Append self-play row to harness/results_ledger.csv
-    try:
-        self_play_deltas = [
-            f"{r['mode']}: {r['var_win_share'] - r['target_share']:+.1f}%"
-            for r in matrix_results
-        ]
-        append_results_ledger(
-            description=desc,
-            self_play_delta=", ".join(self_play_deltas),
-            pool_delta="",
-            decision=overall_recommendation,
-        )
-    except Exception as e:
-        print(f"[!] Warning: Could not append self-play result to ledger: {e}")
+    self_play_deltas = [
+        f"{r['mode']}: {r['var_win_share'] - r['target_share']:+.1f}%"
+        for r in matrix_results
+    ]
+    append_results_ledger(
+        description=desc,
+        self_play_delta=", ".join(self_play_deltas),
+        pool_delta="",
+        decision=overall_recommendation,
+    )
 
 
 def run_pool_benchmark(
@@ -2894,12 +2847,12 @@ def run_pool_benchmark(
     Reports win share per mode for both, the difference, and the paired z-score.
     Appends experiment results to harness/results_ledger.csv.
     """
-    if target is None:
-        m = re.search(r"\[TARGET:\s*([A-Za-z0-9_\s\/\-]+)\]", desc, re.I)
-        if m:
-            target = m.group(1).strip().upper()
-        else:
-            target = "IMPROVEMENT"
+    if not target:
+        raise ValueError("Missing mandatory parameter: 'target'. Must specify --target (e.g. PARITY or IMPROVEMENT).")
+    target = target.strip().upper()
+
+    # Clean any [TARGET: ...] tag from desc so it never appears in the title
+    desc = re.sub(r"\s*\[TARGET:\s*[^\]]+\]", "", desc, flags=re.I).strip()
 
     if baseline_module is None:
         baseline_module = DEFAULT_BASELINE_MODULE
@@ -2909,19 +2862,16 @@ def run_pool_benchmark(
 
     pool_file = Path(pool_config_path)
     if not pool_file.is_file():
-        sys.exit(f"[!] Error: Pool config file '{pool_config_path}' not found.")
-    try:
-        with open(pool_file, "r", encoding="utf-8") as f:
-            pool_snakes = json.load(f)
-    except Exception as e:
-        sys.exit(f"[!] Error reading pool config JSON: {e}")
+        raise FileNotFoundError(f"Pool config file '{pool_config_path}' not found.")
+    with open(pool_file, "r", encoding="utf-8") as f:
+        pool_snakes = json.load(f)
 
     if not isinstance(pool_snakes, list) or not pool_snakes:
-        sys.exit(f"[!] Error: Pool config '{pool_config_path}' must contain a non-empty list of {{slug, url}} objects.")
+        raise ValueError(f"Pool config '{pool_config_path}' must contain a non-empty list of {{slug, url}} objects.")
 
     for item in pool_snakes:
         if not isinstance(item, dict) or "slug" not in item or "url" not in item:
-            sys.exit(f"[!] Error: Each entry in pool config must have 'slug' and 'url' keys: {item}")
+            raise ValueError(f"Each entry in pool config must have 'slug' and 'url' keys: {item}")
 
     zoo_adapter.register_pool(pool_snakes)
 
@@ -2946,11 +2896,7 @@ def run_pool_benchmark(
 
     dash_client = None
     if ensure_dashboard_running is not None:
-        try:
-            dash_client = ensure_dashboard_running(port=dashboard_port)
-        except Exception as e:
-            print(f"  [!] Dashboard connection error: {e}")
-            dash_client = None
+        dash_client = ensure_dashboard_running(port=dashboard_port)
 
     matrix_progress = [
         {
@@ -2973,44 +2919,34 @@ def run_pool_benchmark(
 
     # Step 1: Tactical unit tests
     unit_tests_result: Optional[Dict[str, Any]] = None
-    if not skip_smoke:
-        print("[1/2] Running strategy safety unit tests on variant...")
-        test_strategy = None
-        try:
-            from tests import test_strategy
-        except ImportError:
-            try:
-                import test_strategy
-            except ImportError:
-                test_strategy = None
+    print("[1/2] Running strategy safety unit tests on variant...")
+    try:
+        from tests import test_strategy
+    except ImportError:
+        import test_strategy
 
-        if test_strategy and hasattr(test_strategy, "run_variant_unit_tests"):
-            if dash_client is not None:
-                dash_client.update_unit_tests(status="RUNNING")
-            t_unit_start = time.perf_counter()
-            passed, test_msg = test_strategy.run_variant_unit_tests()
-            unit_dur = round(time.perf_counter() - t_unit_start, 2)
-            tests_list = getattr(test_strategy, "LAST_TEST_RECORDS", [])
-            total_tests = len(tests_list) or 42
-            passed_tests = sum(1 for t in tests_list if str(t.get("status", "")).upper() == "PASSED") if tests_list else (total_tests if passed else 0)
-            unit_tests_result = {"status": "PASSED" if passed else "FAILED", "passed": passed_tests, "total": total_tests, "details": test_msg, "duration_sec": unit_dur, "tests": tests_list}
-            if not passed:
-                if dash_client is not None:
-                    dash_client.update_unit_tests(status="FAILED", passed=passed_tests, total=total_tests, details=test_msg, duration_sec=unit_dur, tests=tests_list)
-                print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
-                print(f"     Details: {test_msg}\n")
-                sys.exit(1)
-            if dash_client is not None:
-                dash_client.update_unit_tests(status="PASSED", passed=passed_tests, total=total_tests, details=test_msg, duration_sec=unit_dur, tests=tests_list)
-            print("  [✓] Strategy variant passed all tactical unit tests.\n")
-        else:
-            unit_tests_result = {"status": "PASSED", "details": "Tactical unit tests skipped (standalone harness mode)"}
-            if dash_client is not None:
-                dash_client.update_unit_tests(status="PASSED", details="Tactical unit tests skipped (standalone harness mode)")
-            print("  [✓] Tactical unit tests skipped (standalone harness mode).\n")
-    else:
-        unit_tests_result = {"status": "PASSED", "details": "Pre-flight unit tests skipped via --skip-smoke"}
-        print("  [i] Pre-flight unit tests skipped via --skip-smoke.\n")
+    if not hasattr(test_strategy, "run_variant_unit_tests"):
+        raise AttributeError("Module 'test_strategy' does not define 'run_variant_unit_tests'.")
+
+    if dash_client is not None:
+        dash_client.update_unit_tests(status="RUNNING")
+    t_unit_start = time.perf_counter()
+    passed, test_msg = test_strategy.run_variant_unit_tests()
+    unit_dur = round(time.perf_counter() - t_unit_start, 2)
+    tests_list = getattr(test_strategy, "LAST_TEST_RECORDS", [])
+    total_tests = len(tests_list)
+    passed_tests = sum(1 for t in tests_list if str(t.get("status", "")).upper() == "PASSED")
+    unit_tests_result = {"status": "PASSED" if passed else "FAILED", "passed": passed_tests, "total": total_tests, "details": test_msg, "duration_sec": unit_dur, "tests": tests_list}
+    if not passed:
+        if dash_client is not None:
+            dash_client.update_unit_tests(status="FAILED", passed=passed_tests, total=total_tests, details=test_msg, duration_sec=unit_dur, tests=tests_list)
+            dash_client.set_finished("TEST_FAILURE", f"Unit test suite failed: {test_msg}", "TEST_FAILURE")
+        print(f"\n[❌] UNIT TEST SUITE FAILED FOR STRATEGY VARIANT!")
+        print(f"     Details: {test_msg}\n")
+        sys.exit(1)
+    if dash_client is not None:
+        dash_client.update_unit_tests(status="PASSED", passed=passed_tests, total=total_tests, details=test_msg, duration_sec=unit_dur, tests=tests_list)
+    print("  [✓] Strategy variant passed all tactical unit tests.\n")
 
     print("[2/2] Executing External Pool Evaluation Suite...")
     t_suite_start = time.time()
@@ -3180,16 +3116,13 @@ def run_pool_benchmark(
             decision_desc = "Parity (within confidence band)"
 
         t_mode_elapsed = time.perf_counter() - t_mode_start
-        try:
-            from ab_dashboard import append_mode_timing
-            append_mode_timing(
-                mode=m_mode,
-                run_type="pool",
-                games=N,
-                elapsed_seconds=t_mode_elapsed,
-            )
-        except Exception:
-            pass
+        from ab_dashboard import append_mode_timing
+        append_mode_timing(
+            mode=m_mode,
+            run_type="pool",
+            games=N,
+            elapsed_seconds=t_mode_elapsed,
+        )
 
         print("-" * 80)
         print(f"Mode Results: {m_name}")

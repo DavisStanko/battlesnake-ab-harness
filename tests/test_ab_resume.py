@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 # Ensure project root is on sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from ab_test import (
@@ -62,18 +63,19 @@ class TestAbCheckpointResume(unittest.TestCase):
         self.assertIsNone(load_checkpoint(self.temp_dir))
 
     def test_checkpoint_load_corrupted_json(self):
-        """Corrupted checkpoint files should gracefully return None without raising."""
+        """Corrupted checkpoint files should raise JSONDecodeError instead of silently returning None."""
         cp_path = get_checkpoint_path(self.temp_dir)
         cp_path.write_text("invalid { json garbage", encoding="utf-8")
-        self.assertIsNone(load_checkpoint(self.temp_dir))
+        with self.assertRaises(json.JSONDecodeError):
+            load_checkpoint(self.temp_dir)
 
     def test_cli_parse_resume_flag(self):
         """Verify --resume CLI flag parsing."""
-        with patch("sys.argv", ["ab_test.py", "--desc", "Test experiment"]):
+        with patch("sys.argv", ["ab_test.py", "--desc", "Test experiment", "--target", "IMPROVEMENT"]):
             args = parse_args()
             self.assertFalse(args.resume)
 
-        with patch("sys.argv", ["ab_test.py", "--desc", "Test experiment", "--resume"]):
+        with patch("sys.argv", ["ab_test.py", "--desc", "Test experiment", "--target", "IMPROVEMENT", "--resume"]):
             args = parse_args()
             self.assertTrue(args.resume)
 
@@ -135,6 +137,7 @@ class TestAbCheckpointResume(unittest.TestCase):
                 desc="Test Intra-Mode Resume",
                 is_bug_fix=False,
                 keep_threshold=25.5,
+                target="IMPROVEMENT",
                 results_dir=self.temp_dir,
                 resume_mode_state=prior_state,
             )
@@ -143,12 +146,14 @@ class TestAbCheckpointResume(unittest.TestCase):
             remaining_game_nums = [t[0] for t in captured_tasks]
             self.assertEqual(remaining_game_nums, [3, 5])
 
+    @patch("tests.test_strategy.run_variant_unit_tests", return_value=(True, "All passed"))
+    @patch("harness.depth_test.run_depth_test", return_value=(True, {"overall": {"passed": True}}))
     @patch("ab_test.ensure_dashboard_running")
     @patch("ab_test.run_binary_smoke_test")
     @patch("ab_test._run_single_mode_simulation")
     @patch("ab_test.print_matrix_summary")
     def test_matrix_resume_skips_completed_mode(
-        self, mock_summary, mock_sim, mock_smoke, mock_dash_fn
+        self, mock_summary, mock_sim, mock_smoke, mock_dash_fn, mock_depth_fn, mock_unit_tests
     ):
         """
         Verify that run_ab_test_engine with --resume skips simulation for modes
@@ -215,12 +220,14 @@ class TestAbCheckpointResume(unittest.TestCase):
             "modes": "constrictor,royale",
             "completed_modes": [constrictor_res],
             "current_mode_state": None,
+            "depth_results": {"overall": {"passed": True}},
         })
 
         with patch("ab_test.PROJECT_ROOT", self.temp_dir):
             run_ab_test_engine(
                 desc="Test Skip",
                 modes="constrictor,royale",
+                target="IMPROVEMENT",
                 skip_smoke=True,
                 resume=True,
             )

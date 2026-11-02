@@ -16,11 +16,25 @@ from __future__ import annotations
 import os
 import json
 import logging
-from typing import Any, Dict
-import urllib.request
-import urllib.error
+from typing import Any, Dict, Optional
+import requests
 
 logger = logging.getLogger(__name__)
+
+# Process-local session management to ensure connections are reused across moves
+# while strictly isolating sessions per worker process.
+_SESSION: Optional[requests.Session] = None
+_SESSION_PID: Optional[int] = None
+
+
+def get_session() -> requests.Session:
+    """Returns a process-local requests.Session, creating one if not initialized or if process forked."""
+    global _SESSION, _SESSION_PID
+    curr_pid = os.getpid()
+    if _SESSION is None or _SESSION_PID != curr_pid:
+        _SESSION = requests.Session()
+        _SESSION_PID = curr_pid
+    return _SESSION
 
 INFO: Dict[str, str] = {
     "apiversion": "1",
@@ -128,18 +142,14 @@ def start(game_state: Dict[str, Any]) -> None:
     target = get_url_for_snake(you_name) if you_name else get_url_for_snake(you_id)
     endpoint = get_endpoint(target, "start")
 
-    try:
-        data = json.dumps(game_state).encode("utf-8")
-        req = urllib.request.Request(
-            endpoint,
-            data=data,
-            headers={"Content-Type": "application/json", "User-Agent": "BattlesnakeHarnessAdapter/1.0"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SEC) as resp:
-            resp.read()
-    except Exception as exc:
-        logger.debug("Snake zoo adapter start request failed to %s: %s", endpoint, exc)
+    session = get_session()
+    resp = session.post(
+        endpoint,
+        json=game_state,
+        headers={"Content-Type": "application/json", "User-Agent": "BattlesnakeHarnessAdapter/1.0"},
+        timeout=REQUEST_TIMEOUT_SEC,
+    )
+    resp.raise_for_status()
 
 
 def choose_move(game_state: Dict[str, Any], wrap: bool = False, constrictor: bool = False) -> str:
@@ -153,25 +163,19 @@ def choose_move(game_state: Dict[str, Any], wrap: bool = False, constrictor: boo
     target = get_url_for_snake(you_name) if you_name else get_url_for_snake(you_id)
     endpoint = get_endpoint(target, "move")
 
-    try:
-        data = json.dumps(game_state).encode("utf-8")
-        req = urllib.request.Request(
-            endpoint,
-            data=data,
-            headers={"Content-Type": "application/json", "User-Agent": "BattlesnakeHarnessAdapter/1.0"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SEC) as resp:
-            if resp.status == 200:
-                body = resp.read().decode("utf-8")
-                res_json = json.loads(body)
-                move = res_json.get("move")
-                if isinstance(move, str) and move.strip():
-                    return move.strip().lower()
-    except Exception as exc:
-        logger.debug("Snake zoo adapter request failed to %s: %s", endpoint, exc)
-
-    return "up"
+    session = get_session()
+    resp = session.post(
+        endpoint,
+        json=game_state,
+        headers={"Content-Type": "application/json", "User-Agent": "BattlesnakeHarnessAdapter/1.0"},
+        timeout=REQUEST_TIMEOUT_SEC,
+    )
+    resp.raise_for_status()
+    res_json = resp.json()
+    move = res_json.get("move")
+    if isinstance(move, str) and move.strip():
+        return move.strip().lower()
+    raise ValueError(f"Snake zoo adapter invalid move response from {endpoint}: {res_json}")
 
 
 def move(game_state: Dict[str, Any]) -> Dict[str, str]:

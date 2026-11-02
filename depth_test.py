@@ -51,13 +51,7 @@ from harness.ab_test import (
 )
 from harness.simulator import simulate_turn
 
-try:
-    from harness.ab_dashboard import ensure_dashboard_running
-except ImportError:
-    try:
-        from ab_dashboard import ensure_dashboard_running
-    except ImportError:
-        ensure_dashboard_running = None
+from harness.ab_dashboard import ensure_dashboard_running
 
 DEFAULT_FIXTURES_DIR = Path(__file__).resolve().parent / "positions"
 DEFAULT_MODES = ["standard", "constrictor", "royale", "duel"]
@@ -271,12 +265,9 @@ def run_single_search(
     time_sec = time_ms / 1000.0
     strat_module.TIME_BUDGET_SEC = time_sec
 
-    # Update strategies.constants if imported
-    try:
-        import strategies.constants as const
-        const.TIME_BUDGET_SEC = time_sec
-    except Exception:
-        pass
+    # Update strategies.constants
+    import strategies.constants as const
+    const.TIME_BUDGET_SEC = time_sec
 
     # In live server / strategy_baseline, choose_move calculates:
     #   budget = 0.470 - elapsed_since_arrival - 0.030 (i.e. 0.440s ceiling)
@@ -469,16 +460,13 @@ def run_depth_test(
                 fixture_items.append((str(expected), mode, turn, phase, title))
 
     if missing_fixtures:
-        print(f"\n[ERROR] Missing {len(missing_fixtures)} fixture files. Run with --generate first:")
-        for mf in missing_fixtures[:3]:
-            print(f"  Missing: {mf}")
-        return False, {}
+        missing_list = [str(mf) for mf in missing_fixtures]
+        raise FileNotFoundError(
+            f"Missing {len(missing_fixtures)} fixture files: {missing_list[:3]}. Run with --generate first."
+        )
 
-    if dash_client is None and enable_dashboard and ensure_dashboard_running is not None:
-        try:
-            dash_client = ensure_dashboard_running(port=dashboard_port)
-        except Exception:
-            dash_client = None
+    if dash_client is None and enable_dashboard:
+        dash_client = ensure_dashboard_running(port=dashboard_port)
 
     total_positions = len(fixture_items)
     completed_positions = 0

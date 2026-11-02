@@ -227,6 +227,7 @@ class TestABKeepGate(unittest.TestCase):
                 desc="Loud Fail Test",
                 is_bug_fix=False,
                 keep_threshold=51.5,
+                target="IMPROVEMENT",
                 threads=1,
             )
         self.assertIn("0 games were played! Simulation aborted", str(ctx.exception))
