@@ -8,7 +8,8 @@ and
 
 POSTs game_state as JSON to a configurable snake /move endpoint.
 Sets game.timeout = 250 in game_state before sending.
-Falls back to "up" if the POST fails, returns non-200, or times out.
+Uses process-local requests.Session for HTTP keep-alive connection reuse across moves.
+Raises immediately on HTTP errors, timeouts, or invalid payloads (fail-fast).
 """
 
 from __future__ import annotations

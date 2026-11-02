@@ -117,7 +117,7 @@ class TestAbCheckpointResume(unittest.TestCase):
             captured_tasks = []
             fake_iter = MagicMock()
             fake_iter.next.side_effect = TimeoutError()
-            def fake_imap(func, args):
+            def fake_imap(func, args, chunksize=1):
                 captured_tasks.extend(args)
                 return fake_iter
             mock_pool.imap_unordered.side_effect = fake_imap

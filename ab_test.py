@@ -26,6 +26,7 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import copy
 import csv
 from datetime import datetime
@@ -303,10 +304,11 @@ def _run_timed_move(
     game_state: Dict[str, Any],
     wrap: bool = False,
     constrictor: bool = False,
+    **kwargs: Any,
 ) -> Tuple[Optional[str], float]:
     """Executes a strategy move function and tracks elapsed time."""
     t0 = time.perf_counter()
-    chosen_move = move_fn(game_state, wrap=wrap, constrictor=constrictor)
+    chosen_move = move_fn(game_state, wrap=wrap, constrictor=constrictor, **kwargs)
     elapsed = time.perf_counter() - t0
     return chosen_move, elapsed
 
@@ -438,11 +440,36 @@ def _build_game_state(
     game_id: str,
     mode: str = "standard",
     hazards: Optional[List[Dict[str, Any]]] = None,
+    turn_cache: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Constructs isolated game_state dictionary matching the Battlesnake API."""
     if hazards is None:
         hazards = []
-    return {
+
+    if turn_cache is not None and "board_dict" in turn_cache:
+        board_dict = turn_cache["board_dict"]
+    else:
+        board_dict = {
+            "width": board_width,
+            "height": board_height,
+            "snakes": [
+                {
+                    "id": s["id"],
+                    "name": s["name"],
+                    "health": s["health"],
+                    "body": [{"x": pt["x"], "y": pt["y"]} for pt in s["body"]],
+                    "head": {"x": s["head"]["x"], "y": s["head"]["y"]},
+                    "length": s["length"],
+                }
+                for s in active_snakes
+            ],
+            "food": [{"x": f["x"], "y": f["y"]} for f in current_food],
+            "hazards": [{"x": hz["x"], "y": hz["y"]} for hz in hazards],
+        }
+        if turn_cache is not None:
+            turn_cache["board_dict"] = board_dict
+
+    state = {
         "game": {
             "id": game_id,
             "ruleset": {
@@ -468,23 +495,7 @@ def _build_game_state(
             "source": "custom",
         },
         "turn": turn,
-        "board": {
-            "width": board_width,
-            "height": board_height,
-            "snakes": [
-                {
-                    "id": s["id"],
-                    "name": s["name"],
-                    "health": s["health"],
-                    "body": [{"x": pt["x"], "y": pt["y"]} for pt in s["body"]],
-                    "head": {"x": s["head"]["x"], "y": s["head"]["y"]},
-                    "length": s["length"],
-                }
-                for s in active_snakes
-            ],
-            "food": [{"x": f["x"], "y": f["y"]} for f in current_food],
-            "hazards": [{"x": hz["x"], "y": hz["y"]} for hz in hazards],
-        },
+        "board": board_dict,
         "you": {
             "id": current_snake["id"],
             "name": current_snake["name"],
@@ -494,6 +505,9 @@ def _build_game_state(
             "length": current_snake["length"],
         },
     }
+    if turn_cache is not None:
+        state["_turn_cache"] = turn_cache
+    return state
 
 
 def simulate_single_game(
@@ -544,6 +558,7 @@ def simulate_single_game(
         turn_offset = turn % len(snakes)
         ordered_snakes = snakes[turn_offset:] + snakes[:turn_offset]
 
+        turn_cache: Dict[str, Any] = {}
         for sn in ordered_snakes:
             s_id = sn["id"]
             strat_module = _strategy_variant if s_id == STRATEGY_VARIANT else _strategy_baseline
@@ -561,9 +576,12 @@ def simulate_single_game(
                 game_id=f"game_{game_num}_{seed}",
                 mode=mode,
                 hazards=board.get("hazards", []),
+                turn_cache=turn_cache,
             )
 
-            chosen_move, elapsed = _run_timed_move(move_fn, game_state, wrap=wrap, constrictor=constrictor)
+            chosen_move, elapsed = _run_timed_move(
+                move_fn, game_state, wrap=wrap, constrictor=constrictor, turn_cache=turn_cache
+            )
             moves[s_id] = chosen_move if (chosen_move in ("up", "down", "left", "right")) else "up"
             d = getattr(strat_module, "LAST_SEARCH_DEPTH", 0)
             if d > 0:
@@ -824,23 +842,75 @@ def simulate_single_pool_game(
         turn_offset = turn % len(snakes)
         ordered_snakes = snakes[turn_offset:] + snakes[:turn_offset]
 
+        zoo_snakes = [sn for sn in ordered_snakes if sn["id"] != eval_id]
+        zoo_moves: Dict[str, str] = {}
+        eval_move = None
+
+        if zoo_snakes:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(zoo_snakes)) as executor:
+                future_to_snake = {
+                    executor.submit(
+                        zoo_adapter.choose_move,
+                        _build_game_state(
+                            current_snake=sn,
+                            active_snakes=ordered_snakes,
+                            current_food=board["food"],
+                            board_width=board["width"],
+                            board_height=board["height"],
+                            turn=turn,
+                            game_id=f"pool_{eval_id}_{game_num}_{seed}",
+                            mode=mode,
+                            hazards=board.get("hazards", []),
+                        ),
+                        wrap=wrap,
+                        constrictor=constrictor,
+                    ): sn["id"]
+                    for sn in zoo_snakes
+                }
+                eval_snake = next((sn for sn in ordered_snakes if sn["id"] == eval_id), None)
+                if eval_snake is not None:
+                    eval_game_state = _build_game_state(
+                        current_snake=eval_snake,
+                        active_snakes=ordered_snakes,
+                        current_food=board["food"],
+                        board_width=board["width"],
+                        board_height=board["height"],
+                        turn=turn,
+                        game_id=f"pool_{eval_id}_{game_num}_{seed}",
+                        mode=mode,
+                        hazards=board.get("hazards", []),
+                    )
+                    eval_move, _ = _run_timed_move(
+                        eval_strategy.choose_move, eval_game_state, wrap=wrap, constrictor=constrictor
+                    )
+
+                for fut in concurrent.futures.as_completed(future_to_snake):
+                    sn_id = future_to_snake[fut]
+                    zoo_moves[sn_id] = fut.result()
+        else:
+            eval_snake = next((sn for sn in ordered_snakes if sn["id"] == eval_id), None)
+            if eval_snake is not None:
+                eval_game_state = _build_game_state(
+                    current_snake=eval_snake,
+                    active_snakes=ordered_snakes,
+                    current_food=board["food"],
+                    board_width=board["width"],
+                    board_height=board["height"],
+                    turn=turn,
+                    game_id=f"pool_{eval_id}_{game_num}_{seed}",
+                    mode=mode,
+                    hazards=board.get("hazards", []),
+                )
+                eval_move, _ = _run_timed_move(
+                    eval_strategy.choose_move, eval_game_state, wrap=wrap, constrictor=constrictor
+                )
+
         for sn in ordered_snakes:
             s_id = sn["id"]
-            game_state = _build_game_state(
-                current_snake=sn,
-                active_snakes=ordered_snakes,
-                current_food=board["food"],
-                board_width=board["width"],
-                board_height=board["height"],
-                turn=turn,
-                game_id=f"pool_{eval_id}_{game_num}_{seed}",
-                mode=mode,
-                hazards=board.get("hazards", []),
-            )
             if s_id == eval_id:
-                chosen_move, _ = _run_timed_move(eval_strategy.choose_move, game_state, wrap=wrap, constrictor=constrictor)
+                chosen_move = eval_move
             else:
-                chosen_move = zoo_adapter.choose_move(game_state, wrap=wrap, constrictor=constrictor)
+                chosen_move = zoo_moves[s_id]
             moves[s_id] = chosen_move if (chosen_move in ("up", "down", "left", "right")) else "up"
 
         board, snakes = simulate_turn(board, snakes, moves, wrap=wrap, constrictor=constrictor, hazard_damage=14)
@@ -1927,7 +1997,7 @@ def _run_single_mode_simulation(
         active_pool = pool
 
     try:
-        iterator = active_pool.imap_unordered(_worker_wrapper, task_args)
+        iterator = active_pool.imap_unordered(_worker_wrapper, task_args, chunksize=1)
         last_skip_check = time.time()
         try:
             while True:
@@ -3028,7 +3098,7 @@ def run_pool_benchmark(
                 initializer=_pool_worker_init,
                 initargs=(pool_snakes, variant_module, baseline_module),
             ) as pool:
-                for res in pool.imap_unordered(_pool_worker_run, tasks):
+                for res in pool.imap_unordered(_pool_worker_run, tasks, chunksize=1):
                     mode_results.append(res)
                     g_num = res["game_num"]
                     opp_str = ", ".join(res["opponents"])
