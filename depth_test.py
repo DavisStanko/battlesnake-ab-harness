@@ -407,7 +407,7 @@ def is_parity_target(target: Optional[str]) -> bool:
     if not target:
         return False
     t = target.strip().upper()
-    return t in ("PARITY", "BUG FIX", "PARITY / IMPROVEMENT", "HARNESS VERIFICATION") or any(
+    return t in ("PARITY", "BUG FIX", "HARNESS VERIFICATION") or any(
         k in t for k in ("PARITY", "BUG", "FIX", "VERIFICATION", "REFACTOR")
     )
 
@@ -867,7 +867,7 @@ def parse_args() -> argparse.Namespace:
         "--target",
         type=str,
         default=None,
-        choices=["IMPROVEMENT", "PARITY", "BUG FIX", "PARITY / IMPROVEMENT", "HARNESS VERIFICATION"],
+        choices=["IMPROVEMENT", "PARITY", "BUG FIX", "HARNESS VERIFICATION"],
         help="Target outcome classification (enforces strict NPS and depth gating for parity modes).",
     )
     return parser.parse_args()

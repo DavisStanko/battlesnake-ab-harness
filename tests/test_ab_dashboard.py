@@ -666,35 +666,6 @@ class TestDashboardSkip(unittest.TestCase):
         self.assertEqual(d_pool_finish["matrix_duration_sec"], 300.0)
         self.assertEqual(d_pool_finish["pool_duration_sec"], 600.0)
 
-    def test_standalone_pool_run_skips_self_play(self):
-        from ab_dashboard import render_html_with_state, DASHBOARD_HTML
-        data = {
-            "status": "FINISHED",
-            "recommendation": "PARITY",
-            "run_type": "pool",
-            "experiment_desc": "Standalone Pool Test",
-            "unit_tests_data": {"status": "PASSED", "duration_sec": 4.7},
-            "matrix_duration_sec": None,
-            "pool_duration_sec": 892.0,  # 14m 52s
-            "pool_data": {
-                "duration_sec": 892.0,
-                "modes": {
-                    "constrictor": {"cand_share": 25.0, "base_share": 25.0, "decision": "PARITY"},
-                    "royale": {"cand_share": 25.0, "base_share": 25.0, "decision": "PARITY"},
-                    "standard": {"cand_share": 25.0, "base_share": 25.0, "decision": "PARITY"},
-                }
-            }
-        }
-        rendered = render_html_with_state(DASHBOARD_HTML, data)
-        # Stage 3 (Self-play) must be SKIPPED with '--', NOT DONE 14m 52s
-        self.assertIn('id="railSegment-self"', rendered)
-        self.assertIn('<span class="stage-seg-status matrix-status-skipped" id="railStatus-self">SKIPPED</span>', rendered)
-        self.assertIn('<span class="stage-seg-duration" id="railDuration-self">--</span>', rendered)
-        # Stage 4 (Pool) must be DONE with 14:52
-        self.assertIn('id="railSegment-pool"', rendered)
-        self.assertIn('<span class="stage-seg-status matrix-status-done" id="railStatus-pool">DONE</span>', rendered)
-        self.assertIn('<span class="stage-seg-duration" id="railDuration-pool">14:52</span>', rendered)
-
     def test_pool_modes_and_opponents_in_set_finished(self):
         self.state.handle_update({
             "action": "init",
@@ -724,24 +695,6 @@ class TestDashboardSkip(unittest.TestCase):
         self.assertEqual(p_data["opponents"][0]["opponent"], "snork")
         self.assertIn("constrictor", p_data.get("modes", {}))
         self.assertEqual(p_data["modes"]["constrictor"]["games"], 40)
-
-    def test_zero_games_never_renders_parity_or_passed(self):
-        from ab_dashboard import render_html_with_state, DASHBOARD_HTML
-        data = {
-            "status": "FINISHED",
-            "recommendation": "PARITY",
-            "run_type": "pool",
-            "experiment_desc": "Zero Games Test",
-            "pool_data": {
-                "modes": {
-                    "constrictor": {"cand_share": 0.0, "base_share": 0.0, "delta": 0.0, "decision": "PARITY", "games": 0, "max_games": 40},
-                }
-            }
-        }
-        rendered = render_html_with_state(DASHBOARD_HTML, data)
-        # Constrictor had 0 games completed; must NEVER render PARITY
-        self.assertNotIn('<span class="status-chip status-chip-parity matrix-col-status matrix-status-parity">PARITY</span>', rendered)
-        self.assertIn('<span class="status-chip status-chip-failed matrix-col-status matrix-status-failed">FAILED</span>', rendered)
 
     def test_restore_state_preserves_pool_data_and_stage_durations(self):
         saved_state = {

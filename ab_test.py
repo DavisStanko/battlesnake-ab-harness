@@ -2377,7 +2377,7 @@ def parse_args() -> argparse.Namespace:
         "--target",
         type=str,
         required=True,
-        choices=["IMPROVEMENT", "PARITY", "BUG FIX", "PARITY / IMPROVEMENT", "HARNESS VERIFICATION"],
+        choices=["IMPROVEMENT", "PARITY", "BUG FIX", "HARNESS VERIFICATION"],
         help="Mandatory target outcome classification (e.g. --target PARITY, --target IMPROVEMENT)",
     )
     return parser.parse_args()

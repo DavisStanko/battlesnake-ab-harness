@@ -20,7 +20,6 @@ class TestDepthGate(unittest.TestCase):
         # Explicit parity / non-regression targets
         self.assertTrue(is_parity_target("PARITY"))
         self.assertTrue(is_parity_target("BUG FIX"))
-        self.assertTrue(is_parity_target("PARITY / IMPROVEMENT"))
         self.assertTrue(is_parity_target("HARNESS VERIFICATION"))
         self.assertTrue(is_parity_target("refactor c_engine"))
         self.assertTrue(is_parity_target("fix tail chase blunder"))
@@ -30,6 +29,27 @@ class TestDepthGate(unittest.TestCase):
         self.assertFalse(is_parity_target("Heuristic Weight Tuning"))
         self.assertFalse(is_parity_target(None))
         self.assertFalse(is_parity_target(""))
+
+    def test_ab_test_target_choices(self):
+        """ab_test.py accepts valid target choices and rejects invalid values."""
+        from io import StringIO
+        import harness.ab_test as ab_test
+
+        # Valid targets: PARITY and IMPROVEMENT
+        with patch.object(sys, "argv", ["ab_test.py", "--desc", "test", "--target", "PARITY"]):
+            args = ab_test.parse_args()
+            self.assertEqual(args.target, "PARITY")
+
+        with patch.object(sys, "argv", ["ab_test.py", "--desc", "test", "--target", "IMPROVEMENT"]):
+            args = ab_test.parse_args()
+            self.assertEqual(args.target, "IMPROVEMENT")
+
+        # Invalid target raises SystemExit code 2
+        with patch("sys.stderr", new_callable=StringIO):
+            with patch.object(sys, "argv", ["ab_test.py", "--desc", "test", "--target", "INVALID_TARGET"]):
+                with self.assertRaises(SystemExit) as cm:
+                    ab_test.parse_args()
+                self.assertEqual(cm.exception.code, 2)
 
     def test_parity_mode_fails_on_overall_nps_drop(self):
         """

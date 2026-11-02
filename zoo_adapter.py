@@ -8,7 +8,7 @@ and
 
 POSTs game_state as JSON to a configurable snake /move endpoint.
 Sets game.timeout = 250 in game_state before sending.
-Uses process-local requests.Session for HTTP keep-alive connection reuse across moves.
+Opens a fresh HTTP connection per request (no pooled session reuse) so idle timeouts cannot abort runs.
 Raises immediately on HTTP errors, timeouts, or invalid payloads (fail-fast).
 """
 
@@ -17,25 +17,11 @@ from __future__ import annotations
 import os
 import json
 import logging
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict
 import requests
 
 logger = logging.getLogger(__name__)
-
-# Process-local session management to ensure connections are reused across moves
-# while strictly isolating sessions per worker process.
-_SESSION: Optional[requests.Session] = None
-_SESSION_PID: Optional[int] = None
-
-
-def get_session() -> requests.Session:
-    """Returns a process-local requests.Session, creating one if not initialized or if process forked."""
-    global _SESSION, _SESSION_PID
-    curr_pid = os.getpid()
-    if _SESSION is None or _SESSION_PID != curr_pid:
-        _SESSION = requests.Session()
-        _SESSION_PID = curr_pid
-    return _SESSION
 
 INFO: Dict[str, str] = {
     "apiversion": "1",
@@ -143,13 +129,21 @@ def start(game_state: Dict[str, Any]) -> None:
     target = get_url_for_snake(you_name) if you_name else get_url_for_snake(you_id)
     endpoint = get_endpoint(target, "start")
 
-    session = get_session()
-    resp = session.post(
+    t0 = time.perf_counter()
+    resp = requests.post(
         endpoint,
         json=game_state,
-        headers={"Content-Type": "application/json", "User-Agent": "BattlesnakeHarnessAdapter/1.0"},
+        headers={"Content-Type": "application/json", "User-Agent": "BattlesnakeHarnessAdapter/1.0", "Connection": "close"},
         timeout=REQUEST_TIMEOUT_SEC,
     )
+    lat_ms = (time.perf_counter() - t0) * 1000.0
+    lat_file = os.getenv("ZOO_LATENCY_LOG", "/tmp/zoo_response_times.csv")
+    if lat_file:
+        try:
+            with open(lat_file, "a") as f:
+                f.write(f"{lat_ms:.3f}\n")
+        except Exception:
+            pass
     resp.raise_for_status()
 
 
@@ -164,13 +158,21 @@ def choose_move(game_state: Dict[str, Any], wrap: bool = False, constrictor: boo
     target = get_url_for_snake(you_name) if you_name else get_url_for_snake(you_id)
     endpoint = get_endpoint(target, "move")
 
-    session = get_session()
-    resp = session.post(
+    t0 = time.perf_counter()
+    resp = requests.post(
         endpoint,
         json=game_state,
-        headers={"Content-Type": "application/json", "User-Agent": "BattlesnakeHarnessAdapter/1.0"},
+        headers={"Content-Type": "application/json", "User-Agent": "BattlesnakeHarnessAdapter/1.0", "Connection": "close"},
         timeout=REQUEST_TIMEOUT_SEC,
     )
+    lat_ms = (time.perf_counter() - t0) * 1000.0
+    lat_file = os.getenv("ZOO_LATENCY_LOG", "/tmp/zoo_response_times.csv")
+    if lat_file:
+        try:
+            with open(lat_file, "a") as f:
+                f.write(f"{lat_ms:.3f}\n")
+        except Exception:
+            pass
     resp.raise_for_status()
     res_json = resp.json()
     move = res_json.get("move")
