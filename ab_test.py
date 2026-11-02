@@ -26,6 +26,7 @@ Usage:
 """
 
 import argparse
+import concurrent.futures
 import copy
 import csv
 from datetime import datetime
@@ -824,23 +825,75 @@ def simulate_single_pool_game(
         turn_offset = turn % len(snakes)
         ordered_snakes = snakes[turn_offset:] + snakes[:turn_offset]
 
+        zoo_snakes = [sn for sn in ordered_snakes if sn["id"] != eval_id]
+        zoo_moves: Dict[str, str] = {}
+        eval_move = None
+
+        if zoo_snakes:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(zoo_snakes)) as executor:
+                future_to_snake = {
+                    executor.submit(
+                        zoo_adapter.choose_move,
+                        _build_game_state(
+                            current_snake=sn,
+                            active_snakes=ordered_snakes,
+                            current_food=board["food"],
+                            board_width=board["width"],
+                            board_height=board["height"],
+                            turn=turn,
+                            game_id=f"pool_{eval_id}_{game_num}_{seed}",
+                            mode=mode,
+                            hazards=board.get("hazards", []),
+                        ),
+                        wrap=wrap,
+                        constrictor=constrictor,
+                    ): sn["id"]
+                    for sn in zoo_snakes
+                }
+                eval_snake = next((sn for sn in ordered_snakes if sn["id"] == eval_id), None)
+                if eval_snake is not None:
+                    eval_game_state = _build_game_state(
+                        current_snake=eval_snake,
+                        active_snakes=ordered_snakes,
+                        current_food=board["food"],
+                        board_width=board["width"],
+                        board_height=board["height"],
+                        turn=turn,
+                        game_id=f"pool_{eval_id}_{game_num}_{seed}",
+                        mode=mode,
+                        hazards=board.get("hazards", []),
+                    )
+                    eval_move, _ = _run_timed_move(
+                        eval_strategy.choose_move, eval_game_state, wrap=wrap, constrictor=constrictor
+                    )
+
+                for fut in concurrent.futures.as_completed(future_to_snake):
+                    sn_id = future_to_snake[fut]
+                    zoo_moves[sn_id] = fut.result()
+        else:
+            eval_snake = next((sn for sn in ordered_snakes if sn["id"] == eval_id), None)
+            if eval_snake is not None:
+                eval_game_state = _build_game_state(
+                    current_snake=eval_snake,
+                    active_snakes=ordered_snakes,
+                    current_food=board["food"],
+                    board_width=board["width"],
+                    board_height=board["height"],
+                    turn=turn,
+                    game_id=f"pool_{eval_id}_{game_num}_{seed}",
+                    mode=mode,
+                    hazards=board.get("hazards", []),
+                )
+                eval_move, _ = _run_timed_move(
+                    eval_strategy.choose_move, eval_game_state, wrap=wrap, constrictor=constrictor
+                )
+
         for sn in ordered_snakes:
             s_id = sn["id"]
-            game_state = _build_game_state(
-                current_snake=sn,
-                active_snakes=ordered_snakes,
-                current_food=board["food"],
-                board_width=board["width"],
-                board_height=board["height"],
-                turn=turn,
-                game_id=f"pool_{eval_id}_{game_num}_{seed}",
-                mode=mode,
-                hazards=board.get("hazards", []),
-            )
             if s_id == eval_id:
-                chosen_move, _ = _run_timed_move(eval_strategy.choose_move, game_state, wrap=wrap, constrictor=constrictor)
+                chosen_move = eval_move
             else:
-                chosen_move = zoo_adapter.choose_move(game_state, wrap=wrap, constrictor=constrictor)
+                chosen_move = zoo_moves[s_id]
             moves[s_id] = chosen_move if (chosen_move in ("up", "down", "left", "right")) else "up"
 
         board, snakes = simulate_turn(board, snakes, moves, wrap=wrap, constrictor=constrictor, hazard_damage=14)
