@@ -304,10 +304,11 @@ def _run_timed_move(
     game_state: Dict[str, Any],
     wrap: bool = False,
     constrictor: bool = False,
+    **kwargs: Any,
 ) -> Tuple[Optional[str], float]:
     """Executes a strategy move function and tracks elapsed time."""
     t0 = time.perf_counter()
-    chosen_move = move_fn(game_state, wrap=wrap, constrictor=constrictor)
+    chosen_move = move_fn(game_state, wrap=wrap, constrictor=constrictor, **kwargs)
     elapsed = time.perf_counter() - t0
     return chosen_move, elapsed
 
@@ -439,11 +440,36 @@ def _build_game_state(
     game_id: str,
     mode: str = "standard",
     hazards: Optional[List[Dict[str, Any]]] = None,
+    turn_cache: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Constructs isolated game_state dictionary matching the Battlesnake API."""
     if hazards is None:
         hazards = []
-    return {
+
+    if turn_cache is not None and "board_dict" in turn_cache:
+        board_dict = turn_cache["board_dict"]
+    else:
+        board_dict = {
+            "width": board_width,
+            "height": board_height,
+            "snakes": [
+                {
+                    "id": s["id"],
+                    "name": s["name"],
+                    "health": s["health"],
+                    "body": [{"x": pt["x"], "y": pt["y"]} for pt in s["body"]],
+                    "head": {"x": s["head"]["x"], "y": s["head"]["y"]},
+                    "length": s["length"],
+                }
+                for s in active_snakes
+            ],
+            "food": [{"x": f["x"], "y": f["y"]} for f in current_food],
+            "hazards": [{"x": hz["x"], "y": hz["y"]} for hz in hazards],
+        }
+        if turn_cache is not None:
+            turn_cache["board_dict"] = board_dict
+
+    state = {
         "game": {
             "id": game_id,
             "ruleset": {
@@ -469,23 +495,7 @@ def _build_game_state(
             "source": "custom",
         },
         "turn": turn,
-        "board": {
-            "width": board_width,
-            "height": board_height,
-            "snakes": [
-                {
-                    "id": s["id"],
-                    "name": s["name"],
-                    "health": s["health"],
-                    "body": [{"x": pt["x"], "y": pt["y"]} for pt in s["body"]],
-                    "head": {"x": s["head"]["x"], "y": s["head"]["y"]},
-                    "length": s["length"],
-                }
-                for s in active_snakes
-            ],
-            "food": [{"x": f["x"], "y": f["y"]} for f in current_food],
-            "hazards": [{"x": hz["x"], "y": hz["y"]} for hz in hazards],
-        },
+        "board": board_dict,
         "you": {
             "id": current_snake["id"],
             "name": current_snake["name"],
@@ -495,6 +505,9 @@ def _build_game_state(
             "length": current_snake["length"],
         },
     }
+    if turn_cache is not None:
+        state["_turn_cache"] = turn_cache
+    return state
 
 
 def simulate_single_game(
@@ -545,6 +558,7 @@ def simulate_single_game(
         turn_offset = turn % len(snakes)
         ordered_snakes = snakes[turn_offset:] + snakes[:turn_offset]
 
+        turn_cache: Dict[str, Any] = {}
         for sn in ordered_snakes:
             s_id = sn["id"]
             strat_module = _strategy_variant if s_id == STRATEGY_VARIANT else _strategy_baseline
@@ -562,9 +576,12 @@ def simulate_single_game(
                 game_id=f"game_{game_num}_{seed}",
                 mode=mode,
                 hazards=board.get("hazards", []),
+                turn_cache=turn_cache,
             )
 
-            chosen_move, elapsed = _run_timed_move(move_fn, game_state, wrap=wrap, constrictor=constrictor)
+            chosen_move, elapsed = _run_timed_move(
+                move_fn, game_state, wrap=wrap, constrictor=constrictor, turn_cache=turn_cache
+            )
             moves[s_id] = chosen_move if (chosen_move in ("up", "down", "left", "right")) else "up"
             d = getattr(strat_module, "LAST_SEARCH_DEPTH", 0)
             if d > 0:
