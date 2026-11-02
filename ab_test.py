@@ -124,7 +124,7 @@ def _init_worker(baseline_module: str, variant_module: str) -> None:
 
 
 def create_worker_pool(
-    threads: int = 6,
+    threads: int = 5,
     baseline_module: str = DEFAULT_BASELINE_MODULE,
     variant_module: str = DEFAULT_VARIANT_MODULE,
 ) -> mp.pool.Pool:
@@ -142,7 +142,7 @@ init_strategies(_baseline_module_name, _variant_module_name)
 # ---------------------------------------------------------------------------
 # Project Configuration Constants
 # ---------------------------------------------------------------------------
-THREADS = 7                 # Fixed simulation worker process count (Updated per user instruction: set to 7)
+THREADS = 5                 # Fixed simulation worker process count (Updated per user instruction: set to 5)
 MIN_GAMES = 30             # Minimum games before evaluating dynamic statistical early stop (rethought from fixed 50)
 MAX_GAMES = 200            # Maximum games to play before hard stop
 CHECK_INTERVAL = 1         # Evaluate statistical confidence dynamically on every completed game (>= MIN_GAMES)
