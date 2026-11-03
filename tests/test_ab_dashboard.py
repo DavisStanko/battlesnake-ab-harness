@@ -854,6 +854,21 @@ class TestDashboardSkip(unittest.TestCase):
         self.assertEqual(plan, 200)  # Exactly 200, no phantom 50 pool games
         self.assertEqual(pct, 25.0)
 
+    def test_dashboard_embedded_javascript_syntax(self):
+        """Verify embedded client-side script blocks in DASHBOARD_HTML are syntactically valid."""
+        import re
+        import shutil
+        import subprocess
+        node_bin = shutil.which("node")
+        if not node_bin:
+            self.skipTest("node binary not found on system")
+        from harness.ab_dashboard import DASHBOARD_HTML
+        scripts = re.findall(r"<script>(.*?)</script>", DASHBOARD_HTML, re.DOTALL)
+        self.assertGreater(len(scripts), 0, "DASHBOARD_HTML should contain at least one <script> tag")
+        for idx, script in enumerate(scripts):
+            proc = subprocess.run([node_bin, "-c", "-"], input=script, text=True, capture_output=True)
+            self.assertEqual(proc.returncode, 0, f"Script block {idx} contains JS syntax error: {proc.stderr}")
+
 
 if __name__ == "__main__":
     unittest.main()

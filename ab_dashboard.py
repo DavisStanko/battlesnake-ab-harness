@@ -6133,12 +6133,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           let normTarget = (rawTarget != null) ? String(rawTarget).trim().toUpperCase() : '';
           if (normTarget.includes('/') && normTarget.includes('PARITY')) normTarget = 'PARITY';
 
-          let targetDisplay = 'TARGET: NOT SET';
-          if (normTarget && normTarget !== 'NONE' && normTarget !== 'NULL') {
-            targetDisplay = `TARGET: ${normTarget}`;
-          }
-          targetBadge.className = 'badge badge-target';
-          targetBadge.style.display = 'inline-flex';
           let targetDisplay = '🎯 NOT SET';
           if (normTarget && normTarget !== 'NONE' && normTarget !== 'NULL') {
             targetDisplay = `🎯 ${normTarget}`;
