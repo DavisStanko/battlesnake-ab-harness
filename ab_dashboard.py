@@ -3265,25 +3265,29 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     .stage-segment.done.active,
-    .stage-segment.passed.active {
+    .stage-segment.passed.active,
+    .stage-segment.pass.active {
       background: rgba(16, 185, 129, 0.14);
       border-color: var(--pipeline-green);
       box-shadow: 0 0 14px rgba(16, 185, 129, 0.22);
     }
 
     .stage-segment.done.active .stage-seg-index,
-    .stage-segment.passed.active .stage-seg-index {
+    .stage-segment.passed.active .stage-seg-index,
+    .stage-segment.pass.active .stage-seg-index {
       background: rgba(16, 185, 129, 0.25);
       color: var(--pipeline-green);
     }
 
     .stage-segment.done.active:hover,
-    .stage-segment.passed.active:hover {
+    .stage-segment.passed.active:hover,
+    .stage-segment.pass.active:hover {
       background: rgba(16, 185, 129, 0.18);
     }
 
     .stage-segment.done:hover:not(.active),
-    .stage-segment.passed:hover:not(.active) {
+    .stage-segment.passed:hover:not(.active),
+    .stage-segment.pass:hover:not(.active) {
       background: rgba(16, 185, 129, 0.06);
       border-color: rgba(16, 185, 129, 0.4);
     }
@@ -3543,8 +3547,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     .status-chip-passed,
+    .status-chip-pass,
     .status-chip-done,
     .matrix-status-passed,
+    .matrix-status-pass,
     .matrix-status-done {
       background: rgba(16, 185, 129, 0.15);
       color: var(--pipeline-green);
@@ -3786,7 +3792,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     .matrix-status-pending, .matrix-status-not-run, .matrix-status-skipped { background: rgba(156, 163, 175, 0.15); color: var(--text-muted); }
     .matrix-status-running { background: rgba(59, 130, 246, 0.25); color: #60a5fa; }
-    .matrix-status-passed, .matrix-status-done { background: rgba(16, 185, 129, 0.25); color: #34d399; }
+    .matrix-status-passed, .matrix-status-pass, .matrix-status-done { background: rgba(16, 185, 129, 0.25); color: #34d399; }
     .matrix-status-parity { background: rgba(245, 158, 11, 0.25); color: #f59e0b; }
     .matrix-status-failed { background: rgba(239, 68, 68, 0.25); color: #f87171; }
 
@@ -4679,7 +4685,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
 
       // Time-based progress: elapsed / (elapsed + left)
-      const isFinished = (data.status === 'FINISHED' || data.stop_type === 'MATRIX_COMPLETE' || data.stop_type === 'PARITY' || data.stop_type === 'KEEP' || data.status === 'DONE');
+      const isFinished = (data.status === 'FINISHED' || data.stop_type === 'MATRIX_COMPLETE' || data.stop_type === 'PARITY' || data.stop_type === 'KEEP' || data.status === 'DONE' || data.status === 'PASS');
       const suiteElapsed = snapshot.suiteElapsed || 0;
       const totalEta = (snapshot.totalEta != null && snapshot.totalEta > 0) ? snapshot.totalEta : (snapshot.totalEta === 0 ? 0 : null);
 
@@ -5259,7 +5265,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const seg = document.getElementById(`railSegment-${id}`);
       const st = document.getElementById(`railStatus-${id}`);
       const dur = document.getElementById(`railDuration-${id}`);
-      const statusLower = status.toLowerCase().replace(/ /g, '-');
+      let statusLower = status.toLowerCase().replace(/ /g, '-');
+      if (statusLower === 'pass') statusLower = 'passed';
 
       if (seg) {
         const isActive = (id === activeStage);
@@ -5274,6 +5281,43 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
+    // Helper to derive depth status: FAILED, PASS (improvement), or PARITY
+    function deriveDepthStatus(d) {
+      if (d.regression === true || d.passed === false) return 'FAILED';
+      const deltaD = d.delta_depth != null ? Number(d.delta_depth) : (d.overall_delta_d != null ? Number(d.overall_delta_d) : 0);
+      return deltaD > 0.05 ? 'PASS' : 'PARITY';
+    }
+
+    // Helper to derive matrix status: FAILED, PASS (improvement), or PARITY
+    function deriveSelfStatus() {
+      if (rec === 'REVERT' || rec === 'REJECT') return 'FAILED';
+      const sType = (data.stop_type || '').toUpperCase();
+      if (['REVERT', 'FAILED', 'DISCONNECTED'].includes(sType)) return 'FAILED';
+      if (rec === 'KEEP' || sType === 'KEEP') return 'PASS';
+      if (rec === 'PARITY' || sType === 'PARITY' || sType === 'MATRIX_COMPLETE') return 'PARITY';
+      const failedModes = matrixList.filter(m => m.status === 'FAILED').length;
+      if (failedModes > 0) return 'FAILED';
+      const parityModes = matrixList.filter(m => m.status === 'PARITY').length;
+      const passModes = matrixList.filter(m => m.status === 'PASSED' || m.status === 'KEEP').length;
+      if (passModes > 0 && parityModes === 0) return 'PASS';
+      if (parityModes > 0) return 'PARITY';
+      return 'PASS';
+    }
+
+    // Helper to derive pool status: FAILED, PASS (improvement), or PARITY
+    function derivePoolStatus() {
+      if (rec === 'REVERT' || rec === 'REJECT') return 'FAILED';
+      const pDec = (pool.decision || '').toUpperCase();
+      if (pDec === 'FAILED' || pDec === 'REVERT') return 'FAILED';
+      if (pDec === 'KEEP' || rec === 'KEEP') return 'PASS';
+      if (pDec === 'PARITY' || rec === 'PARITY') return 'PARITY';
+      const pDelta = pool.delta != null ? pool.delta : ((pool.cand_share || 0) - (pool.base_share || 0));
+      const pZ = pool.z_score != null ? pool.z_score : 0.0;
+      if (pDelta > 0 && pZ >= 1.645) return 'PASS';
+      if (pDelta >= 0 || pZ > -1.645) return 'PARITY';
+      return 'FAILED';
+    }
+
     // Stage 1: Tactical Unit Tests
     const unitData = data.unit_tests_data || {};
     let unitStatus = 'QUEUED';
@@ -5284,8 +5328,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     } else if (data.stop_type === 'TEST_FAILURE' || unitData.status === 'FAILED' || (isAborted && interruptedStage === 'unit')) {
       unitStatus = 'FAILED';
       autoSelectStage('unit');
-    } else if (unitData.status === 'PASSED' || unitData.status === 'DONE' || (data.total_played > 0) || (isComplete && data.stop_type !== 'TEST_FAILURE')) {
-      unitStatus = 'DONE';
+    } else if (unitData.status === 'PASSED' || unitData.status === 'DONE' || unitData.status === 'PASS' || (data.total_played > 0) || (isComplete && data.stop_type !== 'TEST_FAILURE')) {
+      unitStatus = 'PASS';
       if (!unitData.duration_sec || unitData.duration_sec <= 0) {
         unitDur = '8.3s';
       }
@@ -5321,7 +5365,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           unitScoreEl.innerText = `${passedCount} / ${totalCount} passed`;
           unitScoreEl.style.color = 'var(--pipeline-red)';
           if (unitIconEl) { unitIconEl.innerText = '❌'; unitIconEl.style.color = 'var(--pipeline-red)'; }
-        } else if (unitStatus === 'DONE') {
+        } else if (unitStatus === 'DONE' || unitStatus === 'PASS') {
           unitScoreEl.innerText = `${passedCount} / ${totalCount} passed`;
           unitScoreEl.style.color = 'var(--pipeline-green)';
           if (unitIconEl) { unitIconEl.innerText = '✓'; unitIconEl.style.color = 'var(--pipeline-green)'; }
@@ -5336,7 +5380,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
       }
       if (unitDurEl) unitDurEl.innerText = `Duration: ${durStr}`;
-      if (unitListEl && (unitData.tests || unitStatus === 'DONE' || unitStatus === 'FAILED')) {
+      if (unitListEl && (unitData.tests || unitStatus === 'DONE' || unitStatus === 'PASS' || unitStatus === 'FAILED')) {
         unitListEl.innerHTML = renderUnitTestsList(unitData.tests || []);
       }
     }
@@ -5352,8 +5396,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       depthStatus = 'FAILED';
       autoSelectStage('depth');
     } else if (depth.completed_positions && depth.completed_positions > 0) {
-      const passed = depth.passed !== false && (depth.delta_depth == null || depth.delta_depth >= 0);
-      depthStatus = passed ? 'DONE' : 'FAILED';
+      depthStatus = deriveDepthStatus(depth);
       depthDur = depth.duration_sec ? formatSeconds(depth.duration_sec) : '--';
     } else if (runType === 'depth') {
       if (isRunning) {
@@ -5361,16 +5404,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         depthDur = formatSeconds(data.elapsed_seconds || 0);
         autoSelectStage('depth');
       } else if (isComplete) {
-        const passed = depth.passed !== false && (depth.delta_depth == null || depth.delta_depth >= 0);
-        depthStatus = passed ? 'DONE' : 'FAILED';
+        depthStatus = deriveDepthStatus(depth);
         depthDur = depth.duration_sec ? formatSeconds(depth.duration_sec) : formatSeconds(data.elapsed_seconds || 0);
         autoSelectStage('depth');
       } else {
         depthStatus = 'QUEUED';
       }
-    } else if (isRunning && unitStatus === 'DONE' && (!data.total_played || data.total_played === 0) && (!depth.completed_positions || depth.completed_positions < 12)) {
+    } else if (isRunning && (unitStatus === 'DONE' || unitStatus === 'PASS') && (!data.total_played || data.total_played === 0) && (!depth.completed_positions || depth.completed_positions < 12)) {
       depthStatus = 'RUNNING';
       depthDur = formatSeconds(data.elapsed_seconds || 0);
+    } else if (isComplete && (depth.completed_positions >= 12 || depth.duration_sec)) {
+      depthStatus = deriveDepthStatus(depth);
     } else {
       depthStatus = 'QUEUED';
     }
@@ -5384,7 +5428,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let selfDur = '--';
     const sumMatrixSec = matrixList.reduce((acc, m) => acc + (m.duration_sec || 0), 0);
 
-    const unitTestSec = (unitData && unitData.duration_sec && unitData.duration_sec > 0) ? unitData.duration_sec : (unitStatus === 'DONE' ? 8.3 : 0);
+    const unitTestSec = (unitData && unitData.duration_sec && unitData.duration_sec > 0) ? unitData.duration_sec : ((unitStatus === 'DONE' || unitStatus === 'PASS') ? 8.3 : 0);
     const depthSec = (depth && depth.duration_sec && depth.duration_sec > 0) ? depth.duration_sec : 0;
     const computedMatrixElapsed = (data.matrix_duration_sec != null && data.matrix_duration_sec > 0)
       ? data.matrix_duration_sec
@@ -5401,8 +5445,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         selfDur = formatSeconds(computedMatrixElapsed);
         autoSelectStage('self');
       } else if (isComplete) {
-        if (rec === 'REVERT') selfStatus = 'FAILED';
-        else selfStatus = 'DONE';
+        selfStatus = deriveSelfStatus();
         const finalSec = (data.matrix_duration_sec != null && data.matrix_duration_sec > 0)
           ? data.matrix_duration_sec
           : (sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed);
@@ -5413,19 +5456,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     } else if (runType === 'pool') {
       if (data.matrix_duration_sec != null && data.matrix_duration_sec > 0) {
-        selfStatus = 'DONE';
+        selfStatus = deriveSelfStatus();
         selfDur = formatSeconds(data.matrix_duration_sec);
       } else if (hasSelfProgress && sumMatrixSec > 0) {
-        selfStatus = 'DONE';
+        selfStatus = deriveSelfStatus();
         selfDur = formatSeconds(sumMatrixSec);
       } else {
         selfStatus = 'SKIPPED';
         selfDur = '--';
       }
     } else if (isComplete && completedModes > 0) {
-      selfStatus = 'DONE';
+      selfStatus = deriveSelfStatus();
       selfDur = formatSeconds(data.matrix_duration_sec != null ? data.matrix_duration_sec : (sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed));
-    } else if (isRunning && (unitStatus === 'DONE') && (!depth.duration_sec || depthStatus === 'DONE') && (completedModes < matrixList.length)) {
+    } else if (isRunning && (unitStatus === 'DONE' || unitStatus === 'PASS') && (!depth.duration_sec || depthStatus === 'DONE' || depthStatus === 'PASS' || depthStatus === 'PARITY') && (completedModes < matrixList.length)) {
       selfStatus = 'RUNNING';
       selfDur = formatSeconds(computedMatrixElapsed);
     } else {
@@ -5453,7 +5496,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         poolDur = formatSeconds(poolElapsed);
         autoSelectStage('pool');
       } else {
-        poolStatus = ((pool.delta || 0) >= 0 && rec !== 'REVERT') ? 'DONE' : 'FAILED';
+        poolStatus = derivePoolStatus();
         poolDur = poolDurSec ? formatSeconds(poolDurSec) : '--';
       }
     } else if (isRunning && (matrixList.length > 0 && completedModes >= matrixList.length)) {
@@ -6351,7 +6394,7 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
     # Pre-render Unit Tests detail
     unit_data = data.get("unit_tests_data") or {}
     depth_data = data.get("depth_data") or {}
-    unit_status = str(unit_data.get("status") or ("RUNNING" if is_running else ("FAILED" if (is_aborted and interrupted_stage == "unit") else ("DONE" if is_complete else "PENDING")))).upper()
+    unit_status = str(unit_data.get("status") or ("RUNNING" if is_running else ("FAILED" if (is_aborted and interrupted_stage == "unit") else ("PASS" if is_complete else "PENDING")))).upper()
     unit_dur = unit_data.get("duration_sec")
     unit_dur_str = format_duration(float(unit_dur), allow_decimal=True) if unit_dur else "--"
     tests_list = unit_data.get("tests") or []
@@ -6366,7 +6409,7 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
     elif unit_status == "FAILED":
         unit_header_line = f"{unit_passed} / {unit_total} passed"
         unit_score_color = "var(--danger-color)"
-    elif unit_status in ("PASSED", "DONE"):
+    elif unit_status in ("PASSED", "PASS", "DONE"):
         unit_header_line = f"{unit_passed} / {unit_total} passed"
         unit_score_color = "var(--variant-color)"
     else:
@@ -6776,12 +6819,60 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
     matrix_active = " active" if active_stage == "self" else ""
     pool_active = " active" if active_stage == "pool" else ""
 
+    # Derive rail statuses: PASS (improvement), PARITY (parity achieved), or FAILED
+    def py_derive_depth_status(d_data):
+        if d_data.get("regression") is True or d_data.get("passed") is False:
+            return "failed", "FAILED"
+        delta_d = float(d_data.get("delta_depth") if d_data.get("delta_depth") is not None else (d_data.get("overall_delta_d") or 0.0))
+        if delta_d > 0.05:
+            return "passed", "PASS"
+        return "parity", "PARITY"
+
+    def py_derive_matrix_status(m_list, r_rec, s_stop):
+        if r_rec in ("REVERT", "REJECT") or s_stop in ("REVERT", "FAILED", "DISCONNECTED"):
+            return "failed", "FAILED"
+        if r_rec == "KEEP" or s_stop == "KEEP":
+            return "passed", "PASS"
+        if r_rec == "PARITY" or s_stop in ("PARITY", "MATRIX_COMPLETE"):
+            return "parity", "PARITY"
+        failed_cnt = sum(1 for m in m_list if m.get("status") == "FAILED")
+        if failed_cnt > 0:
+            return "failed", "FAILED"
+        parity_cnt = sum(1 for m in m_list if m.get("status") == "PARITY")
+        pass_cnt = sum(1 for m in m_list if m.get("status") in ("PASSED", "KEEP"))
+        if pass_cnt > 0 and parity_cnt == 0:
+            return "passed", "PASS"
+        if parity_cnt > 0:
+            return "parity", "PARITY"
+        return "passed", "PASS"
+
+    def py_derive_pool_status(p_data, r_rec):
+        if r_rec in ("REVERT", "REJECT"):
+            return "failed", "FAILED"
+        p_dec = str(p_data.get("decision") or "").upper()
+        if p_dec in ("FAILED", "REVERT"):
+            return "failed", "FAILED"
+        if p_dec == "KEEP" or r_rec == "KEEP":
+            return "passed", "PASS"
+        if p_dec == "PARITY" or r_rec == "PARITY":
+            return "parity", "PARITY"
+        p_delta = p_data.get("delta")
+        if p_delta is None and (p_data.get("cand_share") is not None and p_data.get("base_share") is not None):
+            p_delta = float(p_data["cand_share"]) - float(p_data["base_share"])
+        p_delta = float(p_delta or 0.0)
+        p_z = float(p_data.get("z_score") or 0.0)
+        if p_delta > 0 and p_z >= 1.645:
+            return "passed", "PASS"
+        if p_delta >= 0 or p_z > -1.645:
+            return "parity", "PARITY"
+        return "failed", "FAILED"
+
     # Unit Tests and Depth Benchmark stage rail presentation
     unit_status = unit_data.get("status", "PASSED" if is_running else "PENDING")
     unit_dur = unit_data.get("duration_sec")
     unit_dur_str = format_duration(float(unit_dur), allow_decimal=True) if unit_dur else ("0:08" if is_running else "--")
-    unit_status_clean = "done" if unit_status in ("PASSED", "DONE") else ("failed" if unit_status == "FAILED" else "pending")
-    unit_status_text = "DONE" if unit_status in ("PASSED", "DONE") else unit_status
+    unit_status_clean = "passed" if unit_status in ("PASSED", "DONE", "PASS") else ("failed" if unit_status == "FAILED" else "pending")
+    unit_status_text = "PASS" if unit_status in ("PASSED", "DONE", "PASS") else unit_status
     out = out.replace(
         '<div class="stage-segment pending" id="railSegment-unit">\n        <span class="stage-seg-index">1</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Unit Tests</span>\n          <span class="stage-seg-duration" id="railDuration-unit">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-pending" id="railStatus-unit">PENDING</span>\n      </div>',
         f'<div class="stage-segment {unit_status_clean}{unit_active}" id="railSegment-unit">\n        <span class="stage-seg-index">1</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Unit Tests</span>\n          <span class="stage-seg-duration" id="railDuration-unit">{unit_dur_str}</span>\n        </div>\n        <span class="stage-seg-status matrix-status-{unit_status_clean}" id="railStatus-unit">{unit_status_text}</span>\n      </div>'
@@ -6808,11 +6899,9 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             pool_rail_status = "QUEUED"
             pool_dur_str = "--"
         elif run_type == "pool":
-            depth_status_clean = "done"
-            depth_status_text = "DONE"
+            depth_status_clean, depth_status_text = py_derive_depth_status(depth_data)
             if matrix_dur_val or data.get("self_play_matrix"):
-                matrix_rail_class = "done"
-                matrix_rail_status = "DONE"
+                matrix_rail_class, matrix_rail_status = py_derive_matrix_status(data.get("self_play_matrix", matrix_list), rec, data.get("stop_type"))
                 matrix_dur_str = format_duration(float(matrix_dur_val)) if matrix_dur_val else "--"
             else:
                 matrix_rail_class = "skipped"
@@ -6822,8 +6911,7 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             pool_rail_status = "RUNNING"
             pool_dur_str = elapsed_str
         else:
-            depth_status_clean = "done"
-            depth_status_text = "DONE"
+            depth_status_clean, depth_status_text = py_derive_depth_status(depth_data)
             matrix_rail_class = "running"
             matrix_rail_status = "RUNNING"
             matrix_dur_str = elapsed_str
@@ -6844,8 +6932,8 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             pool_rail_status = "QUEUED"
             pool_dur_str = "--"
         elif interrupted_stage == "depth":
-            unit_status_clean = "done"
-            unit_status_text = "DONE"
+            unit_status_clean = "passed"
+            unit_status_text = "PASS"
             depth_status_clean = "failed"
             depth_status_text = "FAILED"
             depth_dur_str = format_duration(float(depth_dur)) if depth_dur else elapsed_str
@@ -6856,10 +6944,9 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             pool_rail_status = "QUEUED"
             pool_dur_str = "--"
         elif interrupted_stage == "self":
-            unit_status_clean = "done"
-            unit_status_text = "DONE"
-            depth_status_clean = "done"
-            depth_status_text = "DONE"
+            unit_status_clean = "passed"
+            unit_status_text = "PASS"
+            depth_status_clean, depth_status_text = py_derive_depth_status(depth_data)
             matrix_rail_class = "failed"
             matrix_rail_status = "FAILED"
             matrix_dur_str = format_duration(float(matrix_dur_val)) if matrix_dur_val else elapsed_str
@@ -6867,38 +6954,34 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             pool_rail_status = "QUEUED"
             pool_dur_str = "--"
         else:
-            unit_status_clean = "done"
-            unit_status_text = "DONE"
-            depth_status_clean = "done"
-            depth_status_text = "DONE"
-            matrix_rail_class = "done"
-            matrix_rail_status = "DONE"
+            unit_status_clean = "passed"
+            unit_status_text = "PASS"
+            depth_status_clean, depth_status_text = py_derive_depth_status(depth_data)
+            matrix_rail_class, matrix_rail_status = py_derive_matrix_status(matrix_list, rec, data.get("stop_type"))
             matrix_dur_str = format_duration(float(matrix_dur_val)) if matrix_dur_val else "--"
             pool_rail_class = "failed"
             pool_rail_status = "FAILED"
             pool_dur_str = format_duration(float(pool_dur_val)) if pool_dur_val else elapsed_str
     elif is_complete:
-        unit_status_clean = "failed" if unit_status == "FAILED" else "done"
-        unit_status_text = "FAILED" if unit_status == "FAILED" else "DONE"
-        depth_status_clean = "done" if (depth_dur or (depth_data.get("completed_positions", 0) >= 12)) else "pending"
-        depth_status_text = "DONE" if (depth_dur or (depth_data.get("completed_positions", 0) >= 12)) else "QUEUED"
+        unit_status_clean = "failed" if unit_status == "FAILED" else "passed"
+        unit_status_text = "FAILED" if unit_status == "FAILED" else "PASS"
+        if depth_dur or (depth_data.get("completed_positions", 0) >= 12):
+            depth_status_clean, depth_status_text = py_derive_depth_status(depth_data)
+        else:
+            depth_status_clean = "pending"
+            depth_status_text = "QUEUED"
         if run_type == "pool":
             if matrix_dur_val or data.get("self_play_matrix"):
-                matrix_rail_class = "done"
-                matrix_rail_status = "DONE"
+                matrix_rail_class, matrix_rail_status = py_derive_matrix_status(data.get("self_play_matrix", matrix_list), rec, data.get("stop_type"))
                 matrix_dur_str = format_duration(float(matrix_dur_val)) if matrix_dur_val else "--"
             else:
                 matrix_rail_class = "skipped"
                 matrix_rail_status = "SKIPPED"
                 matrix_dur_str = "--"
-            pool_stat = "FAILED" if rec == "REVERT" else "DONE"
-            pool_rail_class = pool_stat.lower()
-            pool_rail_status = pool_stat
+            pool_rail_class, pool_rail_status = py_derive_pool_status(pool_data, rec)
             pool_dur_str = format_duration(float(pool_dur_val)) if pool_dur_val else elapsed_str
         else:
-            self_stat = "FAILED" if rec == "REVERT" else "DONE"
-            matrix_rail_class = self_stat.lower()
-            matrix_rail_status = self_stat
+            matrix_rail_class, matrix_rail_status = py_derive_matrix_status(matrix_list, rec, data.get("stop_type"))
             matrix_dur_str = format_duration(float(matrix_dur_val)) if matrix_dur_val else elapsed_str
             pool_rail_class = "pending"
             pool_rail_status = "QUEUED"
