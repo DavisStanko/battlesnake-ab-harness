@@ -3401,26 +3401,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     /* 1. StagePanel */
     .stage-panel {
-      height: 272px;
-      min-height: 272px;
-      max-height: 272px;
+      height: auto;
+      min-height: auto;
+      max-height: none;
       display: flex;
       flex-direction: column;
       background: var(--pipeline-panel-bg);
       border: 1px solid var(--pipeline-border);
       border-radius: var(--pipeline-radius-lg);
-      padding: var(--pipeline-space-lg);
+      padding: var(--pipeline-space-md) var(--pipeline-space-lg);
       box-sizing: border-box;
-      overflow: hidden;
       position: relative;
     }
 
     .stage-panel-body {
       flex: 1;
-      height: 202px;
-      min-height: 202px;
-      max-height: 202px;
-      overflow-y: auto;
+      height: auto;
+      min-height: auto;
+      max-height: none;
+      overflow-y: visible;
       overflow-x: hidden;
       box-sizing: border-box;
     }
@@ -3457,7 +3456,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: var(--pipeline-space-md);
+      margin-bottom: var(--pipeline-space-xs);
       flex-shrink: 0;
     }
 
@@ -3599,6 +3598,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border-bottom: 1px solid var(--pipeline-border-row);
       font-size: var(--pipeline-font-body);
       vertical-align: middle;
+    }
+
+    .data-table tr:last-child td {
+      border-bottom: none;
     }
 
     .data-table tr:hover td {
