@@ -3321,9 +3321,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     /* 1. StagePanel */
     .stage-panel {
-      height: auto;
-      min-height: auto;
-      max-height: none;
+      height: 226px;
+      min-height: 226px;
+      max-height: 226px;
       display: flex;
       flex-direction: column;
       background: var(--pipeline-panel-bg);
@@ -3331,15 +3331,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       border-radius: var(--pipeline-radius-lg);
       padding: var(--pipeline-space-md) var(--pipeline-space-lg);
       box-sizing: border-box;
+      overflow: hidden;
       position: relative;
     }
 
     .stage-panel-body {
       flex: 1;
-      height: auto;
-      min-height: auto;
-      max-height: none;
-      overflow-y: visible;
+      height: 175px;
+      min-height: 175px;
+      max-height: 175px;
+      overflow-y: auto;
       overflow-x: hidden;
       box-sizing: border-box;
     }
