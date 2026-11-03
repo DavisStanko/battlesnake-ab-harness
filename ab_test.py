@@ -38,6 +38,7 @@ import os
 from pathlib import Path
 import random
 import re
+import requests
 import signal
 import subprocess
 import sys
@@ -2830,11 +2831,187 @@ def run_ab_test_engine(
             )
         else:
             overall_stop_reason = f"{len(revert_modes)} of {len(active_matrix)} tested modes confirmed regression."
+        if is_partial_matrix:
+            overall_stop_reason += f" [Note: Isolated mode test on {mode_names}]"
+
+        history_path = save_run_history(
+            STRATEGY_BASELINE,
+            STRATEGY_VARIANT,
+            total_games_all,
+            agg_results,
+            overall_stop_type,
+            overall_stop_reason,
+            overall_recommendation,
+            experiment_desc=desc,
+            matrix_results=matrix_results,
+            game_mode=modes,
+            depth_results=depth_results,
+            unit_tests_data=unit_tests_result,
+        )
+
+        dash_client.set_finished(overall_stop_type, overall_stop_reason, overall_recommendation, str(history_path), duration_sec=total_wall_sec)
+        time.sleep(0.3)
+
+        print_matrix_summary(
+            matrix_results=matrix_results,
+            overall_recommendation=overall_recommendation,
+            overall_stop_reason=overall_stop_reason,
+            total_games=total_games_all,
+            total_wall_sec=total_wall_sec,
+            experiment_desc=desc,
+            history_path=history_path,
+            depth_results=depth_results,
+        )
+
+        run_post_benchmark_blunder_pipeline(
+            matrix_results=matrix_results,
+            max_losses=5,
+            results_dir=results_dir,
+        )
+        clear_checkpoint(results_dir)
+
+        self_play_deltas = [
+            f"{r['mode']}: {r['var_win_share'] - r['target_share']:+.1f}%"
+            for r in matrix_results
+        ]
+        append_results_ledger(
+            description=desc,
+            self_play_delta=", ".join(self_play_deltas),
+            pool_delta="",
+            decision=overall_recommendation,
+        )
+        return
+
     elif skipped_modes and not keep_modes and not parity_modes:
         overall_recommendation = "INCOMPLETE"
         overall_stop_type = "MATRIX_PARTIAL"
         overall_stop_reason = "All tested modes skipped by user."
-    elif keep_modes:
+        if is_partial_matrix:
+            overall_stop_reason += f" [Note: Isolated mode test on {mode_names}]"
+
+        history_path = save_run_history(
+            STRATEGY_BASELINE,
+            STRATEGY_VARIANT,
+            total_games_all,
+            agg_results,
+            overall_stop_type,
+            overall_stop_reason,
+            overall_recommendation,
+            experiment_desc=desc,
+            matrix_results=matrix_results,
+            game_mode=modes,
+            depth_results=depth_results,
+            unit_tests_data=unit_tests_result,
+        )
+        dash_client.set_finished(overall_stop_type, overall_stop_reason, overall_recommendation, str(history_path), duration_sec=total_wall_sec)
+        clear_checkpoint(results_dir)
+        return
+
+    # Here, matrix achieved KEEP or PARITY!
+    self_play_deltas = [
+        f"{r['mode']}: {r['var_win_share'] - r['target_share']:+.1f}%"
+        for r in matrix_results
+    ]
+
+    if target in ("PARITY", "IMPROVEMENT"):
+        # Rules 1 & 2: Self-play can only reject or qualify. Acceptance strictly requires the pool gate + replication.
+        print("\n" + "=" * 80)
+        print(f"  [✓] Stage 3 Self-Play Matrix Passed ({len(keep_modes)} improved, {len(parity_modes)} at parity).")
+        print(f"      Target '{target}' mandates proceeding to Stage 4 External Pool Gate.")
+        print("=" * 80 + "\n")
+
+        pool_config_file = pool if pool is not None else str(PROJECT_ROOT / "harness" / "pool_snakes.json")
+        try:
+            pool_stage_res = run_pool_stage(
+                pool_config_path=pool_config_file,
+                active_matrix=active_matrix,
+                pool_games=pool_games,
+                threads=threads,
+                desc=desc,
+                target=target,
+                baseline_module=baseline_module,
+                variant_module=variant_module,
+                dash_client=dash_client,
+            )
+        except Exception as e:
+            fail_reason = f"External pool gate required for target '{target}', but pool failed to run: {e}"
+            if dash_client is not None:
+                dash_client.set_finished(
+                    stop_type="FAILED",
+                    stop_reason=fail_reason,
+                    recommendation="FAILED",
+                    csv_path="",
+                    duration_sec=time.perf_counter() - t_wall_start,
+                )
+            print(f"\n[❌] FATAL ERROR: {fail_reason}\n", file=sys.stderr)
+            raise RuntimeError(fail_reason) from e
+
+        overall_recommendation = pool_stage_res["decision"]
+        overall_stop_type = pool_stage_res["stop_type"]
+        overall_stop_reason = pool_stage_res["stop_reason"]
+        pool_mode_stats = pool_stage_res["pool_data"]
+        pool_opponents = pool_stage_res.get("opponents", [])
+        total_pool_games = len(pool_stage_res.get("all_games", []))
+        total_games_all += total_pool_games
+
+        history_path = save_run_history(
+            STRATEGY_BASELINE,
+            STRATEGY_VARIANT,
+            total_games_all,
+            agg_results,
+            overall_stop_type,
+            overall_stop_reason,
+            overall_recommendation,
+            experiment_desc=desc,
+            matrix_results=matrix_results,
+            game_mode=modes,
+            depth_results=depth_results,
+            unit_tests_data=unit_tests_result,
+            pool_data=pool_mode_stats,
+        )
+
+        total_wall_sec = time.perf_counter() - t_wall_start
+        if dash_client is not None:
+            dash_client.set_finished(
+                overall_stop_type,
+                overall_stop_reason,
+                overall_recommendation,
+                str(history_path),
+                duration_sec=total_wall_sec,
+                pool_modes=pool_mode_stats,
+                opponents=pool_opponents,
+            )
+        time.sleep(0.3)
+
+        print_matrix_summary(
+            matrix_results=matrix_results,
+            overall_recommendation=overall_recommendation,
+            overall_stop_reason=overall_stop_reason,
+            total_games=total_games_all,
+            total_wall_sec=total_wall_sec,
+            experiment_desc=desc,
+            history_path=history_path,
+            depth_results=depth_results,
+        )
+
+        run_post_benchmark_blunder_pipeline(
+            matrix_results=matrix_results,
+            max_losses=5,
+            results_dir=results_dir,
+        )
+        clear_checkpoint(results_dir)
+
+        pool_delta_per_mode = ", ".join([f"{m['mode']}: {m['delta']:+.1f}% (z={m['z_score']:+.2f})" for m in pool_mode_stats])
+        append_results_ledger(
+            description=desc,
+            self_play_delta=", ".join(self_play_deltas),
+            pool_delta=pool_delta_per_mode,
+            decision=overall_recommendation,
+        )
+        return
+
+    # For pool-exempt targets (BUG FIX under Rule 3, HARNESS VERIFICATION):
+    if keep_modes:
         overall_recommendation = "KEEP"
         overall_stop_type = "MATRIX_COMPLETE"
         if parity_modes:
@@ -2888,16 +3065,403 @@ def run_ab_test_engine(
     clear_checkpoint(results_dir)
 
     # Append self-play row to harness/results_ledger.csv
-    self_play_deltas = [
-        f"{r['mode']}: {r['var_win_share'] - r['target_share']:+.1f}%"
-        for r in matrix_results
-    ]
     append_results_ledger(
         description=desc,
         self_play_delta=", ".join(self_play_deltas),
         pool_delta="",
         decision=overall_recommendation,
     )
+
+
+def execute_pool_evaluation_round(
+    pool_snakes: List[Dict[str, str]],
+    active_matrix: List[Dict[str, Any]],
+    variant_module: str,
+    baseline_module: str,
+    pool_games: int,
+    threads: int,
+    seed_offset: int,
+    dash_client: Optional[Any] = None,
+    round_label: str = "Pool Gate",
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Executes one round of paired games vs external pool snakes across all active modes using Common Random Numbers.
+    Returns (all_mode_stats, all_games, overall_opp_list).
+    """
+    all_mode_stats = []
+    all_games = []
+
+    for idx, m_spec in enumerate(active_matrix):
+        m_mode = m_spec["mode"]
+        m_name = m_spec["name"]
+        num_snakes = m_spec["num_snakes"]
+        base_seed = seed_offset + idx * 10_000
+
+        print(f"\n>>> Running {round_label} - Mode: {m_name} ({pool_games} paired games)...")
+        print("-" * 80)
+
+        tasks = []
+        for g in range(1, pool_games + 1):
+            seed = base_seed + g
+            if num_snakes == 2:
+                opponents = [pool_snakes[(g - 1) % len(pool_snakes)]]
+            else:
+                if len(pool_snakes) >= 3:
+                    opponents = [pool_snakes[(g - 1 + i) % len(pool_snakes)] for i in range(3)]
+                else:
+                    opponents = [pool_snakes[i % len(pool_snakes)] for i in range(3)]
+            tasks.append((g, seed, m_mode, opponents))
+
+        mode_results = []
+        t_mode_start = time.perf_counter()
+        worker_count = min(threads, len(tasks))
+
+        if worker_count > 1:
+            with mp.Pool(
+                worker_count,
+                initializer=_pool_worker_init,
+                initargs=(pool_snakes, variant_module, baseline_module),
+            ) as p:
+                for res in p.imap_unordered(_pool_worker_run, tasks, chunksize=1):
+                    mode_results.append(res)
+                    opp_str = ", ".join(res["opponents"])
+                    cand_res = res["cand"]
+                    base_res = res["base"]
+                    c_outcome = "WIN" if cand_res["won"] else ("DRAW" if cand_res["score"] > 0 else "LOSS")
+                    b_outcome = "WIN" if base_res["won"] else ("DRAW" if base_res["score"] > 0 else "LOSS")
+                    d_str = f"{res['diff']:+.1f}" if res["diff"] != 0 else " 0.0"
+                    print(
+                        f"  [Game {len(mode_results):2d}/{pool_games}] vs {opp_str:<22s} | "
+                        f"Cand: {c_outcome:<4s} ({cand_res['turns']:3d}t) | "
+                        f"Base: {b_outcome:<4s} ({base_res['turns']:3d}t) | Δ: {d_str}"
+                    )
+                    if dash_client is not None:
+                        dash_client.update_pool_game(
+                            game_num=len(mode_results),
+                            mode=m_mode,
+                            cand_score=cand_res["score"],
+                            base_score=base_res["score"],
+                            cand_won=bool(cand_res.get("won", False)),
+                            base_won=bool(base_res.get("won", False)),
+                            opponents=res["opponents"],
+                            turns=max(cand_res.get("turns", 0), base_res.get("turns", 0)),
+                        )
+        else:
+            _pool_worker_init(pool_snakes, variant_module, baseline_module)
+            for task in tasks:
+                res = _pool_worker_run(task)
+                mode_results.append(res)
+                opp_str = ", ".join(res["opponents"])
+                cand_res = res["cand"]
+                base_res = res["base"]
+                c_outcome = "WIN" if cand_res["won"] else ("DRAW" if cand_res["score"] > 0 else "LOSS")
+                b_outcome = "WIN" if base_res["won"] else ("DRAW" if base_res["score"] > 0 else "LOSS")
+                d_str = f"{res['diff']:+.1f}" if res["diff"] != 0 else " 0.0"
+                print(
+                    f"  [Game {len(mode_results):2d}/{pool_games}] vs {opp_str:<22s} | "
+                    f"Cand: {c_outcome:<4s} ({cand_res['turns']:3d}t) | "
+                    f"Base: {b_outcome:<4s} ({base_res['turns']:3d}t) | Δ: {d_str}"
+                )
+                if dash_client is not None:
+                    dash_client.update_pool_game(
+                        game_num=len(mode_results),
+                        mode=m_mode,
+                        cand_score=cand_res["score"],
+                        base_score=base_res["score"],
+                        cand_won=bool(cand_res.get("won", False)),
+                        base_won=bool(base_res.get("won", False)),
+                        opponents=res["opponents"],
+                        turns=max(cand_res.get("turns", 0), base_res.get("turns", 0)),
+                    )
+
+        mode_results.sort(key=lambda r: r["game_num"])
+        N = len(mode_results)
+        if N == 0:
+            raise RuntimeError(f"FATAL: Pool evaluation failed for mode '{m_name}': 0 games were completed! Simulation aborted.")
+        if N < pool_games:
+            raise RuntimeError(f"FATAL: Pool evaluation failed for mode '{m_name}': only {N}/{pool_games} games completed! Simulation aborted.")
+
+        cand_total = sum(r["cand"]["score"] for r in mode_results)
+        base_total = sum(r["base"]["score"] for r in mode_results)
+        cand_win_share = (cand_total / N) * 100.0 if N > 0 else 0.0
+        base_win_share = (base_total / N) * 100.0 if N > 0 else 0.0
+        delta = cand_win_share - base_win_share
+
+        diffs = [r["diff"] for r in mode_results]
+        mean_d = sum(diffs) / N if N > 0 else 0.0
+        if N > 1:
+            var_d = sum((d - mean_d) ** 2 for d in diffs) / (N - 1)
+            se_d = math.sqrt(var_d / N) * 100.0
+        else:
+            var_d = 0.0
+            se_d = 0.0
+
+        z_score = (delta / se_d) if se_d > 1e-6 else 0.0
+
+        if z_score >= 1.645 and delta > 0:
+            decision = "KEEP"
+            decision_desc = "Confident improvement (z >= +1.645)"
+        elif z_score <= -1.645 and delta < 0:
+            decision = "REVERT"
+            decision_desc = "Confident regression (z <= -1.645)"
+        else:
+            decision = "PARITY"
+            decision_desc = "Parity (within confidence band)"
+
+        t_mode_elapsed = time.perf_counter() - t_mode_start
+        try:
+            from ab_dashboard import append_mode_timing
+            append_mode_timing(
+                mode=m_mode,
+                run_type="pool",
+                games=N,
+                elapsed_seconds=t_mode_elapsed,
+            )
+        except Exception:
+            pass
+
+        opp_stats: Dict[str, Dict[str, Any]] = {}
+        for r in mode_results:
+            for opp in r["opponents"]:
+                if opp not in opp_stats:
+                    opp_stats[opp] = {"games": 0, "cand_score": 0.0, "base_score": 0.0}
+                opp_stats[opp]["games"] += 1
+                opp_stats[opp]["cand_score"] += r["cand"]["score"]
+                opp_stats[opp]["base_score"] += r["base"]["score"]
+
+        mode_opp_list = [
+            {
+                "opponent": opp,
+                "games": s["games"],
+                "cand_win_pct": round((s["cand_score"] / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
+                "base_win_pct": round((s["base_score"] / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
+                "delta": round(((s["cand_score"] - s["base_score"]) / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
+            }
+            for opp, s in sorted(opp_stats.items())
+        ]
+        all_games.extend(mode_results)
+
+        all_mode_stats.append({
+            "mode": m_mode,
+            "name": m_name,
+            "games": N,
+            "max_games": pool_games,
+            "cand_games": N,
+            "base_games": N,
+            "cand_win_share": cand_win_share,
+            "base_win_share": base_win_share,
+            "delta": delta,
+            "z_score": z_score,
+            "decision": decision,
+            "duration_sec": t_mode_elapsed,
+        })
+
+        if dash_client is not None:
+            dash_client.update_pool_mode(
+                mode=m_mode,
+                cand_share=cand_win_share,
+                base_share=base_win_share,
+                delta=delta,
+                z_score=z_score,
+                decision=decision,
+                games=N,
+                max_games=pool_games,
+                cand_games=N,
+                base_games=N,
+                duration_sec=t_mode_elapsed,
+                opponents=mode_opp_list,
+            )
+
+    all_opp_stats: Dict[str, Dict[str, Any]] = {}
+    for r in all_games:
+        for opp in r.get("opponents", []):
+            if opp not in all_opp_stats:
+                all_opp_stats[opp] = {"games": 0, "cand_score": 0.0, "base_score": 0.0}
+            all_opp_stats[opp]["games"] += 1
+            all_opp_stats[opp]["cand_score"] += r["cand"]["score"]
+            all_opp_stats[opp]["base_score"] += r["base"]["score"]
+    overall_opp_list = [
+        {
+            "opponent": opp,
+            "games": s["games"],
+            "cand_win_pct": round((s["cand_score"] / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
+            "base_win_pct": round((s["base_score"] / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
+            "delta": round(((s["cand_score"] - s["base_score"]) / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
+        }
+        for opp, s in sorted(all_opp_stats.items())
+    ]
+
+    return all_mode_stats, all_games, overall_opp_list
+
+
+def run_pool_stage(
+    pool_config_path: str,
+    active_matrix: List[Dict[str, Any]],
+    pool_games: int,
+    threads: int,
+    desc: str,
+    target: str,
+    baseline_module: str,
+    variant_module: str,
+    dash_client: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """
+    Executes Stage 4: External Pool Gate (+ automatic replication if criterion is met).
+    Validates pool config and snake zoo reachability, failing loudly if not ready.
+    """
+    pool_file = Path(pool_config_path)
+    if not pool_file.is_file():
+        raise RuntimeError(
+            f"External pool config file '{pool_config_path}' not found. "
+            f"Pool evaluation gate is strictly required for target '{target}'."
+        )
+
+    try:
+        with open(pool_file, "r", encoding="utf-8") as f:
+            pool_snakes = json.load(f)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to parse pool config '{pool_config_path}': {e}. "
+            f"Pool evaluation gate is strictly required for target '{target}'."
+        )
+
+    if not isinstance(pool_snakes, list) or not pool_snakes:
+        raise RuntimeError(
+            f"Pool config '{pool_config_path}' must contain a non-empty list of snakes. "
+            f"Pool evaluation gate is strictly required for target '{target}'."
+        )
+
+    for item in pool_snakes:
+        if not isinstance(item, dict) or "slug" not in item or "url" not in item:
+            raise RuntimeError(
+                f"Invalid pool entry: {item}. Each entry must have 'slug' and 'url'. "
+                f"Pool evaluation gate is strictly required for target '{target}'."
+            )
+
+    # Verify snake zoo reachability
+    unreachable = []
+    for item in pool_snakes:
+        url = item.get("url", "")
+        slug = item.get("slug", "")
+        try:
+            resp = requests.get(url, timeout=2.0)
+            if resp.status_code >= 500:
+                unreachable.append(f"{slug} ({url} returned HTTP {resp.status_code})")
+        except Exception as e:
+            unreachable.append(f"{slug} ({url} connection error: {e})")
+
+    if unreachable:
+        raise RuntimeError(
+            f"Pool evaluation gate required for target '{target}', but snake zoo is unreachable: "
+            + "; ".join(unreachable)
+        )
+
+    zoo_adapter.register_pool(pool_snakes)
+
+    # 1. Primary Pool Evaluation
+    print("=" * 80)
+    print("             STAGE 4: EXTERNAL POOL EVALUATION GATE")
+    print("=" * 80)
+    print(f"  Target:           {target} (Mandatory external pool gate)")
+    print(f"  External Pool:    {len(pool_snakes)} snakes")
+    print(f"  Sample Budget:    {pool_games} paired games per mode")
+    print("=" * 80 + "\n")
+
+    round1_stats, round1_games, round1_opps = execute_pool_evaluation_round(
+        pool_snakes=pool_snakes,
+        active_matrix=active_matrix,
+        variant_module=variant_module,
+        baseline_module=baseline_module,
+        pool_games=pool_games,
+        threads=threads,
+        seed_offset=42_000,
+        dash_client=dash_client,
+        round_label="Primary Pool Gate",
+    )
+
+    round1_reverts = [m for m in round1_stats if m["decision"] == "REVERT"]
+    round1_keeps = [m for m in round1_stats if m["decision"] == "KEEP"]
+
+    if target == "IMPROVEMENT":
+        criterion_met = (len(round1_reverts) == 0 and len(round1_keeps) > 0)
+    else:  # PARITY
+        criterion_met = (len(round1_reverts) == 0)
+
+    if not criterion_met:
+        overall_decision = "REVERT"
+        if round1_reverts:
+            overall_reason = f"External pool evaluation confirmed regression in {len(round1_reverts)} of {len(round1_stats)} mode(s)."
+        else:
+            overall_reason = f"External pool evaluation failed improvement criterion for {target}."
+        return {
+            "success": False,
+            "decision": overall_decision,
+            "stop_type": "POOL_FAILED",
+            "stop_reason": overall_reason,
+            "pool_data": round1_stats,
+            "all_games": round1_games,
+            "opponents": round1_opps,
+            "replicated": False,
+        }
+
+    # 2. Automatic Fresh-Seed Replication
+    print("\n" + "=" * 80)
+    print("             STAGE 4: FRESH-SEED REPLICATION GATE")
+    print("=" * 80)
+    print(f"  Primary pool criterion passed! Running mandatory fresh-seed replication...")
+    print("=" * 80 + "\n")
+
+    round2_stats, round2_games, round2_opps = execute_pool_evaluation_round(
+        pool_snakes=pool_snakes,
+        active_matrix=active_matrix,
+        variant_module=variant_module,
+        baseline_module=baseline_module,
+        pool_games=pool_games,
+        threads=threads,
+        seed_offset=142_000,
+        dash_client=dash_client,
+        round_label="Fresh-Seed Replication",
+    )
+
+    round2_reverts = [m for m in round2_stats if m["decision"] == "REVERT"]
+    round2_keeps = [m for m in round2_stats if m["decision"] == "KEEP"]
+
+    if target == "IMPROVEMENT":
+        rep_confirmed = (len(round2_reverts) == 0 and len(round2_keeps) > 0)
+    else:  # PARITY
+        rep_confirmed = (len(round2_reverts) == 0)
+
+    if not rep_confirmed:
+        overall_decision = "REVERT"
+        overall_reason = f"Passed initial pool evaluation, but failed fresh-seed replication ({len(round2_reverts)} mode(s) regressed)."
+        return {
+            "success": False,
+            "decision": overall_decision,
+            "stop_type": "POOL_REPLICATION_FAILED",
+            "stop_reason": overall_reason,
+            "pool_data": round2_stats,
+            "all_games": round1_games + round2_games,
+            "opponents": round2_opps,
+            "replicated": False,
+        }
+
+    if target == "IMPROVEMENT" or (target == "PARITY" and len(round2_keeps) > 0):
+        overall_decision = "KEEP"
+        overall_reason = f"Passed external pool evaluation and confirmed improvement on fresh-seed replication ({len(round2_stats)} mode(s))."
+    else:
+        overall_decision = "PARITY"
+        overall_reason = f"Passed external pool evaluation and confirmed parity on fresh-seed replication ({len(round2_stats)} mode(s))."
+
+    return {
+        "success": True,
+        "decision": overall_decision,
+        "stop_type": "POOL_COMPLETE",
+        "stop_reason": overall_reason,
+        "pool_data": round2_stats,
+        "all_games": round1_games + round2_games,
+        "opponents": round2_opps,
+        "replicated": True,
+    }
 
 
 def run_pool_benchmark(
@@ -2968,25 +3532,6 @@ def run_pool_benchmark(
     if ensure_dashboard_running is not None:
         dash_client = ensure_dashboard_running(port=dashboard_port)
 
-    matrix_progress = [
-        {
-            "mode": m["mode"],
-            "name": m["name"],
-            "num_snakes": m["num_snakes"],
-            "status": "pending",
-            "cand_share": 0.0,
-            "base_share": 0.0,
-            "delta": 0.0,
-            "z_score": 0.0,
-            "decision": "",
-            "games": 0,
-            "max_games": pool_games,
-            "cand_games": 0,
-            "base_games": 0,
-        }
-        for m in active_matrix
-    ]
-
     # Step 1: Tactical unit tests
     unit_tests_result: Optional[Dict[str, Any]] = None
     print("[1/2] Running strategy safety unit tests on variant...")
@@ -3020,8 +3565,6 @@ def run_pool_benchmark(
 
     print("[2/2] Executing External Pool Evaluation Suite...")
     t_suite_start = time.time()
-    all_mode_stats = []
-    all_games = []
 
     if dash_client is not None:
         dash_client.init_test(
@@ -3037,263 +3580,30 @@ def run_pool_benchmark(
             game_mode=active_matrix[0]["mode"] if active_matrix else "standard",
             num_snakes=active_matrix[0]["num_snakes"] if active_matrix else 2,
             target_win_share=50.0,
-            matrix_progress=matrix_progress,
+            matrix_progress=None,
             suite_start_time=t_suite_start,
-            run_type="pool",
             target=target,
-            pool_enabled=True,
         )
 
-    for idx, m_spec in enumerate(active_matrix):
-        m_mode = m_spec["mode"]
-        m_name = m_spec["name"]
-        num_snakes = m_spec["num_snakes"]
-        base_seed = 42_000 + idx * 10_000
+    pool_res = run_pool_stage(
+        pool_config_path=pool_config_path,
+        active_matrix=active_matrix,
+        pool_games=pool_games,
+        threads=threads,
+        desc=desc,
+        target=target,
+        baseline_module=baseline_module,
+        variant_module=variant_module,
+        dash_client=dash_client,
+    )
 
-        matrix_progress[idx]["status"] = "running"
-        if dash_client is not None:
-            dash_client.init_test(
-                strategy_baseline=baseline_module,
-                strategy_variant=variant_module,
-                min_games=pool_games,
-                max_games=pool_games,
-                check_interval=pool_games,
-                early_stop_high=100.0,
-                early_stop_low=0.0,
-                threads=threads,
-                experiment_desc=desc,
-                game_mode=m_mode,
-                num_snakes=num_snakes,
-                target_win_share=50.0,
-                matrix_progress=matrix_progress,
-                suite_start_time=t_suite_start,
-                run_type="pool",
-                target=target,
-                pool_enabled=True,
-            )
-            dash_client.update_matrix(matrix_progress)
-
-        print(f"\n>>> Running Mode: {m_name} ({pool_games} paired games)...")
-        print("-" * 80)
-
-        tasks = []
-        for g in range(1, pool_games + 1):
-            seed = base_seed + g
-            if num_snakes == 2:
-                opponents = [pool_snakes[(g - 1) % len(pool_snakes)]]
-            else:
-                if len(pool_snakes) >= 3:
-                    opponents = [pool_snakes[(g - 1 + i) % len(pool_snakes)] for i in range(3)]
-                else:
-                    opponents = [pool_snakes[i % len(pool_snakes)] for i in range(3)]
-            tasks.append((g, seed, m_mode, opponents))
-
-        mode_results = []
-        t_mode_start = time.perf_counter()
-        worker_count = min(threads, len(tasks))
-
-        if worker_count > 1:
-            with mp.Pool(
-                worker_count,
-                initializer=_pool_worker_init,
-                initargs=(pool_snakes, variant_module, baseline_module),
-            ) as pool:
-                for res in pool.imap_unordered(_pool_worker_run, tasks, chunksize=1):
-                    mode_results.append(res)
-                    g_num = res["game_num"]
-                    opp_str = ", ".join(res["opponents"])
-                    cand_res = res["cand"]
-                    base_res = res["base"]
-                    c_outcome = "WIN" if cand_res["won"] else ("DRAW" if cand_res["score"] > 0 else "LOSS")
-                    b_outcome = "WIN" if base_res["won"] else ("DRAW" if base_res["score"] > 0 else "LOSS")
-                    d_str = f"{res['diff']:+.1f}" if res["diff"] != 0 else " 0.0"
-                    print(
-                        f"  [Game {len(mode_results):2d}/{pool_games}] vs {opp_str:<22s} | "
-                        f"Cand: {c_outcome:<4s} ({cand_res['turns']:3d}t) | "
-                        f"Base: {b_outcome:<4s} ({base_res['turns']:3d}t) | Δ: {d_str}"
-                    )
-                    if dash_client is not None:
-                        dash_client.update_pool_game(
-                            game_num=len(mode_results),
-                            mode=m_mode,
-                            cand_score=cand_res["score"],
-                            base_score=base_res["score"],
-                            cand_won=bool(cand_res.get("won", False)),
-                            base_won=bool(base_res.get("won", False)),
-                            opponents=res["opponents"],
-                            turns=max(cand_res.get("turns", 0), base_res.get("turns", 0)),
-                        )
-        else:
-            _pool_worker_init(pool_snakes, variant_module, baseline_module)
-            for task in tasks:
-                res = _pool_worker_run(task)
-                mode_results.append(res)
-                g_num = res["game_num"]
-                opp_str = ", ".join(res["opponents"])
-                cand_res = res["cand"]
-                base_res = res["base"]
-                c_outcome = "WIN" if cand_res["won"] else ("DRAW" if cand_res["score"] > 0 else "LOSS")
-                b_outcome = "WIN" if base_res["won"] else ("DRAW" if base_res["score"] > 0 else "LOSS")
-                d_str = f"{res['diff']:+.1f}" if res["diff"] != 0 else " 0.0"
-                print(
-                    f"  [Game {len(mode_results):2d}/{pool_games}] vs {opp_str:<22s} | "
-                    f"Cand: {c_outcome:<4s} ({cand_res['turns']:3d}t) | "
-                    f"Base: {b_outcome:<4s} ({base_res['turns']:3d}t) | Δ: {d_str}"
-                )
-                if dash_client is not None:
-                    dash_client.update_pool_game(
-                        game_num=len(mode_results),
-                        mode=m_mode,
-                        cand_score=cand_res["score"],
-                        base_score=base_res["score"],
-                        cand_won=bool(cand_res.get("won", False)),
-                        base_won=bool(base_res.get("won", False)),
-                        opponents=res["opponents"],
-                        turns=max(cand_res.get("turns", 0), base_res.get("turns", 0)),
-                    )
-
-        mode_results.sort(key=lambda r: r["game_num"])
-        N = len(mode_results)
-        if N == 0:
-            raise RuntimeError(f"FATAL: Pool evaluation failed for mode '{m_name}': 0 games were completed! Simulation aborted.")
-        if N < pool_games:
-            raise RuntimeError(f"FATAL: Pool evaluation failed for mode '{m_name}': only {N}/{pool_games} games completed! Simulation aborted.")
-        cand_total = sum(r["cand"]["score"] for r in mode_results)
-        base_total = sum(r["base"]["score"] for r in mode_results)
-        cand_win_share = (cand_total / N) * 100.0 if N > 0 else 0.0
-        base_win_share = (base_total / N) * 100.0 if N > 0 else 0.0
-        delta = cand_win_share - base_win_share
-
-        diffs = [r["diff"] for r in mode_results]
-        mean_d = sum(diffs) / N if N > 0 else 0.0
-        if N > 1:
-            var_d = sum((d - mean_d) ** 2 for d in diffs) / (N - 1)
-            se_d = math.sqrt(var_d / N) * 100.0
-        else:
-            var_d = 0.0
-            se_d = 0.0
-
-        z_score = (delta / se_d) if se_d > 1e-6 else 0.0
-
-        if z_score >= 1.645 and delta > 0:
-            decision = "KEEP"
-            decision_desc = "Confident improvement (z >= +1.645)"
-        elif z_score <= -1.645 and delta < 0:
-            decision = "REVERT"
-            decision_desc = "Confident regression (z <= -1.645)"
-        else:
-            decision = "PARITY"
-            decision_desc = "Parity (within confidence band)"
-
-        t_mode_elapsed = time.perf_counter() - t_mode_start
-        from ab_dashboard import append_mode_timing
-        append_mode_timing(
-            mode=m_mode,
-            run_type="pool",
-            games=N,
-            elapsed_seconds=t_mode_elapsed,
-        )
-
-        print("-" * 80)
-        print(f"Mode Results: {m_name}")
-        print(f"  Candidate Win Share: {cand_total:.1f}/{N} ({cand_win_share:.1f}%)")
-        print(f"  Baseline Win Share:  {base_total:.1f}/{N} ({base_win_share:.1f}%)")
-        print(f"  Difference (Δ):      {delta:+.1f}%")
-        print(f"  Paired Z-Score:      z = {z_score:+.2f}")
-        print(f"  Decision:            {decision} ({decision_desc})")
-        print(f"  Wall Time:           {t_mode_elapsed:.1f}s")
-        print("\nOpponent Head-to-Head Breakdown:")
-        print(f"  {'Opponent':<24s} {'Games':>5s} {'Candidate Win%':>15s} {'Baseline Win%':>15s} {'Delta':>10s}")
-        print("  " + "-" * 74)
-
-        opp_stats: Dict[str, Dict[str, Any]] = {}
-        for r in mode_results:
-            for opp in r["opponents"]:
-                if opp not in opp_stats:
-                    opp_stats[opp] = {"games": 0, "cand_score": 0.0, "base_score": 0.0}
-                opp_stats[opp]["games"] += 1
-                opp_stats[opp]["cand_score"] += r["cand"]["score"]
-                opp_stats[opp]["base_score"] += r["base"]["score"]
-
-        for opp, s in sorted(opp_stats.items()):
-            g_cnt = s["games"]
-            c_pct = (s["cand_score"] / g_cnt) * 100.0 if g_cnt > 0 else 0.0
-            b_pct = (s["base_score"] / g_cnt) * 100.0 if g_cnt > 0 else 0.0
-            d_pct = c_pct - b_pct
-            print(f"  {opp:<24s} {g_cnt:5d} {c_pct:14.1f}% {b_pct:14.1f}% {d_pct:+9.1f}%")
-
-        mode_opp_list = [
-            {
-                "opponent": opp,
-                "games": s["games"],
-                "cand_win_pct": round((s["cand_score"] / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
-                "base_win_pct": round((s["base_score"] / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
-                "delta": round(((s["cand_score"] - s["base_score"]) / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
-            }
-            for opp, s in sorted(opp_stats.items())
-        ]
-        all_games.extend(mode_results)
-
-        all_mode_stats.append({
-            "mode": m_mode,
-            "name": m_name,
-            "games": N,
-            "max_games": pool_games,
-            "cand_games": N,
-            "base_games": N,
-            "cand_win_share": cand_win_share,
-            "base_win_share": base_win_share,
-            "delta": delta,
-            "z_score": z_score,
-            "decision": decision,
-            "duration_sec": t_mode_elapsed,
-        })
-
-        matrix_progress[idx]["status"] = "PASSED" if decision == "KEEP" else ("PARITY" if decision == "PARITY" else "FAILED")
-        matrix_progress[idx]["cand_share"] = cand_win_share
-        matrix_progress[idx]["base_share"] = base_win_share
-        matrix_progress[idx]["delta"] = delta
-        matrix_progress[idx]["z_score"] = z_score
-        matrix_progress[idx]["decision"] = decision
-        matrix_progress[idx]["games"] = N
-        matrix_progress[idx]["max_games"] = pool_games
-        matrix_progress[idx]["cand_games"] = N
-        matrix_progress[idx]["base_games"] = N
-        matrix_progress[idx]["duration_sec"] = t_mode_elapsed
-
-        if dash_client is not None:
-            dash_client.update_pool_mode(
-                mode=m_mode,
-                cand_share=cand_win_share,
-                base_share=base_win_share,
-                delta=delta,
-                z_score=z_score,
-                decision=decision,
-                games=N,
-                max_games=pool_games,
-                cand_games=N,
-                base_games=N,
-                duration_sec=t_mode_elapsed,
-                opponents=mode_opp_list,
-            )
-            dash_client.update_matrix(matrix_progress)
-
-    if not all_mode_stats:
-        raise RuntimeError("FATAL: Pool evaluation failed: no mode stats were generated! Simulation aborted.")
-
-    reverts = [m for m in all_mode_stats if m["decision"] == "REVERT"]
-    keeps = [m for m in all_mode_stats if m["decision"] == "KEEP"]
-    if reverts:
-        overall_decision = "REVERT"
-        overall_reason = f"{len(reverts)} of {len(all_mode_stats)} mode(s) confirmed regression."
-    elif keeps:
-        overall_decision = "KEEP"
-        overall_reason = f"{len(keeps)} of {len(all_mode_stats)} mode(s) confirmed improvement."
-    else:
-        overall_decision = "PARITY"
-        overall_reason = "All tested modes performed at parity with no regression detected."
-
+    all_mode_stats = pool_res["pool_data"]
+    overall_decision = pool_res["decision"]
+    overall_reason = pool_res["stop_reason"]
+    overall_stop_type = pool_res["stop_type"]
+    overall_opp_list = pool_res.get("opponents", [])
     total_wall_sec = time.time() - t_suite_start
+
     print("\n" + "=" * 80)
     print("                         POOL EVALUATION SUMMARY")
     print("=" * 80)
@@ -3324,7 +3634,7 @@ def run_pool_benchmark(
             baseline_module: {"wins": 0, "losses": 0, "draws": 0},
             variant_module: {"wins": 0, "losses": 0, "draws": 0},
         },
-        stop_type=overall_decision,
+        stop_type=overall_stop_type,
         stop_reason=overall_reason,
         recommendation=overall_decision,
         experiment_desc=desc,
@@ -3334,28 +3644,9 @@ def run_pool_benchmark(
         pool_data=all_mode_stats,
     )
 
-    all_opp_stats: Dict[str, Dict[str, Any]] = {}
-    for r in all_games:
-        for opp in r.get("opponents", []):
-            if opp not in all_opp_stats:
-                all_opp_stats[opp] = {"games": 0, "cand_score": 0.0, "base_score": 0.0}
-            all_opp_stats[opp]["games"] += 1
-            all_opp_stats[opp]["cand_score"] += r["cand"]["score"]
-            all_opp_stats[opp]["base_score"] += r["base"]["score"]
-    overall_opp_list = [
-        {
-            "opponent": opp,
-            "games": s["games"],
-            "cand_win_pct": round((s["cand_score"] / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
-            "base_win_pct": round((s["base_score"] / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
-            "delta": round(((s["cand_score"] - s["base_score"]) / s["games"]) * 100.0, 1) if s["games"] > 0 else 0.0,
-        }
-        for opp, s in sorted(all_opp_stats.items())
-    ]
-
     if dash_client is not None:
         dash_client.set_finished(
-            stop_type=overall_decision,
+            stop_type=overall_stop_type,
             stop_reason=overall_reason,
             recommendation=overall_decision,
             csv_path=str(ledger_path.resolve()),

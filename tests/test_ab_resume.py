@@ -151,9 +151,19 @@ class TestAbCheckpointResume(unittest.TestCase):
     @patch("ab_test.ensure_dashboard_running")
     @patch("ab_test.run_binary_smoke_test")
     @patch("ab_test._run_single_mode_simulation")
+    @patch("ab_test.run_pool_stage", return_value={
+        "success": True,
+        "decision": "PARITY",
+        "stop_type": "POOL_COMPLETE",
+        "stop_reason": "Passed pool gate",
+        "pool_data": [{"mode": "constrictor", "games": 50, "delta": 0.0, "z_score": 0.0, "decision": "PARITY"}],
+        "all_games": [],
+        "opponents": [],
+        "replicated": True,
+    })
     @patch("ab_test.print_matrix_summary")
     def test_matrix_resume_skips_completed_mode(
-        self, mock_summary, mock_sim, mock_smoke, mock_dash_fn, mock_depth_fn, mock_unit_tests
+        self, mock_summary, mock_pool_stage, mock_sim, mock_smoke, mock_dash_fn, mock_depth_fn, mock_unit_tests
     ):
         """
         Verify that run_ab_test_engine with --resume skips simulation for modes
