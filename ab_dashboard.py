@@ -952,61 +952,6 @@ def render_depth_mode_summary_rows(depth_data: Optional[Dict[str, Any]]) -> str:
     return "".join(rows)
 
 
-def render_depth_fixture_rows(depth_data: Optional[Dict[str, Any]]) -> str:
-    """Pre-render the 12 fixture rows for Fixed Search Depth Benchmark."""
-    fixtures = (depth_data or {}).get("fixtures") or []
-    if not fixtures:
-        return '<tr><td colspan="10" class="empty-cell">No run yet.</td></tr>'
-    turn_map = {25: "Early", 50: "Mid", 75: "Late"}
-    mode_weights = {"constrictor": 0, "royale": 1, "duel": 2, "standard": 3}
-    sorted_fixs = sorted(
-        fixtures,
-        key=lambda f: (
-            mode_weights.get(str(f.get("mode", "")).lower().replace(" 4p", "").replace(" 1v1", ""), 99),
-            int(f.get("turn", 0))
-        )
-    )
-    rows = []
-    for f in sorted_fixs:
-        m_raw = str(f.get("mode", "")).strip()
-        m_name = m_raw.capitalize() if m_raw else "Mode"
-        turn_val = f.get("turn", 0)
-        phase = turn_map.get(turn_val, f"Turn {turn_val}")
-        title = f.get("title") or f"{phase} (Turn {turn_val})"
-        base_d = float(f.get("base_med_depth", 0.0) or 0.0)
-        var_d = float(f.get("var_med_depth", 0.0) or 0.0)
-        delta_d = float(f.get("delta_depth", var_d - base_d) if f.get("delta_depth") is not None else (var_d - base_d))
-        b_nps = float(f.get("base_med_nps", 0.0) or 0.0)
-        v_nps = float(f.get("var_med_nps", 0.0) or 0.0)
-        nps_r = float(f.get("nps_ratio", 1.0) or 1.0)
-        agree = float(f.get("agreement_pct", 100.0) or 100.0)
-        is_pass = f.get("passed", True) is not False and delta_d >= 0
-        st_text = "PASSED" if is_pass else "FAILED"
-        st_class = "passed" if is_pass else "failed"
-        delta_color = "var(--pipeline-green)" if delta_d > 0 else ("var(--pipeline-red)" if delta_d < 0 else "var(--pipeline-text-muted)")
-        nps_color = "var(--pipeline-green)" if nps_r >= 1.0 else "var(--pipeline-red)"
-        sign = "+" if delta_d > 0 else ""
-        b_compact = format_compact_nps(b_nps)
-        v_compact = format_compact_nps(v_nps)
-        b_raw = int(round(b_nps))
-        v_raw = int(round(v_nps))
-
-        rows.append(f'''
-                  <tr>
-                    <td class="td-left" style="font-weight: 700;">{m_name}</td>
-                    <td class="td-left">{html.escape(title)}</td>
-                    <td class="td-right">{base_d:.1f}</td>
-                    <td class="td-right" style="font-weight: 700; color: var(--pipeline-green);">{var_d:.1f}</td>
-                    <td class="td-right" style="color: {delta_color}; font-weight: 700;">{sign}{delta_d:.1f}</td>
-                    <td class="td-right" title="{b_raw:,}" data-nps="{b_raw}">{b_compact}</td>
-                    <td class="td-right" title="{v_raw:,}" data-nps="{v_raw}">{v_compact}</td>
-                    <td class="td-right" style="color: {nps_color}; font-weight: 700;">{nps_r:.3f}x</td>
-                    <td class="td-right">{agree:.1f}%</td>
-                    <td class="td-right"><span class="status-chip status-chip-{st_class} matrix-col-status matrix-status-{st_class}">{st_text}</span></td>
-                  </tr>''')
-    return "".join(rows)
-
-
 def render_pool_modes_rows(pool_data: Optional[Dict[str, Any]], is_running: bool = False, run_type: str = "self") -> str:
     """Pre-render the 4 mode rows for Zoo Pool Gate."""
     pool = pool_data or {}
@@ -3964,17 +3909,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- 2. Depth Benchmark Detail (Requirement 4: summary line + toggle) -->
+      <!-- 2. Depth Benchmark Detail -->
       <div class="stage-panel-content" id="panel-depth" style="display: none;">
         <div class="stage-panel" id="depthCard">
           <div class="panel-header" id="depthPanelHeader">
             <div class="panel-header-title">
               <span class="panel-header-icon">📐</span>
               <span>Fixed Search Depth Benchmark</span>
-            </div>
-            <div class="card-toggle-segmented" id="depthSegmentedToggle">
-              <button type="button" class="btn-seg active" id="btnDepthToggleModes" onclick="setDepthView('modes')">Modes</button>
-              <button type="button" class="btn-seg" id="btnDepthToggleFixtures" onclick="setDepthView('fixtures')">Fixtures</button>
             </div>
           </div>
 
@@ -3993,51 +3934,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <div id="depthEmptyWrap" style="display: none; text-align: center; color: var(--pipeline-text-muted); padding: 2.5rem; font-size: 0.95rem;">No run yet.</div>
             <div id="depthAbortedWrap" style="display: none; text-align: center; color: var(--pipeline-amber); padding: 2.5rem; font-size: 0.95rem; font-family: 'JetBrains Mono', monospace;"></div>
             <div id="depthTableWrap">
-              <div id="depthModesWrap" style="display: block;">
-                <table class="data-table" id="depthModesTable">
-                  <thead>
-                    <tr>
-                      <th class="th-left">Mode</th>
-                      <th class="th-right">Base Depth</th>
-                      <th class="th-right">Var Depth</th>
-                      <th class="th-right">Δ Depth</th>
-                      <th class="th-right">Base NPS</th>
-                      <th class="th-right">Var NPS</th>
-                      <th class="th-right">NPS Ratio</th>
-                      <th class="th-right">Agree %</th>
-                      <th class="th-right">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody id="depthTableBody">
-                    <tr>
-                      <td colspan="9" class="empty-cell">No run yet.</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-              <div id="depthFixturesWrap" style="display: none;">
-                <table class="data-table" id="depthFixturesTable">
-                  <thead>
-                    <tr>
-                      <th class="th-left">Mode</th>
-                      <th class="th-left">Turn / Title</th>
-                      <th class="th-right">Base Depth</th>
-                      <th class="th-right">Var Depth</th>
-                      <th class="th-right">Δ Depth</th>
-                      <th class="th-right">Base NPS</th>
-                      <th class="th-right">Var NPS</th>
-                      <th class="th-right">NPS Ratio</th>
-                      <th class="th-right">Agree %</th>
-                      <th class="th-right">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody id="depthFixturesBody">
-                    <tr>
-                      <td colspan="10" class="empty-cell">No run yet.</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+              <table class="data-table" id="depthModesTable">
+                <thead>
+                  <tr>
+                    <th class="th-left">Mode</th>
+                    <th class="th-right">Base Depth</th>
+                    <th class="th-right">Var Depth</th>
+                    <th class="th-right">Δ Depth</th>
+                    <th class="th-right">Base NPS</th>
+                    <th class="th-right">Var NPS</th>
+                    <th class="th-right">NPS Ratio</th>
+                    <th class="th-right">Agree %</th>
+                    <th class="th-right">Status</th>
+                  </tr>
+                </thead>
+                <tbody id="depthTableBody">
+                  <tr>
+                    <td colspan="9" class="empty-cell">No run yet.</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -4817,28 +4733,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
   }
 
-  let depthCurrentView = 'modes';
-  function setDepthView(view) {
-    depthCurrentView = view;
-    const btnModes = document.getElementById('btnDepthToggleModes');
-    const btnFixtures = document.getElementById('btnDepthToggleFixtures');
-    const modesWrap = document.getElementById('depthModesWrap');
-    const fixturesWrap = document.getElementById('depthFixturesWrap');
-    if (btnModes && btnFixtures) {
-      if (view === 'modes') {
-        btnModes.classList.add('active');
-        btnFixtures.classList.remove('active');
-        if (modesWrap) modesWrap.style.display = 'block';
-        if (fixturesWrap) fixturesWrap.style.display = 'none';
-      } else {
-        btnFixtures.classList.add('active');
-        btnModes.classList.remove('active');
-        if (modesWrap) modesWrap.style.display = 'none';
-        if (fixturesWrap) fixturesWrap.style.display = 'block';
-      }
-    }
-  }
-
   function formatCompactNps(val) {
     if (val == null || val <= 0) return '--';
     const num = Number(val);
@@ -4978,65 +4872,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           `;
         }).join('');
         setHTML(tbody, rowsHtml);
-      }
-    }
-
-    // Per-fixture breakdown table from fixtures (12 rows)
-    const fixBody = document.getElementById('depthFixturesBody');
-    if (fixBody) {
-      const fixList = (depth.fixtures || []).slice();
-      if (fixList.length === 0) {
-        const emptyMsg = isEmpty ? 'No run yet.' : (isRunning ? 'Running benchmark...' : 'Benchmark queued.');
-        setHTML(fixBody, `<tr><td colspan="10" class="empty-cell">${emptyMsg}</td></tr>`);
-      } else {
-        const turnMap = { 25: 'Early', 50: 'Mid', 75: 'Late' };
-        const modeWeights = { constrictor: 0, royale: 1, duel: 2, standard: 3 };
-        fixList.sort((a, b) => {
-          const ma = modeWeights[String(a.mode || '').toLowerCase().replace(' 4p', '').replace(' 1v1', '')] ?? 99;
-          const mb = modeWeights[String(b.mode || '').toLowerCase().replace(' 4p', '').replace(' 1v1', '')] ?? 99;
-          if (ma !== mb) return ma - mb;
-          return (a.turn || 0) - (b.turn || 0);
-        });
-        const fixRowsHtml = fixList.map(f => {
-          const mRaw = String(f.mode || '').trim();
-          const mName = mRaw ? (mRaw.charAt(0).toUpperCase() + mRaw.slice(1)) : 'Mode';
-          const turnVal = f.turn || 0;
-          const phase = turnMap[turnVal] || `Turn ${turnVal}`;
-          const title = f.title || `${phase} (Turn ${turnVal})`;
-          const baseD = f.base_med_depth != null ? Number(f.base_med_depth) : 0.0;
-          const varD = f.var_med_depth != null ? Number(f.var_med_depth) : 0.0;
-          const deltaD = f.delta_depth != null ? Number(f.delta_depth) : (varD - baseD);
-          const bNps = f.base_med_nps != null ? Number(f.base_med_nps) : 0.0;
-          const vNps = f.var_med_nps != null ? Number(f.var_med_nps) : 0.0;
-          const npsR = f.nps_ratio != null ? Number(f.nps_ratio) : 1.0;
-          const agree = f.agreement_pct != null ? Number(f.agreement_pct) : 100.0;
-          const isPass = f.passed !== false && deltaD >= 0;
-          const stText = isPass ? 'PASSED' : 'FAILED';
-          const stClass = isPass ? 'passed' : 'failed';
-          const deltaColor = deltaD > 0 ? 'var(--pipeline-green)' : (deltaD < 0 ? 'var(--pipeline-red)' : 'var(--pipeline-text-muted)');
-          const npsColor = npsR >= 1.0 ? 'var(--pipeline-green)' : 'var(--pipeline-red)';
-          const sign = deltaD > 0 ? '+' : '';
-          const bCompact = formatCompactNps(bNps);
-          const vCompact = formatCompactNps(vNps);
-          const bRaw = Math.round(bNps);
-          const vRaw = Math.round(vNps);
-
-          return `
-            <tr>
-              <td class="td-left" style="font-weight: 700;">${escapeHtml(mName)}</td>
-              <td class="td-left">${escapeHtml(title)}</td>
-              <td class="td-right">${baseD.toFixed(1)}</td>
-              <td class="td-right" style="font-weight: 700; color: var(--pipeline-green);">${varD.toFixed(1)}</td>
-              <td class="td-right" style="color: ${deltaColor}; font-weight: 700;">${sign}${deltaD.toFixed(1)}</td>
-              <td class="td-right" title="${bRaw.toLocaleString()}" data-nps="${bRaw}">${bCompact}</td>
-              <td class="td-right" title="${vRaw.toLocaleString()}" data-nps="${vRaw}">${vCompact}</td>
-              <td class="td-right" style="color: ${npsColor}; font-weight: 700;">${npsR.toFixed(3)}x</td>
-              <td class="td-right">${agree.toFixed(1)}%</td>
-              <td class="td-right"><span class="status-chip status-chip-${stClass} matrix-col-status matrix-status-${stClass}">${stText}</span></td>
-            </tr>
-          `;
-        }).join('');
-        setHTML(fixBody, fixRowsHtml);
       }
     }
   }
@@ -7009,16 +6844,11 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
         f'<div class="stage-segment {pool_rail_class}{pool_active}" id="railSegment-pool">\n        <span class="stage-seg-index">4</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Zoo Pool Gate</span>\n          <span class="stage-seg-duration" id="railDuration-pool">{pool_dur_str}</span>\n        </div>\n        <span class="stage-seg-status matrix-status-{pool_rail_status.lower().replace(" ", "-")}" id="railStatus-pool">{pool_rail_status}</span>\n      </div>'
     )
 
-    if depth_data and (depth_data.get("completed_positions", 0) >= 12 or depth_data.get("delta_depth") is not None or depth_data.get("mode_summaries") or depth_data.get("fixtures")):
+    if depth_data and (depth_data.get("completed_positions", 0) >= 12 or depth_data.get("delta_depth") is not None or depth_data.get("mode_summaries")):
         depth_rows_html = render_depth_mode_summary_rows(depth_data)
         out = out.replace(
             '<tr>\n                      <td colspan="9" class="empty-cell">No run yet.</td>\n                    </tr>',
             depth_rows_html
-        )
-        depth_fix_html = render_depth_fixture_rows(depth_data)
-        out = out.replace(
-            '<tr>\n                      <td colspan="10" class="empty-cell">No run yet.</td>\n                    </tr>',
-            depth_fix_html
         )
 
     # Pre-render history table
