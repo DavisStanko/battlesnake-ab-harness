@@ -3835,7 +3835,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="header-badges">
       <div class="badge badge-target" id="targetBadge" style="display: none;">
-        <span id="targetText">TARGET: IMPROVEMENT</span>
+        <span id="targetText">🎯 IMPROVEMENT</span>
       </div>
       <div class="badge" id="statusBadge">
         <span class="status-dot" id="statusDot"></span>
@@ -6096,6 +6096,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           }
           targetBadge.className = 'badge badge-target';
           targetBadge.style.display = 'inline-flex';
+          let targetDisplay = '🎯 NOT SET';
+          if (normTarget && normTarget !== 'NONE' && normTarget !== 'NULL') {
+            targetDisplay = `🎯 ${normTarget}`;
+          }
+          targetBadge.className = 'badge badge-target';
+          targetBadge.style.display = 'inline-flex';
           setText(targetText, targetDisplay);
         }
 
@@ -6718,11 +6724,11 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             norm = str(raw_target).strip().upper()
             if "/" in norm and "PARITY" in norm:
                 norm = "PARITY"
-            target_str = f"TARGET: {norm}"
+            target_str = f"🎯 {norm}"
         else:
-            target_str = "TARGET: NOT SET"
+            target_str = "🎯 NOT SET"
         out = out.replace(
-            '<div class="badge badge-target" id="targetBadge" style="display: none;">\n        <span id="targetText">TARGET: IMPROVEMENT</span>\n      </div>',
+            '<div class="badge badge-target" id="targetBadge" style="display: none;">\n        <span id="targetText">🎯 IMPROVEMENT</span>\n      </div>',
             f'<div class="badge badge-target" id="targetBadge" style="display: inline-flex;">\n        <span id="targetText">{html.escape(target_str)}</span>\n      </div>'
         )
     out = out.replace(
