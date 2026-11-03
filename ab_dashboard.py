@@ -900,7 +900,7 @@ def render_depth_mode_summary_rows(depth_data: Optional[Dict[str, Any]]) -> str:
         ("standard", "Standard 4P"),
     ]
     if not mode_sums:
-        return '<tr><td colspan="9" class="empty-cell">No run yet.</td></tr>'
+        return '<tr><td colspan="9" class="empty-cell">No data.</td></tr>'
     fixture_nps_map = compute_mode_fixture_nps(depth_data)
     rows = []
     for m_key, m_name in mode_order:
@@ -3813,7 +3813,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span class="status-dot" id="statusDot"></span>
         <span id="statusText">IDLE</span>
       </div>
-      <span id="headerNoRunYet" style="display: none; color: var(--text-muted); font-size: 0.95rem; font-weight: 600; padding: 4px 8px;">No run yet</span>
+      <span id="headerNoData" style="display: none; color: var(--text-muted); font-size: 0.95rem; font-weight: 600; padding: 4px 8px;">No data.</span>
     </div>
   </header>
 
@@ -3907,7 +3907,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
 
           <div class="stage-panel-body">
-            <div id="unitEmptyWrap" style="display: none; text-align: center; color: var(--pipeline-text-muted); padding: 2.5rem; font-size: 0.95rem;">No run yet.</div>
+            <div id="unitEmptyWrap" style="display: none; text-align: center; color: var(--pipeline-text-muted); padding: 2.5rem; font-size: 0.95rem;">No data.</div>
             <div id="unitAbortedWrap" style="display: none; text-align: center; color: var(--pipeline-amber); padding: 2.5rem; font-size: 0.95rem; font-family: 'JetBrains Mono', monospace;"></div>
             <div id="unitTableWrap">
               <table class="data-table">
@@ -3949,7 +3949,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
 
           <div class="stage-panel-body" id="depthTableContainer">
-            <div id="depthEmptyWrap" style="display: none; text-align: center; color: var(--pipeline-text-muted); padding: 2.5rem; font-size: 0.95rem;">No run yet.</div>
+            <div id="depthEmptyWrap" style="display: none; text-align: center; color: var(--pipeline-text-muted); padding: 2.5rem; font-size: 0.95rem;">No data.</div>
             <div id="depthAbortedWrap" style="display: none; text-align: center; color: var(--pipeline-amber); padding: 2.5rem; font-size: 0.95rem; font-family: 'JetBrains Mono', monospace;"></div>
             <div id="depthTableWrap">
               <table class="data-table" id="depthModesTable">
@@ -3968,7 +3968,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                 </thead>
                 <tbody id="depthTableBody">
                   <tr>
-                    <td colspan="9" class="empty-cell">No run yet.</td>
+                    <td colspan="9" class="empty-cell">No data.</td>
                   </tr>
                 </tbody>
               </table>
@@ -3988,7 +3988,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
 
           <div class="stage-panel-body">
-            <div id="matrixEmptyWrap" style="display: none; text-align: center; color: var(--pipeline-text-muted); padding: 2.5rem; font-size: 0.95rem;">No run yet.</div>
+            <div id="matrixEmptyWrap" style="display: none; text-align: center; color: var(--pipeline-text-muted); padding: 2.5rem; font-size: 0.95rem;">No data.</div>
             <div id="matrixAbortedWrap" style="display: none; text-align: center; color: var(--pipeline-amber); padding: 2.5rem; font-size: 0.95rem; font-family: 'JetBrains Mono', monospace;"></div>
             <div id="matrixTableWrap">
               <table class="data-table live-matrix-table" id="matrixTable">
@@ -4023,7 +4023,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
 
           <div class="stage-panel-body">
-            <div id="poolEmptyWrap" style="display: none; text-align: center; color: var(--pipeline-text-muted); padding: 2.5rem; font-size: 0.95rem;">No run yet.</div>
+            <div id="poolEmptyWrap" style="display: none; text-align: center; color: var(--pipeline-text-muted); padding: 2.5rem; font-size: 0.95rem;">No data.</div>
             <div id="poolAbortedWrap" style="display: none; text-align: center; color: var(--pipeline-amber); padding: 2.5rem; font-size: 0.95rem; font-family: 'JetBrains Mono', monospace;"></div>
             <div id="poolTableWrap">
               <table class="data-table live-matrix-table" id="poolModesTable">
@@ -4300,7 +4300,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (tableWrap) tableWrap.style.display = 'none';
       abortedWrap.style.display = 'none';
       emptyWrap.style.display = 'block';
-      emptyWrap.innerText = 'No run yet.';
+      emptyWrap.innerText = 'No data.';
     } else if (uiState === 'ABORTED' && isInterrupted) {
       if (tableWrap) tableWrap.style.display = 'none';
       emptyWrap.style.display = 'none';
@@ -4779,7 +4779,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     if (tbody) {
       const modeSummaries = depth.mode_summaries || {};
       if (Object.keys(modeSummaries).length === 0) {
-        const emptyMsg = isEmpty ? 'No run yet.' : (isRunning ? 'Running benchmark...' : 'Benchmark queued.');
+        const emptyMsg = isEmpty ? 'No data.' : (isRunning ? 'Running benchmark...' : 'Benchmark queued.');
         setHTML(tbody, `<tr><td colspan="9" class="empty-cell">${emptyMsg}</td></tr>`);
       } else {
         const modeOrder = [
@@ -5904,7 +5904,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       // Header Status & Target Chips
       const statusBadge = document.getElementById('statusBadge');
       const statusText = document.getElementById('statusText');
-      const headerNoRunYet = document.getElementById('headerNoRunYet');
+      const headerNoData = document.getElementById('headerNoData');
       const abortedBanner = document.getElementById('abortedBanner');
       const targetBadge = document.getElementById('targetBadge');
       const targetText = document.getElementById('targetText');
@@ -5912,10 +5912,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (isEmpty) {
         if (statusBadge) statusBadge.style.display = 'none';
         if (targetBadge) targetBadge.style.display = 'none';
-        if (headerNoRunYet) headerNoRunYet.style.display = 'inline-flex';
+        if (headerNoData) headerNoData.style.display = 'inline-flex';
         if (abortedBanner) abortedBanner.style.display = 'none';
       } else {
-        if (headerNoRunYet) headerNoRunYet.style.display = 'none';
+        if (headerNoData) headerNoData.style.display = 'none';
 
         // 1. Target Chip
         if (targetBadge && targetText) {
@@ -5997,7 +5997,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const subtext = document.getElementById('headerSubtext');
       if (subtext) {
         if (isEmpty) {
-          const emptyText = 'No run yet';
+          const emptyText = 'No data.';
           if (subtext.innerText !== emptyText) subtext.innerText = emptyText;
           if (subtext.title !== emptyText) subtext.title = emptyText;
         } else {
@@ -6797,7 +6797,7 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
     if depth_data and (depth_data.get("completed_positions", 0) >= 12 or depth_data.get("delta_depth") is not None or depth_data.get("mode_summaries")):
         depth_rows_html = render_depth_mode_summary_rows(depth_data)
         out = out.replace(
-            '<tr>\n                      <td colspan="9" class="empty-cell">No run yet.</td>\n                    </tr>',
+            '<tr>\n                      <td colspan="9" class="empty-cell">No data.</td>\n                    </tr>',
             depth_rows_html
         )
 
@@ -6822,11 +6822,11 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
     if is_empty:
         out = out.replace(
             '<div style="font-size: 0.85rem; color: var(--text-muted);" id="headerSubtext">Testing: Unspecified Experiment</div>',
-            '<div style="font-size: 0.85rem; color: var(--text-muted);" id="headerSubtext">No run yet</div>'
+            '<div style="font-size: 0.85rem; color: var(--text-muted);" id="headerSubtext">No data.</div>'
         )
         out = out.replace(
-            '<span id="headerNoRunYet" style="display: none;',
-            '<span id="headerNoRunYet" style="display: inline-flex;'
+            '<span id="headerNoData" style="display: none;',
+            '<span id="headerNoData" style="display: inline-flex;'
         )
         out = out.replace(
             '<div class="header-progress-wrap" id="headerProgressWrap" title="Overall Run Progress">',
