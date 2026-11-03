@@ -899,12 +899,24 @@ def render_depth_mode_summary_rows(depth_data: Optional[Dict[str, Any]]) -> str:
         ("duel", "Duel 1v1"),
         ("standard", "Standard 4P"),
     ]
-    if not mode_sums:
-        return '<tr><td colspan="9" class="empty-cell">No data.</td></tr>'
-    fixture_nps_map = compute_mode_fixture_nps(depth_data)
+    fixture_nps_map = compute_mode_fixture_nps(depth_data) if mode_sums else {}
     rows = []
     for m_key, m_name in mode_order:
-        ms = mode_sums.get(m_key) or {}
+        ms = mode_sums.get(m_key)
+        if not ms:
+            rows.append(f'''
+                  <tr>
+                    <td class="td-left" style="font-weight: 700;">{m_name}</td>
+                    <td class="td-right">--</td>
+                    <td class="td-right" style="font-weight: 700; color: var(--pipeline-green);">--</td>
+                    <td class="td-right" style="color: var(--pipeline-text-muted); font-weight: 700;">--</td>
+                    <td class="td-right">--</td>
+                    <td class="td-right">--</td>
+                    <td class="td-right" style="font-weight: 700; color: var(--pipeline-text-muted);">--</td>
+                    <td class="td-right">--</td>
+                    <td class="td-right"><span class="status-chip status-chip-queued matrix-col-status matrix-status-queued">QUEUED</span></td>
+                  </tr>''')
+            continue
         base_d = float(ms.get("base_med_depth", 0.0) or 0.0)
         var_d = float(ms.get("var_med_depth", 0.0) or 0.0)
         delta_d = float(ms.get("delta_depth", 0.0) or (var_d - base_d))
@@ -1480,9 +1492,74 @@ def format_history_time(raw: Any) -> str:
         return s
 
 
+DEFAULT_UNIT_TEST_NAMES: List[str] = [
+    "test_avoid_dead_end_when_boxed_in_corner",
+    "test_avoid_risky_head_kill_chase",
+    "test_avoid_running_into_opponent_if_open_space",
+    "test_c_engine_loads_without_compiler_if_binary_exists",
+    "test_c_engine_mandatory_fail_fast",
+    "test_concurrent_move_requests_under_timeout_cap",
+    "test_concurrent_thread_safety_no_segfault",
+    "test_constrictor_7x7_turn_11_must_take_right_for_tie",
+    "test_constrictor_turn_22_must_take_right",
+    "test_constrictor_turn_30_must_take_down",
+    "test_dont_run_into_tail_if_constrictor",
+    "test_dont_run_into_tail_if_just_ate",
+    "test_duel_turn_172_avoid_wall_pocket_tunnel_left",
+    "test_duel_turn_208_avoid_dead_end_pocket_suicide",
+    "test_duel_turn_78_must_keep_opponent_cornered",
+    "test_duel_turn_79_avoid_corner_trap_wall_collision",
+    "test_execute_adjacent_head_kill_on_smaller_opponent",
+    "test_failure_case_turn_45_avoid_contested_head_collision",
+    "test_game_de138756_turn_106_avoid_suicidal_head_threat_override",
+    "test_multiplayer_turn_108_avoid_opponent_body_suicide",
+    "test_multiplayer_turn_10_avoid_non_receding_tail_collision",
+    "test_multiplayer_turn_116_avoid_flibba_head_to_head_trap",
+    "test_multiplayer_turn_119_avoid_wall_down",
+    "test_multiplayer_turn_194_pocket_trap_follow_tail",
+    "test_multiplayer_turn_29_avoid_wall_left",
+    "test_multiplayer_turn_31_avoid_wall_collision",
+    "test_multiplayer_turn_321_cornered_down_into_tail",
+    "test_multiplayer_turn_61_avoid_wall_and_opponent_body_suicide",
+    "test_multiplayer_turn_61_avoid_wall_corner_pocket_trap",
+    "test_multiplayer_turn_63_avoid_self_collision",
+    "test_multiplayer_turn_85_avoid_wall_up",
+    "test_multiplayer_turn_97_avoid_opponent_body_suicide",
+    "test_never_run_into_wall",
+    "test_never_run_into_yourself",
+    "test_prefer_opponent_over_wall_or_self",
+    "test_royale_danger_zone_low_health_must_seek_food",
+    "test_trap_avoidance_dead_end_pocket",
+    "test_urgent_food_eating_on_critical_health",
+    "test_wrap_mode_boundary_escape",
+    "test_wrap_mode_flood_fill_modulo",
+]
+
+_DEFAULT_UNIT_TESTS: Optional[List[str]] = None
+
+
+def get_default_unit_tests() -> List[str]:
+    global _DEFAULT_UNIT_TESTS
+    if _DEFAULT_UNIT_TESTS is not None:
+        return _DEFAULT_UNIT_TESTS
+    _DEFAULT_UNIT_TESTS = list(DEFAULT_UNIT_TEST_NAMES)
+    return _DEFAULT_UNIT_TESTS
+
+
 def render_unit_tests_html(tests: List[Dict[str, Any]]) -> str:
     if not tests:
-        return '<tr class="empty-row"><td colspan="3" class="empty-cell">No individual test records available.</td></tr>'
+        default_names = get_default_unit_tests()
+        if not default_names:
+            return '<tr class="empty-row"><td colspan="3" class="empty-cell">No individual test records available.</td></tr>'
+        rows = []
+        for idx, name in enumerate(default_names, 1):
+            chip_html = '<span class="status-chip status-chip-queued matrix-col-status matrix-status-queued">QUEUED</span>'
+            rows.append(f'''        <tr>
+          <td class="td-right" style="color: var(--pipeline-text-muted);">{idx}.</td>
+          <td class="td-left" style="font-weight: 600; color: var(--pipeline-text-main);">{html.escape(name)}</td>
+          <td class="td-right">{chip_html}</td>
+        </tr>''')
+        return "\n".join(rows)
     sorted_tests = sorted(
         tests,
         key=lambda t: (0 if str(t.get("status", "")).upper() in ("FAILED", "ERROR") else 1, t.get("name", ""))
@@ -1491,8 +1568,16 @@ def render_unit_tests_html(tests: List[Dict[str, Any]]) -> str:
     for idx, t in enumerate(sorted_tests, 1):
         status_val = str(t.get("status", "")).upper()
         is_failed = status_val in ("FAILED", "ERROR")
-        st_text = "WORSE" if is_failed else "EQUAL"
-        st_class = "worse" if is_failed else "equal"
+        is_queued = status_val in ("QUEUED", "PENDING", "")
+        if is_failed:
+            st_text = "WORSE"
+            st_class = "worse"
+        elif is_queued:
+            st_text = "QUEUED"
+            st_class = "queued"
+        else:
+            st_text = "EQUAL"
+            st_class = "equal"
         chip_html = f'<span class="status-chip status-chip-{st_class} matrix-col-status matrix-status-{st_class}">{st_text}</span>'
         name = html.escape(str(t.get("name", "unnamed_test")))
         msg = t.get("message", "")
@@ -3359,14 +3444,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     .stage-panel-body {
+      height: 192px;
+      max-height: 192px;
       overflow-y: auto;
       overflow-x: hidden;
       box-sizing: border-box;
     }
 
-    /* Card 1 (Unit Tests): scrollable, capped so ~40 entries don't blow out the layout */
+    /* Card 1 (Unit Tests): scrollable through all ~40 tests, normalized to exact height of Cards 2–4 */
     #unitCard .stage-panel-body {
-      max-height: 320px;
+      height: 192px;
+      max-height: 192px;
       overflow-y: auto;
     }
 
@@ -3374,6 +3462,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     #depthCard .stage-panel-body,
     #matrixCard .stage-panel-body,
     #poolCard .stage-panel-body {
+      height: 192px;
+      max-height: 192px;
       overflow-y: hidden;
     }
 
@@ -3863,7 +3953,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span class="stage-seg-name">Unit Tests</span>
           <span class="stage-seg-duration" id="railDuration-unit">--</span>
         </div>
-        <span class="stage-seg-status matrix-status-pending" id="railStatus-unit">PENDING</span>
+        <span class="stage-seg-status matrix-status-queued" id="railStatus-unit">QUEUED</span>
       </div>
 
       <div class="stage-segment pending" id="railSegment-depth">
@@ -3872,7 +3962,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span class="stage-seg-name">Depth Benchmark</span>
           <span class="stage-seg-duration" id="railDuration-depth">--</span>
         </div>
-        <span class="stage-seg-status matrix-status-pending" id="railStatus-depth">PENDING</span>
+        <span class="stage-seg-status matrix-status-queued" id="railStatus-depth">QUEUED</span>
       </div>
 
       <div class="stage-segment active pending" id="railSegment-self">
@@ -3881,7 +3971,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span class="stage-seg-name">Self-Play Matrix</span>
           <span class="stage-seg-duration" id="railDuration-self">--</span>
         </div>
-        <span class="stage-seg-status matrix-status-pending" id="railStatus-self">PENDING</span>
+        <span class="stage-seg-status matrix-status-queued" id="railStatus-self">QUEUED</span>
       </div>
 
       <div class="stage-segment pending" id="railSegment-pool">
@@ -3890,7 +3980,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span class="stage-seg-name">Zoo Pool Gate</span>
           <span class="stage-seg-duration" id="railDuration-pool">--</span>
         </div>
-        <span class="stage-seg-status matrix-status-pending" id="railStatus-pool">PENDING</span>
+        <span class="stage-seg-status matrix-status-queued" id="railStatus-pool">QUEUED</span>
       </div>
     </div>
 
@@ -3967,9 +4057,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                   </tr>
                 </thead>
                 <tbody id="depthTableBody">
-                  <tr>
-                    <td colspan="9" class="empty-cell">No data.</td>
-                  </tr>
+                  <!-- Dynamically populated depth mode rows -->
                 </tbody>
               </table>
             </div>
@@ -4039,9 +4127,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
                   </tr>
                 </thead>
                 <tbody id="poolModesTableBody">
-                  <tr>
-                    <td colspan="7" class="empty-cell">Pool not started.</td>
-                  </tr>
+                  <!-- Dynamically populated rows for Pool Modes -->
                 </tbody>
               </table>
             </div>
@@ -4154,9 +4240,62 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     return `${monthStr} ${day} ${timePart}`;
   }
 
+  const DEFAULT_UNIT_TEST_NAMES = [
+    "test_avoid_dead_end_when_boxed_in_corner",
+    "test_avoid_risky_head_kill_chase",
+    "test_avoid_running_into_opponent_if_open_space",
+    "test_c_engine_loads_without_compiler_if_binary_exists",
+    "test_c_engine_mandatory_fail_fast",
+    "test_concurrent_move_requests_under_timeout_cap",
+    "test_concurrent_thread_safety_no_segfault",
+    "test_constrictor_7x7_turn_11_must_take_right_for_tie",
+    "test_constrictor_turn_22_must_take_right",
+    "test_constrictor_turn_30_must_take_down",
+    "test_dont_run_into_tail_if_constrictor",
+    "test_dont_run_into_tail_if_just_ate",
+    "test_duel_turn_172_avoid_wall_pocket_tunnel_left",
+    "test_duel_turn_208_avoid_dead_end_pocket_suicide",
+    "test_duel_turn_78_must_keep_opponent_cornered",
+    "test_duel_turn_79_avoid_corner_trap_wall_collision",
+    "test_execute_adjacent_head_kill_on_smaller_opponent",
+    "test_failure_case_turn_45_avoid_contested_head_collision",
+    "test_game_de138756_turn_106_avoid_suicidal_head_threat_override",
+    "test_multiplayer_turn_108_avoid_opponent_body_suicide",
+    "test_multiplayer_turn_10_avoid_non_receding_tail_collision",
+    "test_multiplayer_turn_116_avoid_flibba_head_to_head_trap",
+    "test_multiplayer_turn_119_avoid_wall_down",
+    "test_multiplayer_turn_194_pocket_trap_follow_tail",
+    "test_multiplayer_turn_29_avoid_wall_left",
+    "test_multiplayer_turn_31_avoid_wall_collision",
+    "test_multiplayer_turn_321_cornered_down_into_tail",
+    "test_multiplayer_turn_61_avoid_wall_and_opponent_body_suicide",
+    "test_multiplayer_turn_61_avoid_wall_corner_pocket_trap",
+    "test_multiplayer_turn_63_avoid_self_collision",
+    "test_multiplayer_turn_85_avoid_wall_up",
+    "test_multiplayer_turn_97_avoid_opponent_body_suicide",
+    "test_never_run_into_wall",
+    "test_never_run_into_yourself",
+    "test_prefer_opponent_over_wall_or_self",
+    "test_royale_danger_zone_low_health_must_seek_food",
+    "test_trap_avoidance_dead_end_pocket",
+    "test_urgent_food_eating_on_critical_health",
+    "test_wrap_mode_boundary_escape",
+    "test_wrap_mode_flood_fill_modulo"
+  ];
+
   function renderUnitTestsList(tests) {
     if (!tests || tests.length === 0) {
-      return '<tr class="empty-row"><td colspan="3" class="empty-cell">No individual test records available.</td></tr>';
+      return DEFAULT_UNIT_TEST_NAMES.map((name, idx) => {
+        const num = idx + 1;
+        const chipHtml = '<span class="status-chip status-chip-queued matrix-col-status matrix-status-queued">QUEUED</span>';
+        const escName = escapeHtml(name);
+        return `
+        <tr>
+          <td class="td-right" style="color: var(--pipeline-text-muted);">${num}.</td>
+          <td class="td-left" style="font-weight: 600; color: var(--pipeline-text-main);">${escName}</td>
+          <td class="td-right">${chipHtml}</td>
+        </tr>`;
+      }).join('');
     }
     const sorted = [...tests].sort((a, b) => {
       const aFail = (a.status === 'FAILED' || a.status === 'ERROR') ? 0 : 1;
@@ -4167,9 +4306,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     return sorted.map((t, idx) => {
       const num = idx + 1;
-      const isFailed = (t.status === 'FAILED' || t.status === 'ERROR');
-      const statusText = isFailed ? 'WORSE' : 'EQUAL';
-      const statusClass = isFailed ? 'worse' : 'equal';
+      const st = String(t.status || '').toUpperCase();
+      const isFailed = (st === 'FAILED' || st === 'ERROR');
+      const isQueued = (st === 'QUEUED' || st === 'PENDING' || st === '');
+      let statusText = 'EQUAL';
+      let statusClass = 'equal';
+      if (isFailed) {
+        statusText = 'WORSE';
+        statusClass = 'worse';
+      } else if (isQueued) {
+        statusText = 'QUEUED';
+        statusClass = 'queued';
+      }
       const chipHtml = `<span class="status-chip status-chip-${statusClass} matrix-col-status matrix-status-${statusClass}">${statusText}</span>`;
       const escName = escapeHtml(t.name || 'unnamed_test');
       const failRow = (isFailed && t.message)
@@ -4297,10 +4445,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     if (!emptyWrap || !abortedWrap) return;
 
     if (uiState === 'EMPTY') {
-      if (tableWrap) tableWrap.style.display = 'none';
+      if (tableWrap) tableWrap.style.display = 'block';
       abortedWrap.style.display = 'none';
-      emptyWrap.style.display = 'block';
-      emptyWrap.innerText = 'No data.';
+      emptyWrap.style.display = 'none';
     } else if (uiState === 'ABORTED' && isInterrupted) {
       if (tableWrap) tableWrap.style.display = 'none';
       emptyWrap.style.display = 'none';
@@ -4791,8 +4938,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     if (tbody) {
       const modeSummaries = depth.mode_summaries || {};
       if (Object.keys(modeSummaries).length === 0) {
-        const emptyMsg = isEmpty ? 'No data.' : (isRunning ? 'Running benchmark...' : 'Benchmark queued.');
-        setHTML(tbody, `<tr><td colspan="9" class="empty-cell">${emptyMsg}</td></tr>`);
+        if (isEmpty) {
+          const modeOrder = [
+            { key: 'constrictor', name: 'Constrictor 4P' },
+            { key: 'royale', name: 'Royale 4P' },
+            { key: 'duel', name: 'Duel 1v1' },
+            { key: 'standard', name: 'Standard 4P' }
+          ];
+          const rowsHtml = modeOrder.map(m => `
+            <tr>
+              <td class="td-left" style="font-weight: 700;">${m.name}</td>
+              <td class="td-right">--</td>
+              <td class="td-right" style="font-weight: 700; color: var(--pipeline-green);">--</td>
+              <td class="td-right" style="color: var(--pipeline-text-muted); font-weight: 700;">--</td>
+              <td class="td-right">--</td>
+              <td class="td-right">--</td>
+              <td class="td-right" style="font-weight: 700; color: var(--pipeline-text-muted);">--</td>
+              <td class="td-right">--</td>
+              <td class="td-right"><span class="status-chip status-chip-queued matrix-col-status matrix-status-queued">QUEUED</span></td>
+            </tr>
+          `).join('');
+          setHTML(tbody, rowsHtml);
+        } else {
+          const emptyMsg = isRunning ? 'Running benchmark...' : 'Benchmark queued.';
+          setHTML(tbody, `<tr><td colspan="9" class="empty-cell">${emptyMsg}</td></tr>`);
+        }
       } else {
         const modeOrder = [
           { key: 'constrictor', name: 'Constrictor 4P' },
@@ -5033,7 +5203,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       setHTML(poolModesBody, rowsHtml);
 
       const hasPoolGames = (pool.total_games && pool.total_games > 0) || isPoolRunning || (totalPoolPlayed > 0);
-      if (!hasPoolGames) {
+      if (!hasPoolGames && !isEmpty) {
         setHTML(poolModesBody, '<tr><td colspan="7" class="empty-cell" style="padding: 1.5rem; color: var(--pipeline-text-muted);">No pool games yet</td></tr>');
       }
     }
@@ -5131,43 +5301,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     setRailSeg('unit', unitStatus, unitDur);
 
     // Update Unit Tests Detail (Requirement 2)
-    const unitScoreEl = document.getElementById('unitDetailScore');
-    const unitDurEl = document.getElementById('unitDetailDuration');
-    const unitIconEl = document.getElementById('unitDetailIcon');
     const unitListEl = document.getElementById('unitTestsList');
 
-    const totalCount = (unitData.tests && unitData.tests.length) ? unitData.tests.length : (unitData.total != null ? unitData.total : 0);
-    const passedCount = unitData.passed != null ? unitData.passed : (unitData.tests ? unitData.tests.filter(t => t.status === 'PASSED').length : 0);
-    const durSec = (unitData.duration_sec != null && unitData.duration_sec > 0) ? Number(unitData.duration_sec) : 0;
-    const durFormatted = durSec > 0 ? `${durSec.toFixed(1)}s` : '--';
-
     if (isEmpty) {
-      if (unitScoreEl) {
-        unitScoreEl.innerText = '-- / -- tests · Queued';
-        unitScoreEl.style.color = 'var(--pipeline-grey)';
+      if (unitListEl) {
+        unitListEl.innerHTML = renderUnitTestsList([]);
       }
-      if (unitDurEl) unitDurEl.innerText = 'Duration: --';
     } else {
-      if (unitScoreEl) {
-        if (unitStatus === 'WORSE' || unitStatus === 'FAILED') {
-          unitScoreEl.innerText = `${passedCount} / ${totalCount} passed`;
-          unitScoreEl.style.color = 'var(--pipeline-red)';
-          if (unitIconEl) { unitIconEl.innerText = '❌'; unitIconEl.style.color = 'var(--pipeline-red)'; }
-        } else if (unitStatus === 'DONE' || unitStatus === 'PASS' || unitStatus === 'EQUAL') {
-          unitScoreEl.innerText = `${passedCount} / ${totalCount} passed`;
-          unitScoreEl.style.color = 'var(--pipeline-green)';
-          if (unitIconEl) { unitIconEl.innerText = '✓'; unitIconEl.style.color = 'var(--pipeline-green)'; }
-        } else if (unitStatus === 'RUNNING') {
-          unitScoreEl.innerText = 'Running unit tests...';
-          unitScoreEl.style.color = 'var(--pipeline-blue)';
-          if (unitIconEl) { unitIconEl.innerText = '⏳'; unitIconEl.style.color = 'var(--pipeline-blue)'; }
-        } else {
-          unitScoreEl.innerText = `${totalCount} / ${totalCount} tests · Queued`;
-          unitScoreEl.style.color = 'var(--pipeline-grey)';
-          if (unitIconEl) { unitIconEl.innerText = '⚪'; unitIconEl.style.color = 'var(--pipeline-grey)'; }
-        }
-      }
-      if (unitDurEl) unitDurEl.innerText = `Duration: ${durFormatted}`;
       if (unitListEl && (unitData.tests || unitStatus === 'DONE' || unitStatus === 'PASS' || unitStatus === 'EQUAL' || unitStatus === 'FAILED' || unitStatus === 'WORSE')) {
         unitListEl.innerHTML = renderUnitTestsList(unitData.tests || []);
       }
@@ -6197,22 +6337,6 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
     tests_list = unit_data.get("tests") or []
     unit_total = len(tests_list) if tests_list else unit_data.get("total", 0)
     unit_passed = sum(1 for t in tests_list if str(t.get("status", "")).upper() == "PASSED") if tests_list else unit_data.get("passed", unit_total)
-    if is_empty:
-        unit_header_line = "-- / -- tests · Queued"
-        unit_score_color = "var(--text-muted)"
-    elif unit_status == "RUNNING":
-        unit_header_line = "Running unit tests..."
-        unit_score_color = "#60a5fa"
-    elif unit_status == "FAILED":
-        unit_header_line = f"{unit_passed} / {unit_total} passed"
-        unit_score_color = "var(--danger-color)"
-    elif unit_status in ("PASSED", "PASS", "DONE"):
-        unit_header_line = f"{unit_passed} / {unit_total} passed"
-        unit_score_color = "var(--variant-color)"
-    else:
-        unit_header_line = f"{unit_total} / {unit_total} tests · Pending"
-        unit_score_color = "var(--text-muted)"
-
     unit_tests_html = render_unit_tests_html(tests_list or [])
 
     # Header Status Chip
@@ -6546,10 +6670,6 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
         f'<strong class="header-stat-val" id="threadsCount">{threads_display}</strong>'
     )
     out = out.replace(
-        '<span id="unitDetailScore">42 / 42 passed</span>',
-        f'<span id="unitDetailScore">{unit_header_line}</span>'
-    )
-    out = out.replace(
         '<!-- Dynamically populated test rows -->',
         unit_tests_html
     )
@@ -6579,14 +6699,11 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
         '<!-- Dynamically populated rows for Constrictor, Royale, Duel, Standard -->',
         matrix_rows_html
     )
-    has_pool_games = (pool_data.get("total_games", 0) > 0) or is_pool_running or (total_pool_played > 0)
-    is_pool_enabled = bool(data.get("pool_enabled") or run_type == "pool" or has_pool_games)
-    if has_pool_games:
-        pool_modes_rendered = render_pool_modes_rows(pool_data, is_running=is_running, run_type=run_type)
-        out = out.replace(
-            '<tr>\n                      <td colspan="7" class="empty-cell">Pool not started.</td>\n                    </tr>',
-            pool_modes_rendered
-        )
+    pool_modes_rendered = render_pool_modes_rows(pool_data, is_running=is_running, run_type=run_type)
+    out = out.replace(
+        '<!-- Dynamically populated rows for Pool Modes -->',
+        pool_modes_rendered
+    )
 
     active_stage = "self"
     if requested_stage in ("unit", "depth", "self", "pool"):
@@ -6662,13 +6779,13 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
         return "worse", "WORSE"
 
     # Unit Tests and Depth Benchmark stage rail presentation
-    unit_status = unit_data.get("status", "PASSED" if is_running else "PENDING")
+    unit_status = unit_data.get("status", "PASSED" if is_running else ("QUEUED" if is_empty else "PENDING"))
     unit_dur = unit_data.get("duration_sec")
     unit_dur_str = format_duration(float(unit_dur), allow_decimal=True) if unit_dur else ("0:08" if is_running else "--")
-    unit_status_clean = "equal" if unit_status in ("PASSED", "DONE", "PASS") else ("worse" if unit_status == "FAILED" else "pending")
-    unit_status_text = "EQUAL" if unit_status in ("PASSED", "DONE", "PASS") else ("WORSE" if unit_status == "FAILED" else unit_status)
+    unit_status_clean = "equal" if unit_status in ("PASSED", "DONE", "PASS") else ("worse" if unit_status == "FAILED" else ("running" if unit_status == "RUNNING" else "queued"))
+    unit_status_text = "EQUAL" if unit_status in ("PASSED", "DONE", "PASS") else ("WORSE" if unit_status == "FAILED" else ("RUNNING" if unit_status == "RUNNING" else "QUEUED"))
     out = out.replace(
-        '<div class="stage-segment pending" id="railSegment-unit">\n        <span class="stage-seg-index">1</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Unit Tests</span>\n          <span class="stage-seg-duration" id="railDuration-unit">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-pending" id="railStatus-unit">PENDING</span>\n      </div>',
+        '<div class="stage-segment pending" id="railSegment-unit">\n        <span class="stage-seg-index">1</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Unit Tests</span>\n          <span class="stage-seg-duration" id="railDuration-unit">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-queued" id="railStatus-unit">QUEUED</span>\n      </div>',
         f'<div class="stage-segment {unit_status_clean}{unit_active}" id="railSegment-unit">\n        <span class="stage-seg-index">1</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Unit Tests</span>\n          <span class="stage-seg-duration" id="railDuration-unit">{unit_dur_str}</span>\n        </div>\n        <span class="stage-seg-status matrix-status-{unit_status_clean}" id="railStatus-unit">{unit_status_text}</span>\n      </div>'
     )
 
@@ -6781,9 +6898,9 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             pool_rail_status = "QUEUED"
             pool_dur_str = "--"
     else:
-        unit_status_clean = "pending"
+        unit_status_clean = "queued"
         unit_status_text = "QUEUED"
-        depth_status_clean = "pending"
+        depth_status_clean = "queued"
         depth_status_text = "QUEUED"
         depth_dur_str = "--"
         matrix_rail_class = "pending"
@@ -6794,24 +6911,23 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
         pool_dur_str = "--"
 
     out = out.replace(
-        '<div class="stage-segment pending" id="railSegment-depth">\n        <span class="stage-seg-index">2</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Depth Benchmark</span>\n          <span class="stage-seg-duration" id="railDuration-depth">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-pending" id="railStatus-depth">PENDING</span>\n      </div>',
+        '<div class="stage-segment pending" id="railSegment-depth">\n        <span class="stage-seg-index">2</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Depth Benchmark</span>\n          <span class="stage-seg-duration" id="railDuration-depth">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-queued" id="railStatus-depth">QUEUED</span>\n      </div>',
         f'<div class="stage-segment {depth_status_clean}{depth_active}" id="railSegment-depth">\n        <span class="stage-seg-index">2</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Depth Benchmark</span>\n          <span class="stage-seg-duration" id="railDuration-depth">{depth_dur_str}</span>\n        </div>\n        <span class="stage-seg-status matrix-status-{depth_status_clean}" id="railStatus-depth">{depth_status_text}</span>\n      </div>'
     )
     out = out.replace(
-        '<div class="stage-segment active pending" id="railSegment-self">\n        <span class="stage-seg-index">3</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Self-Play Matrix</span>\n          <span class="stage-seg-duration" id="railDuration-self">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-pending" id="railStatus-self">PENDING</span>\n      </div>',
+        '<div class="stage-segment active pending" id="railSegment-self">\n        <span class="stage-seg-index">3</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Self-Play Matrix</span>\n          <span class="stage-seg-duration" id="railDuration-self">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-queued" id="railStatus-self">QUEUED</span>\n      </div>',
         f'<div class="stage-segment {matrix_rail_class}{matrix_active}" id="railSegment-self">\n        <span class="stage-seg-index">3</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Self-Play Matrix</span>\n          <span class="stage-seg-duration" id="railDuration-self">{matrix_dur_str}</span>\n        </div>\n        <span class="stage-seg-status matrix-status-{matrix_rail_status.lower()}" id="railStatus-self">{matrix_rail_status}</span>\n      </div>'
     )
     out = out.replace(
-        '<div class="stage-segment pending" id="railSegment-pool">\n        <span class="stage-seg-index">4</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Zoo Pool Gate</span>\n          <span class="stage-seg-duration" id="railDuration-pool">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-pending" id="railStatus-pool">PENDING</span>\n      </div>',
+        '<div class="stage-segment pending" id="railSegment-pool">\n        <span class="stage-seg-index">4</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Zoo Pool Gate</span>\n          <span class="stage-seg-duration" id="railDuration-pool">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-queued" id="railStatus-pool">QUEUED</span>\n      </div>',
         f'<div class="stage-segment {pool_rail_class}{pool_active}" id="railSegment-pool">\n        <span class="stage-seg-index">4</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Zoo Pool Gate</span>\n          <span class="stage-seg-duration" id="railDuration-pool">{pool_dur_str}</span>\n        </div>\n        <span class="stage-seg-status matrix-status-{pool_rail_status.lower().replace(" ", "-")}" id="railStatus-pool">{pool_rail_status}</span>\n      </div>'
     )
 
-    if depth_data and (depth_data.get("completed_positions", 0) >= 12 or depth_data.get("delta_depth") is not None or depth_data.get("mode_summaries")):
-        depth_rows_html = render_depth_mode_summary_rows(depth_data)
-        out = out.replace(
-            '<tr>\n                      <td colspan="9" class="empty-cell">No data.</td>\n                    </tr>',
-            depth_rows_html
-        )
+    depth_rows_html = render_depth_mode_summary_rows(depth_data)
+    out = out.replace(
+        '<!-- Dynamically populated depth mode rows -->',
+        depth_rows_html
+    )
 
     # Pre-render history table
     history_list = data.get("run_history") or []
@@ -6840,9 +6956,6 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             '<span id="headerNoData" style="display: none;',
             '<span id="headerNoData" style="display: inline-flex;'
         )
-        for stg in ("unit", "depth", "matrix", "pool"):
-            out = out.replace(f'<div id="{stg}EmptyWrap" style="display: none;', f'<div id="{stg}EmptyWrap" style="display: block;')
-            out = out.replace(f'<div id="{stg}TableWrap">', f'<div id="{stg}TableWrap" style="display: none;">')
     elif is_aborted:
         stop_reason = str(data.get("stop_reason") or "Simulation runner terminated unexpectedly.")
         comp_line = compute_completeness_line(data)

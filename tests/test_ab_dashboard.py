@@ -662,6 +662,33 @@ class TestDashboardSkip(unittest.TestCase):
         # Progress bar width is 0%
         self.assertIn('<div class="header-progress-bar" id="headerProgressBar" style="width: 0.0%;"></div>', rendered)
 
+    def test_no_data_state_shows_pipeline_placeholders(self):
+        from ab_dashboard import render_html_with_state, DASHBOARD_HTML, get_default_unit_tests
+        empty_data = {}
+        rendered = render_html_with_state(DASHBOARD_HTML, empty_data)
+
+        # Stage rail chips should show QUEUED
+        self.assertIn('<span class="stage-seg-status matrix-status-queued" id="railStatus-unit">QUEUED</span>', rendered)
+        self.assertIn('<span class="stage-seg-status matrix-status-queued" id="railStatus-depth">QUEUED</span>', rendered)
+        self.assertIn('<span class="stage-seg-status matrix-status-queued" id="railStatus-self">QUEUED</span>', rendered)
+        self.assertIn('<span class="stage-seg-status matrix-status-queued" id="railStatus-pool">QUEUED</span>', rendered)
+
+        # Stage 1 Unit tests header should not have score label and rows should be queued
+        self.assertNotIn('unitDetailScore', rendered)
+        default_tests = get_default_unit_tests()
+        self.assertEqual(len(default_tests), 40)
+        for t_name in default_tests:
+            self.assertIn(f'>{t_name}</td>', rendered)
+
+        # Stage 2 Depth benchmark placeholder rows
+        for mode in ("Constrictor 4P", "Royale 4P", "Duel 1v1", "Standard 4P"):
+            self.assertIn(f'>{mode}</td>', rendered)
+
+        # None of the stage tables should be hidden
+        for stg in ("unit", "depth", "matrix", "pool"):
+            self.assertNotIn(f'<div id="{stg}TableWrap" style="display: none;">', rendered)
+            self.assertNotIn(f'<div id="{stg}EmptyWrap" style="display: block;', rendered)
+
     def test_stage_durations_frozen_on_finish(self):
         # 1. Self-play matrix run
         self.state.handle_update({
