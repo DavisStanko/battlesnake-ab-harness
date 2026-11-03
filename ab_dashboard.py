@@ -1027,31 +1027,6 @@ def render_pool_modes_rows(pool_data: Optional[Dict[str, Any]], is_running: bool
     return "".join(rows)
 
 
-def render_pool_opponents_rows(pool_data: Optional[Dict[str, Any]]) -> str:
-    """Pre-render opponent head-to-head rows for Zoo Pool Gate."""
-    opponents = (pool_data or {}).get("opponents") or []
-    if not opponents:
-        return '<tr class="empty-row"><td colspan="5" class="empty-cell">Pool not started.</td></tr>'
-    rows = []
-    for o in opponents:
-        c_pct = float(o.get("cand_win_pct", 0.0))
-        b_pct = float(o.get("base_win_pct", 0.0))
-        d = float(o.get("delta", c_pct - b_pct))
-        d_col = "var(--pipeline-green)" if d > 0.5 else ("var(--pipeline-red)" if d < -0.5 else "var(--pipeline-amber)")
-        d_sign = "+" if d > 0 else ""
-        opp_name = html.escape(str(o.get("opponent", "")))
-        opp_games = o.get("games", 0)
-        rows.append(f'''
-                  <tr>
-                    <td class="td-left" style="font-weight: 700; color: var(--pipeline-text-main);">{opp_name}</td>
-                    <td class="td-right">{opp_games}</td>
-                    <td class="td-right" style="font-weight: 700; color: var(--pipeline-green);">{c_pct:.1f}%</td>
-                    <td class="td-right" style="font-weight: 700; color: var(--pipeline-blue);">{b_pct:.1f}%</td>
-                    <td class="td-right" style="color: {d_col}; font-weight: 700;">{d_sign}{d:.1f}%</td>
-                  </tr>''')
-    return "".join(rows)
-
-
 def calculate_run_progress_percent(completed_games: int, planned_games: int) -> float:
     """Percent = games completed / total planned games for the run."""
     if planned_games <= 0:
@@ -3996,15 +3971,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       <!-- 4. Zoo Pool Gate Detail -->
       <div class="stage-panel-content" id="panel-pool" style="display: none;">
-        <div class="stage-panel" id="poolOpponentsCard">
+        <div class="stage-panel" id="poolCard">
           <div class="panel-header" id="poolPanelHeader">
             <div class="panel-header-title">
               <span class="panel-header-icon">🐍</span>
               <span>Zoo Pool Gate</span>
-            </div>
-            <div class="card-toggle-segmented" id="poolSegmentedToggle">
-              <button type="button" class="btn-seg active" id="btnPoolToggleModes" onclick="setPoolView('modes')">Modes</button>
-              <button type="button" class="btn-seg" id="btnPoolToggleOpponents" onclick="setPoolView('opponents')">Opponents</button>
             </div>
           </div>
 
@@ -4012,45 +3983,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <div id="poolEmptyWrap" style="display: none; text-align: center; color: var(--pipeline-text-muted); padding: 2.5rem; font-size: 0.95rem;">No run yet.</div>
             <div id="poolAbortedWrap" style="display: none; text-align: center; color: var(--pipeline-amber); padding: 2.5rem; font-size: 0.95rem; font-family: 'JetBrains Mono', monospace;"></div>
             <div id="poolTableWrap">
-              <div id="poolModesWrap" style="display: block;">
-                <table class="data-table live-matrix-table" id="poolModesTable">
-                  <thead>
-                    <tr>
-                      <th class="th-left">Mode</th>
-                      <th class="th-right">Games</th>
-                      <th class="th-right">Var Share</th>
-                      <th class="th-right">Base Share</th>
-                      <th class="th-right">Δ (Delta)</th>
-                      <th class="th-right">Z-Score</th>
-                      <th class="th-right">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody id="poolModesTableBody">
-                    <tr>
-                      <td colspan="7" class="empty-cell">Pool not started.</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-
-              <div id="poolOpponentsWrap" style="display: none;">
-                <table class="data-table" id="poolOpponentsTable">
-                  <thead id="poolOpponentsHead">
-                    <tr>
-                      <th class="th-left">Opponent</th>
-                      <th class="th-right">Games</th>
-                      <th class="th-right">Var Share</th>
-                      <th class="th-right">Base Share</th>
-                      <th class="th-right">Δ (Delta)</th>
-                    </tr>
-                  </thead>
-                  <tbody id="poolOpponentsTableBody">
-                    <tr class="empty-row">
-                      <td colspan="5" class="empty-cell">Pool not started.</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+              <table class="data-table live-matrix-table" id="poolModesTable">
+                <thead>
+                  <tr>
+                    <th class="th-left">Mode</th>
+                    <th class="th-right">Games</th>
+                    <th class="th-right">Var Share</th>
+                    <th class="th-right">Base Share</th>
+                    <th class="th-right">Δ (Delta)</th>
+                    <th class="th-right">Z-Score</th>
+                    <th class="th-right">Status</th>
+                  </tr>
+                </thead>
+                <tbody id="poolModesTableBody">
+                  <tr>
+                    <td colspan="7" class="empty-cell">Pool not started.</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
@@ -4711,28 +4661,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     });
   }
 
-  let poolCurrentView = 'modes';
-  function setPoolView(view) {
-    poolCurrentView = view;
-    const btnModes = document.getElementById('btnPoolToggleModes');
-    const btnOpps = document.getElementById('btnPoolToggleOpponents');
-    const modesWrap = document.getElementById('poolModesWrap');
-    const oppsWrap = document.getElementById('poolOpponentsWrap');
-    if (btnModes && btnOpps) {
-      if (view === 'modes') {
-        btnModes.classList.add('active');
-        btnOpps.classList.remove('active');
-        if (modesWrap) modesWrap.style.display = 'block';
-        if (oppsWrap) oppsWrap.style.display = 'none';
-      } else {
-        btnOpps.classList.add('active');
-        btnModes.classList.remove('active');
-        if (modesWrap) modesWrap.style.display = 'none';
-        if (oppsWrap) oppsWrap.style.display = 'block';
-      }
-    }
-  }
-
   function formatCompactNps(val) {
     if (val == null || val <= 0) return '--';
     const num = Number(val);
@@ -5056,37 +4984,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    // Update Opponents Table (Opponents view inside fixed body)
-    const oppTbody = document.getElementById('poolOpponentsTableBody');
-    const opponents = pool.opponents || [];
-    if (oppTbody) {
-      if (opponents.length === 0) {
-        setHTML(oppTbody, `
-          <tr class="empty-row">
-            <td colspan="5" class="empty-cell">${isEmpty ? 'No run yet.' : 'No pool games yet'}</td>
-          </tr>
-        `);
-      } else {
-        const oppRows = opponents.map(o => {
-          const d = (o.delta != null) ? o.delta : ((o.cand_win_pct != null && o.base_win_pct != null) ? (o.cand_win_pct - o.base_win_pct) : null);
-          const dColor = d > 0.5 ? 'var(--pipeline-green)' : (d < -0.5 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
-          const dText = d != null ? `${d > 0 ? '+' : ''}${d.toFixed(1)}%` : '--';
-          const cPct = o.cand_win_pct != null ? `${o.cand_win_pct.toFixed(1)}%` : '--';
-          const bPct = o.base_win_pct != null ? `${o.base_win_pct.toFixed(1)}%` : '--';
-
-          return `
-            <tr>
-              <td class="td-left" style="font-weight: 700; color: var(--pipeline-text-main);">${escapeHtml(o.opponent || 'Unknown')}</td>
-              <td class="td-right">${o.games != null ? o.games : '--'}</td>
-              <td class="td-right" style="font-weight: 700; color: var(--pipeline-green);">${cPct}</td>
-              <td class="td-right" style="font-weight: 700; color: var(--pipeline-blue);">${bPct}</td>
-              <td class="td-right" style="color: ${dColor}; font-weight: 700;">${dText}</td>
-            </tr>
-          `;
-        }).join('');
-        setHTML(oppTbody, oppRows);
-      }
-    }
   }
 
   function updateStageRail(data) {
@@ -6617,13 +6514,6 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
         out = out.replace(
             '<tr>\n                      <td colspan="7" class="empty-cell">Pool not started.</td>\n                    </tr>',
             pool_modes_rendered
-        )
-
-    if pool_opponents:
-        opp_rows_rendered = render_pool_opponents_rows(pool_data)
-        out = out.replace(
-            '                    <tr class="empty-row">\n                      <td colspan="5" class="empty-cell">Pool not started.</td>\n                    </tr>',
-            opp_rows_rendered
         )
 
     active_stage = "self"
