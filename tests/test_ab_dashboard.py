@@ -596,6 +596,29 @@ class TestDashboardSkip(unittest.TestCase):
             self.assertEqual(history[0]["total_games"], 200)
             self.assertEqual(history[0]["recommendation"], "KEEP")
 
+    def test_save_run_history_caps_at_10_runs(self):
+        from ab_test import save_run_history
+        import json
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            res_dir = Path(tmpdir)
+            for i in range(15):
+                save_run_history(
+                    "baseline", "variant", 100,
+                    {"baseline": {"wins": 50, "losses": 50, "draws": 0}, "variant": {"wins": 50, "losses": 50, "draws": 0}},
+                    "COMPLETE", "Test run", "PARITY",
+                    experiment_desc=f"Experiment {i}",
+                    results_dir=res_dir,
+                )
+            with open(res_dir / "ab_history.json", "r", encoding="utf-8") as f:
+                history = json.load(f)
+            self.assertEqual(len(history), 10)
+            # Ensure the oldest 5 runs were pruned and latest 10 preserved
+            self.assertEqual(history[0]["experiment_desc"], "Experiment 5")
+            self.assertEqual(history[-1]["experiment_desc"], "Experiment 14")
+
     def test_omitted_modes_render_skipped(self):
         from ab_dashboard import render_html_with_state, DASHBOARD_HTML
         data = {

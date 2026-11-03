@@ -465,7 +465,7 @@ def consolidate_run_history(history: list) -> list:
     return consolidated
 
 
-def load_run_history(max_entries: Optional[int] = None) -> list:
+def load_run_history(max_entries: Optional[int] = 10) -> list:
     global _HISTORY_CACHE, _HISTORY_MTIME
     history_file = Path(__file__).resolve().parent.parent / "ab_results" / "ab_history.json"
     if not history_file.exists():

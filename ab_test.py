@@ -1298,7 +1298,7 @@ def save_run_history(
         if pool_data is not None:
             run_entry["pool_data"] = pool_data
         history.append(run_entry)
-    history = history[-100:]
+    history = history[-10:]
 
     with history_file.open("w", encoding="utf-8") as f:
         json.dump(history, f, indent=2, default=str)
