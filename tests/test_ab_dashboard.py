@@ -616,8 +616,8 @@ class TestDashboardSkip(unittest.TestCase):
             }
         }
         rendered = render_html_with_state(DASHBOARD_HTML, data)
-        # In both matrix and pool tables, Duel 1v1 must be SKIPPED instead of PENDING
-        self.assertIn('<span class="status-chip status-chip-skipped matrix-col-status matrix-status-skipped">SKIPPED</span>', rendered)
+        # In both matrix and pool tables, Duel 1v1 must be QUEUED instead of PENDING
+        self.assertIn('<span class="status-chip status-chip-queued matrix-col-status matrix-status-queued">QUEUED</span>', rendered)
         self.assertNotIn('<span class="status-chip status-chip-pending matrix-col-status matrix-status-pending">PENDING</span>', rendered)
 
     def test_stage_durations_frozen_on_finish(self):

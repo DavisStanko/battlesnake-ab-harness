@@ -107,9 +107,18 @@ The live dashboard (`ab_dashboard.py`) runs at `http://localhost:8888`:
 python ab_dashboard.py --port 8888
 ```
 
-- **4-Stage Pipeline Rail**: Live state of Unit Tests → Depth Benchmark → Self-Play Matrix → Zoo Pool Gate, with the run's target and overall status.
-- **Stage Cards**: Per-stage detail — test results, depth and NPS by mode, per-mode matrix results, and pool results by mode and opponent.
-- **Run History**: One row per recorded run in a 10-column table (Date, Experiment, Tests, Depth, Src, Constrictor, Royale, Duel, Standard, Verdict). Each mode cell stacks the self-play result above the pool result when a run has both — the two are different measurements and are never collapsed into one — with the source labels stated once per row in the Src column. Verdict shows the run's recorded recommendation.
+- **4-Stage Pipeline Rail**: Live status tracking across Unit Tests → Depth Benchmark → Self-Play Matrix → Zoo Pool Gate.
+- **Standardized Chip Taxonomy**:
+  - **Individual Rows & Overall Stage Rails**: Strictly `QUEUED` (neutral grey), `WORSE` (red), `BETTER` (green), and `EQUAL` (amber/yellow) across all individual test rows, mode rows, and stage rail cards.
+  - **Header Status Badge**: Displays the overall run status: `IDLE`, `RUNNING`, `WORSE`, `BETTER`, or `EQUAL` alongside the target chip (`🎯 PARITY`, `🎯 IMPROVEMENT`, etc.).
+  - **Run History Verdict**: Text is strictly `KEPT` or `REVERTED`, color-coded to reflect outcome quality: green for improvement (`BETTER`), yellow for parity (`EQUAL`, e.g. equal but reverted), and red for regression (`WORSE`).
+- **Normalized Stage Card Sizing**:
+  - Cards 2 (Depth Benchmark), 3 (Self-Play Matrix), and 4 (Zoo Pool Gate) are locked to an identical normalized fixed height (275px panel, 220px body with `overflow-y: hidden`). Each fits all 4 standardized mode rows with **zero scrollbars, zero clipped text, and zero dead whitespace**.
+  - Card 1 (Unit Tests) matches the exact outer container dimensions with scrollable body (`overflow-y: auto`) for all tactical tests.
+  - Stage inspection is directly addressable via query parameter or URL hash (`?stage=unit|depth|self|pool` or `#depth`, `#pool`, etc.).
+- **Headless Visual Verification**:
+  - Fast, headless visual inspection is supported using Docker Chromium (`zenika/alpine-chrome`) to verify layout integrity, card sizing, and chip rendering before committing UI/CSS changes.
+- **Run History (10-Column Ledger)**: One row per recorded run (Date, Experiment, Tests, Depth, Src, Constrictor, Royale, Duel, Standard, Verdict). Stacks self-play and pool results in each mode column when both are present, labeled once per row in the Src column.
 - **Persistent Timing History**: Completed mode durations are appended to `mode_timings.json`.
 - **Total Run ETA**: Blends the active mode's live pace (once $\ge 20$ games have finished) with historical medians for upcoming modes to provide an accurate total job completion estimate.
 
