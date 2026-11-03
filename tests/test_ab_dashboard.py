@@ -643,6 +643,25 @@ class TestDashboardSkip(unittest.TestCase):
         self.assertIn('<span class="status-chip status-chip-queued matrix-col-status matrix-status-queued">QUEUED</span>', rendered)
         self.assertNotIn('<span class="status-chip status-chip-pending matrix-col-status matrix-status-pending">PENDING</span>', rendered)
 
+    def test_no_data_state_shows_stats_and_progress_with_blank_values(self):
+        from ab_dashboard import render_html_with_state, DASHBOARD_HTML
+        empty_data = {}
+        rendered = render_html_with_state(DASHBOARD_HTML, empty_data)
+
+        # Progress bar and stat line should NOT be hidden
+        self.assertIn('<div class="header-progress-wrap" id="headerProgressWrap" title="Overall Run Progress">', rendered)
+        self.assertIn('<div class="header-stat-line" id="headerStatLine">', rendered)
+        self.assertNotIn('<div class="header-progress-wrap" id="headerProgressWrap" title="Overall Run Progress" style="display: none;">', rendered)
+        self.assertNotIn('<div class="header-stat-line" id="headerStatLine" style="display: none;">', rendered)
+
+        # Time / speed / thread values should show '--'
+        self.assertIn('<strong class="header-stat-val" id="headerStatElapsed">--</strong>', rendered)
+        self.assertIn('<strong class="header-stat-val" id="headerStatLeft">--</strong>', rendered)
+        self.assertIn('<strong class="header-stat-val" id="headerStatRate">--</strong>', rendered)
+        self.assertIn('<strong class="header-stat-val" id="threadsCount">--</strong>', rendered)
+        # Progress bar width is 0%
+        self.assertIn('<div class="header-progress-bar" id="headerProgressBar" style="width: 0.0%;"></div>', rendered)
+
     def test_stage_durations_frozen_on_finish(self):
         # 1. Self-play matrix run
         self.state.handle_update({

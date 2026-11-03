@@ -3835,7 +3835,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div class="header-stat-line" id="headerStatLine">
     <div class="header-stat-item" id="headerStatItemElapsed">
       <span class="header-stat-label">ELAPSED</span>
-      <strong class="header-stat-val" id="headerStatElapsed">0:00</strong>
+      <strong class="header-stat-val" id="headerStatElapsed">--</strong>
     </div>
     <div class="header-stat-item" id="headerStatItemLeft">
       <span class="header-stat-label">LEFT</span>
@@ -3843,11 +3843,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="header-stat-item" id="headerStatItemRate">
       <span class="header-stat-label">RATE</span>
-      <strong class="header-stat-val" id="headerStatRate">0.0 games/min</strong>
+      <strong class="header-stat-val" id="headerStatRate">--</strong>
     </div>
     <div class="header-stat-item" id="headerStatItemThreads">
       <span class="header-stat-label">THREADS</span>
-      <strong class="header-stat-val" id="threadsCount">0</strong>
+      <strong class="header-stat-val" id="threadsCount">--</strong>
     </div>
   </div>
 
@@ -4499,8 +4499,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const wrapEl = document.getElementById('headerProgressWrap');
 
       if (isEmpty) {
-        if (statLineEl) statLineEl.style.display = 'none';
-        if (wrapEl) wrapEl.style.display = 'none';
+        if (statLineEl) statLineEl.style.display = 'flex';
+        if (elItem) elItem.style.display = 'flex';
+        if (leftItem) leftItem.style.display = 'flex';
+        if (rateItem) rateItem.style.display = 'flex';
+        if (thItem) thItem.style.display = 'flex';
+        if (wrapEl) wrapEl.style.display = 'block';
+
+        setText('headerStatElapsed', '--');
+        setText('headerStatLeft', '--');
+        setText('headerStatRate', '--');
+        setText('threadsCount', '--');
+        setWidth('headerProgressBar', 0);
+        if (statLineEl) statLineEl.title = 'No active benchmark running';
+        if (wrapEl) wrapEl.title = 'Overall Run Progress: --';
         return;
       }
 
@@ -4542,7 +4554,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const pace = (isRunning && snapshot.modeElapsed > 0) ? (played / snapshot.modeElapsed) : 0;
       const rateGpm = pace * 60;
       const rateUnit = (runType === 'depth') ? 'pos/min' : 'games/min';
-      const rateStr = isRunning ? `${rateGpm.toFixed(1)} ${rateUnit}` : `0.0 ${rateUnit}`;
+      const rateStr = isRunning ? `${rateGpm.toFixed(1)} ${rateUnit}` : (isEmpty ? '--' : `0.0 ${rateUnit}`);
       setText('headerStatRate', rateStr);
 
       if (statLineEl) {
@@ -4554,7 +4566,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
 
       // 2. Thread Count beside Rate
-      const thCount = (data.threads != null && data.threads > 0) ? data.threads : (isRunning ? 0 : '--');
+      const thCount = (!isEmpty && data.threads != null && data.threads > 0) ? data.threads : (isRunning ? 0 : '--');
       setText('threadsCount', thCount);
 
       // 3. Header Slim Progress Bar (Percent = games completed / total planned games across entire suite)
@@ -6008,7 +6020,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
       }
 
-      const thCount = (data.threads != null && data.threads > 0) ? data.threads : (isRunning ? 0 : '--');
+      const thCount = (!isEmpty && data.threads != null && data.threads > 0) ? data.threads : (isRunning ? 0 : '--');
       setText('threadsCount', thCount);
 
       // Sync and tick unified timers
@@ -6033,7 +6045,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const pace = (isRunning && modeElapsed > 0) ? (played / modeElapsed) : 0;
       const rateGpm = pace * 60;
       const rateUnit = (runType === 'depth') ? 'pos/min' : 'games/min';
-      const rateStr = isRunning ? `${rateGpm.toFixed(1)} ${rateUnit}` : `0.0 ${rateUnit}`;
+      const rateStr = isRunning ? `${rateGpm.toFixed(1)} ${rateUnit}` : (isEmpty ? '--' : `0.0 ${rateUnit}`);
       setText('headerStatRate', rateStr);
 
       // Shared metrics calculation
@@ -6144,17 +6156,17 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
     run_type = str(data.get("run_type") or "self")
     exp_desc = data.get("experiment_desc") or "Unspecified Experiment"
     threads_val = data.get("threads")
-    threads_display = str(threads_val) if (threads_val is not None and threads_val > 0) else ("0" if is_running else "--")
+    threads_display = "--" if is_empty else (str(threads_val) if (threads_val is not None and threads_val > 0) else ("0" if is_running else "--"))
 
     # Header elapsed clock & LEFT ETA (Requirement 1)
     elapsed_str = py_format_seconds(elapsed_sec)
-    elapsed_clock_display = format_duration(elapsed_sec) if (is_running or elapsed_sec > 0) else "0:00"
-    left_display = format_left_duration(float(eta_sec)) if (is_running and eta_sec and float(eta_sec) > 0) else "--"
+    elapsed_clock_display = "--" if is_empty else (format_duration(elapsed_sec) if (is_running or elapsed_sec > 0) else "0:00")
+    left_display = "--" if is_empty else (format_left_duration(float(eta_sec)) if (is_running and eta_sec and float(eta_sec) > 0) else "--")
 
     # Header live rate in games per minute (Requirement 1 unit rule)
     rate_unit = "pos/min" if run_type == "depth" else "games/min"
     rate_gpm = calculate_rate_gpm(played, mode_elapsed) if is_running else 0.0
-    rate_display = format_rate_gpm(rate_gpm, rate_unit)
+    rate_display = "--" if is_empty else format_rate_gpm(rate_gpm, rate_unit)
 
     # Calculate suite progress across entire run
     total_completed_run, total_planned_run, games_progress_pct = calculate_suite_progress(
@@ -6514,7 +6526,7 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
         f'<div style="font-size: 0.85rem; color: var(--text-muted);" id="headerSubtext" title="Testing: {exp_desc}">Testing: {exp_desc}</div>'
     )
     out = out.replace(
-        '<strong class="header-stat-val" id="headerStatElapsed">0:00</strong>',
+        '<strong class="header-stat-val" id="headerStatElapsed">--</strong>',
         f'<strong class="header-stat-val" id="headerStatElapsed">{elapsed_clock_display}</strong>'
     )
     out = out.replace(
@@ -6522,7 +6534,7 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
         f'<strong class="header-stat-val" id="headerStatLeft">{left_display}</strong>'
     )
     out = out.replace(
-        '<strong class="header-stat-val" id="headerStatRate">0.0 games/min</strong>',
+        '<strong class="header-stat-val" id="headerStatRate">--</strong>',
         f'<strong class="header-stat-val" id="headerStatRate">{rate_display}</strong>'
     )
     out = out.replace(
@@ -6530,7 +6542,7 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
         f'<div class="header-progress-bar" id="headerProgressBar" style="width: {run_progress_pct:.1f}%;"></div>'
     )
     out = out.replace(
-        '<strong class="header-stat-val" id="threadsCount">0</strong>',
+        '<strong class="header-stat-val" id="threadsCount">--</strong>',
         f'<strong class="header-stat-val" id="threadsCount">{threads_display}</strong>'
     )
     out = out.replace(
@@ -6827,14 +6839,6 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
         out = out.replace(
             '<span id="headerNoData" style="display: none;',
             '<span id="headerNoData" style="display: inline-flex;'
-        )
-        out = out.replace(
-            '<div class="header-progress-wrap" id="headerProgressWrap" title="Overall Run Progress">',
-            '<div class="header-progress-wrap" id="headerProgressWrap" title="Overall Run Progress" style="display: none;">'
-        )
-        out = out.replace(
-            '<div class="header-stat-line" id="headerStatLine">',
-            '<div class="header-stat-line" id="headerStatLine" style="display: none;">'
         )
         for stg in ("unit", "depth", "matrix", "pool"):
             out = out.replace(f'<div id="{stg}EmptyWrap" style="display: none;', f'<div id="{stg}EmptyWrap" style="display: block;')
