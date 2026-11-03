@@ -6213,8 +6213,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       // Explicitly trigger render on synchronized data
       TimerStore.renderAllTimers(data, TimerStore.getSnapshot());
 
-    } catch (e) {
-      console.error('Dashboard update error:', e);
+    } catch (err) {
+      if (err && (err.name === 'AbortError' || err.message === 'The user aborted a request.')) {
+        return;
+      }
+      console.error('Dashboard update error:', err);
       if (lastSeenDesc && lastSeenDesc.trim() !== '') {
         const statusBadge = document.getElementById('statusBadge');
         const statusText = document.getElementById('statusText');

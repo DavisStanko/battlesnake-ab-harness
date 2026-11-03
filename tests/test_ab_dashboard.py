@@ -938,6 +938,12 @@ class TestDashboardSkip(unittest.TestCase):
             proc = subprocess.run([node_bin, "-c", "-"], input=script, text=True, capture_output=True)
             self.assertEqual(proc.returncode, 0, f"Script block {idx} contains JS syntax error: {proc.stderr}")
 
+    def test_update_dashboard_ignores_aborterror(self):
+        """Verify updateDashboard ignores AbortError on browser reload to prevent flashing WORSE."""
+        from harness.ab_dashboard import DASHBOARD_HTML
+        self.assertIn("err.name === 'AbortError'", DASHBOARD_HTML)
+        self.assertIn("if (err && (err.name === 'AbortError' || err.message === 'The user aborted a request.'))", DASHBOARD_HTML)
+
 
 if __name__ == "__main__":
     unittest.main()
