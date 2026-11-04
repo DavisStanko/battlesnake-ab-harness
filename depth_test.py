@@ -505,6 +505,7 @@ def run_depth_test(
                 matrix_progress=matrix_progress,
                 suite_start_time=t_suite_start,
                 run_type="depth",
+                target=target,
             )
         dash_client.init_depth(
             total_positions=total_positions,

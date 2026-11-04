@@ -1577,17 +1577,17 @@ def render_unit_tests_html(tests: List[Dict[str, Any]]) -> str:
     rows = []
     for idx, t in enumerate(sorted_tests, 1):
         status_val = str(t.get("status", "")).upper()
-        is_failed = status_val in ("FAILED", "ERROR")
+        is_failed = status_val in ("FAILED", "ERROR", "FAIL")
         is_queued = status_val in ("QUEUED", "PENDING", "")
         if is_failed:
-            st_text = "WORSE"
-            st_class = "worse"
+            st_text = "FAIL"
+            st_class = "fail"
         elif is_queued:
             st_text = "QUEUED"
             st_class = "queued"
         else:
-            st_text = "EQUAL"
-            st_class = "equal"
+            st_text = "PASS"
+            st_class = "pass"
         chip_html = f'<span class="status-chip status-chip-{st_class} matrix-col-status matrix-status-{st_class}">{st_text}</span>'
         name = html.escape(str(t.get("name", "unnamed_test")))
         msg = t.get("message", "")
@@ -3334,6 +3334,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     .stage-segment.failed.active,
+    .stage-segment.fail.active,
     .stage-segment.revert.active {
       background: rgba(239, 68, 68, 0.14);
       border-color: var(--pipeline-red);
@@ -3341,17 +3342,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     .stage-segment.failed.active .stage-seg-index,
+    .stage-segment.fail.active .stage-seg-index,
     .stage-segment.revert.active .stage-seg-index {
       background: rgba(239, 68, 68, 0.25);
       color: var(--pipeline-red);
     }
 
     .stage-segment.failed.active:hover,
+    .stage-segment.fail.active:hover,
     .stage-segment.revert.active:hover {
       background: rgba(239, 68, 68, 0.18);
     }
 
     .stage-segment.failed:hover:not(.active),
+    .stage-segment.fail:hover:not(.active),
     .stage-segment.revert:hover:not(.active) {
       background: rgba(239, 68, 68, 0.06);
       border-color: rgba(239, 68, 68, 0.4);
@@ -3618,7 +3622,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .status-chip-worse,
     .matrix-status-worse,
     .status-chip-failed,
-    .matrix-status-failed {
+    .status-chip-fail,
+    .matrix-status-failed,
+    .matrix-status-fail {
       background: rgba(239, 68, 68, 0.15);
       color: var(--pipeline-red);
       border: 1px solid rgba(239, 68, 68, 0.35);
@@ -4308,8 +4314,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }).join('');
     }
     const sorted = [...tests].sort((a, b) => {
-      const aFail = (a.status === 'FAILED' || a.status === 'ERROR') ? 0 : 1;
-      const bFail = (b.status === 'FAILED' || b.status === 'ERROR') ? 0 : 1;
+      const aFail = (a.status === 'FAILED' || a.status === 'ERROR' || a.status === 'FAIL') ? 0 : 1;
+      const bFail = (b.status === 'FAILED' || b.status === 'ERROR' || b.status === 'FAIL') ? 0 : 1;
       if (aFail !== bFail) return aFail - bFail;
       return (a.name || '').localeCompare(b.name || '');
     });
@@ -4317,13 +4323,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     return sorted.map((t, idx) => {
       const num = idx + 1;
       const st = String(t.status || '').toUpperCase();
-      const isFailed = (st === 'FAILED' || st === 'ERROR');
+      const isFailed = (st === 'FAILED' || st === 'ERROR' || st === 'FAIL');
       const isQueued = (st === 'QUEUED' || st === 'PENDING' || st === '');
-      let statusText = 'EQUAL';
-      let statusClass = 'equal';
+      let statusText = 'PASS';
+      let statusClass = 'pass';
       if (isFailed) {
-        statusText = 'WORSE';
-        statusClass = 'worse';
+        statusText = 'FAIL';
+        statusClass = 'fail';
       } else if (isQueued) {
         statusText = 'QUEUED';
         statusClass = 'queued';
@@ -5236,6 +5242,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const dur = document.getElementById(`railDuration-${id}`);
       let statusLower = status.toLowerCase().replace(/ /g, '-');
       if (statusLower === 'pass') statusLower = 'passed';
+      if (statusLower === 'fail') statusLower = 'failed';
 
       if (seg) {
         const isActive = (id === activeStage);
@@ -5296,11 +5303,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     if (isEmpty) {
       unitStatus = 'QUEUED';
-    } else if (data.stop_type === 'TEST_FAILURE' || unitData.status === 'FAILED' || (isAborted && interruptedStage === 'unit')) {
-      unitStatus = 'WORSE';
+    } else if (data.stop_type === 'TEST_FAILURE' || unitData.status === 'FAILED' || unitData.status === 'FAIL' || (isAborted && interruptedStage === 'unit')) {
+      unitStatus = 'FAIL';
       autoSelectStage('unit');
     } else if (unitData.status === 'PASSED' || unitData.status === 'DONE' || unitData.status === 'PASS' || (data.total_played > 0) || (isComplete && data.stop_type !== 'TEST_FAILURE')) {
-      unitStatus = 'EQUAL';
+      unitStatus = 'PASS';
       if (!unitData.duration_sec || unitData.duration_sec <= 0) {
         unitDur = '8.3s';
       }
@@ -5321,7 +5328,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         unitListEl.innerHTML = renderUnitTestsList([]);
       }
     } else {
-      if (unitListEl && (unitData.tests || unitStatus === 'DONE' || unitStatus === 'PASS' || unitStatus === 'EQUAL' || unitStatus === 'FAILED' || unitStatus === 'WORSE')) {
+      if (unitListEl && (unitData.tests || unitStatus === 'DONE' || unitStatus === 'PASS' || unitStatus === 'FAILED' || unitStatus === 'FAIL')) {
         unitListEl.innerHTML = renderUnitTestsList(unitData.tests || []);
       }
     }
@@ -5351,7 +5358,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       } else {
         depthStatus = 'QUEUED';
       }
-    } else if (isRunning && (unitStatus === 'DONE' || unitStatus === 'PASS' || unitStatus === 'EQUAL') && (!data.total_played || data.total_played === 0) && (!depth.completed_positions || depth.completed_positions < 12)) {
+    } else if (isRunning && (unitStatus === 'DONE' || unitStatus === 'PASS') && (!data.total_played || data.total_played === 0) && (!depth.completed_positions || depth.completed_positions < 12)) {
       depthStatus = 'RUNNING';
       depthDur = formatSeconds(data.elapsed_seconds || 0);
     } else if (isComplete && (depth.completed_positions >= 12 || depth.duration_sec)) {
@@ -5369,7 +5376,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let selfDur = '--';
     const sumMatrixSec = matrixList.reduce((acc, m) => acc + (m.duration_sec || 0), 0);
 
-    const unitTestSec = (unitData && unitData.duration_sec && unitData.duration_sec > 0) ? unitData.duration_sec : ((unitStatus === 'DONE' || unitStatus === 'PASS' || unitStatus === 'EQUAL') ? 8.3 : 0);
+    const unitTestSec = (unitData && unitData.duration_sec && unitData.duration_sec > 0) ? unitData.duration_sec : ((unitStatus === 'DONE' || unitStatus === 'PASS') ? 8.3 : 0);
     const depthSec = (depth && depth.duration_sec && depth.duration_sec > 0) ? depth.duration_sec : 0;
     const computedMatrixElapsed = (data.matrix_duration_sec != null && data.matrix_duration_sec > 0)
       ? data.matrix_duration_sec
@@ -5415,7 +5422,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     } else if ((isComplete || isAborted) && completedModes > 0) {
       selfStatus = deriveSelfStatus();
       selfDur = formatSeconds(data.matrix_duration_sec != null ? data.matrix_duration_sec : (sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed));
-    } else if (isRunning && (unitStatus === 'DONE' || unitStatus === 'PASS' || unitStatus === 'EQUAL') && (!depth.duration_sec || depthStatus === 'DONE' || depthStatus === 'PASS' || depthStatus === 'PARITY' || depthStatus === 'BETTER' || depthStatus === 'EQUAL') && (completedModes < matrixList.length)) {
+    } else if (isRunning && (unitStatus === 'DONE' || unitStatus === 'PASS') && (!depth.duration_sec || depthStatus === 'DONE' || depthStatus === 'PASS' || depthStatus === 'PARITY' || depthStatus === 'BETTER' || depthStatus === 'EQUAL') && (completedModes < matrixList.length)) {
       selfStatus = 'RUNNING';
       selfDur = formatSeconds(computedMatrixElapsed);
     } else {
@@ -5489,7 +5496,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     const failBanner = document.getElementById('unitTestFailBanner');
     const failDesc = document.getElementById('unitTestFailBannerDesc');
     if (failBanner) {
-      if (data.stop_type === 'TEST_FAILURE' || unitStatus === 'FAILED') {
+      if (data.stop_type === 'TEST_FAILURE' || unitStatus === 'FAILED' || unitStatus === 'FAIL') {
         failBanner.style.display = 'flex';
         if (failDesc) failDesc.innerText = data.stop_reason || unitData.details || 'Pre-flight tactical safety suite failed. All subsequent stages aborted.';
       } else {
@@ -6808,8 +6815,8 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
     unit_status = unit_data.get("status", "PASSED" if is_running else ("QUEUED" if is_empty else "PENDING"))
     unit_dur = unit_data.get("duration_sec")
     unit_dur_str = format_duration(float(unit_dur), allow_decimal=True) if unit_dur else ("0:08" if is_running else "--")
-    unit_status_clean = "equal" if unit_status in ("PASSED", "DONE", "PASS") else ("worse" if unit_status == "FAILED" else ("running" if unit_status == "RUNNING" else "queued"))
-    unit_status_text = "EQUAL" if unit_status in ("PASSED", "DONE", "PASS") else ("WORSE" if unit_status == "FAILED" else ("RUNNING" if unit_status == "RUNNING" else "QUEUED"))
+    unit_status_clean = "passed" if unit_status in ("PASSED", "DONE", "PASS") else ("failed" if unit_status in ("FAILED", "FAIL") else ("running" if unit_status == "RUNNING" else "queued"))
+    unit_status_text = "PASS" if unit_status in ("PASSED", "DONE", "PASS") else ("FAIL" if unit_status in ("FAILED", "FAIL") else ("RUNNING" if unit_status == "RUNNING" else "QUEUED"))
     out = out.replace(
         '<div class="stage-segment pending" id="railSegment-unit">\n        <span class="stage-seg-index">1</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Unit Tests</span>\n          <span class="stage-seg-duration" id="railDuration-unit">--</span>\n        </div>\n        <span class="stage-seg-status matrix-status-queued" id="railStatus-unit">QUEUED</span>\n      </div>',
         f'<div class="stage-segment {unit_status_clean}{unit_active}" id="railSegment-unit">\n        <span class="stage-seg-index">1</span>\n        <div class="stage-seg-info">\n          <span class="stage-seg-name">Unit Tests</span>\n          <span class="stage-seg-duration" id="railDuration-unit">{unit_dur_str}</span>\n        </div>\n        <span class="stage-seg-status matrix-status-{unit_status_clean}" id="railStatus-unit">{unit_status_text}</span>\n      </div>'
@@ -6858,7 +6865,7 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
     elif is_aborted:
         if interrupted_stage == "unit":
             unit_status_clean = "failed"
-            unit_status_text = "FAILED"
+            unit_status_text = "FAIL"
             depth_status_clean = "pending"
             depth_status_text = "QUEUED"
             depth_dur_str = "--"
@@ -6869,8 +6876,8 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             pool_rail_status = "QUEUED"
             pool_dur_str = "--"
         elif interrupted_stage == "depth":
-            unit_status_clean = "equal"
-            unit_status_text = "EQUAL"
+            unit_status_clean = "passed"
+            unit_status_text = "PASS"
             depth_status_clean = "worse"
             depth_status_text = "WORSE"
             depth_dur_str = format_duration(float(depth_dur)) if depth_dur else elapsed_str
@@ -6881,8 +6888,8 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             pool_rail_status = "QUEUED"
             pool_dur_str = "--"
         elif interrupted_stage == "self":
-            unit_status_clean = "equal"
-            unit_status_text = "EQUAL"
+            unit_status_clean = "passed"
+            unit_status_text = "PASS"
             depth_status_clean, depth_status_text = py_derive_depth_status(depth_data)
             matrix_rail_class = "worse"
             matrix_rail_status = "WORSE"
@@ -6891,8 +6898,8 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             pool_rail_status = "QUEUED"
             pool_dur_str = "--"
         else:
-            unit_status_clean = "equal"
-            unit_status_text = "EQUAL"
+            unit_status_clean = "passed"
+            unit_status_text = "PASS"
             depth_status_clean, depth_status_text = py_derive_depth_status(depth_data)
             matrix_rail_class, matrix_rail_status = py_derive_matrix_status(matrix_list, rec, data.get("stop_type"))
             if matrix_dur_val:
@@ -6904,8 +6911,8 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             pool_rail_status = "WORSE"
             pool_dur_str = format_duration(float(pool_dur_val)) if pool_dur_val else "--"
     elif is_complete:
-        unit_status_clean = "worse" if unit_status == "FAILED" else "equal"
-        unit_status_text = "WORSE" if unit_status == "FAILED" else "EQUAL"
+        unit_status_clean = "failed" if unit_status in ("FAILED", "FAIL") else "passed"
+        unit_status_text = "FAIL" if unit_status in ("FAILED", "FAIL") else "PASS"
         if depth_dur or (depth_data.get("completed_positions", 0) >= 12):
             depth_status_clean, depth_status_text = py_derive_depth_status(depth_data)
         else:
