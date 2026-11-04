@@ -2536,12 +2536,13 @@ class DashboardState:
                     pool_elapsed = float(self.pool_duration_sec) if getattr(self, "pool_duration_sec", None) is not None else 0.0
 
                 if self.status == "RUNNING" and (self.total_played > 0 or self.active_pid is not None or getattr(self, "run_type", "self") in ("depth", "self", "unit", "pool")):
+                    games_elapsed = max(0.0, (getattr(self, "last_game_time", 0.0) or now) - (self.start_time or now)) if (getattr(self, "last_game_time", 0.0) > (self.start_time or 0.0) and played > 0) else mode_elapsed
                     eta_info = calculate_eta(
                         matrix_progress=live_matrix_progress if live_matrix_progress else self.matrix_progress,
                         current_mode=self.game_mode,
                         current_played=played,
                         current_max_games=self.target_games or self.max_games or 200,
-                        current_mode_elapsed=mode_elapsed,
+                        current_mode_elapsed=games_elapsed,
                         run_type=getattr(self, "run_type", "self"),
                         depth_data=getattr(self, "depth_data", None),
                         unit_tests_data=getattr(self, "unit_tests_data", None),
@@ -4512,6 +4513,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     },
 
     lastRenderedSuiteSec: null,
+    lastSeenPlayed: null,
     latestData: null,
 
     // Sync authoritative state from server poll
@@ -4559,8 +4561,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const nowMs = Date.now();
         const expectedStartMs = nowMs - (rawSuiteSec * 1000);
 
-        // Anchor suiteStartMs if uninitialized, newly started, or drifted > 2.0s
-        if (this.suiteStartMs == null || !wasRunning || Math.abs((nowMs - this.suiteStartMs) / 1000 - rawSuiteSec) > 2.0) {
+        // Anchor suiteStartMs if uninitialized, newly started, or drifted > 10.0s
+        if (this.suiteStartMs == null || !wasRunning || Math.abs((nowMs - this.suiteStartMs) / 1000 - rawSuiteSec) > 10.0) {
           this.suiteStartMs = expectedStartMs;
           if (this.lastRenderedSuiteSec == null || !wasRunning) {
             this.lastRenderedSuiteSec = Math.floor(rawSuiteSec);
@@ -4568,6 +4570,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         }
 
         const clientSuiteSec = Math.max(0, Math.floor((nowMs - this.suiteStartMs) / 1000));
+        if (this.lastRenderedSuiteSec == null || clientSuiteSec > this.lastRenderedSuiteSec) {
+          this.lastRenderedSuiteSec = clientSuiteSec;
+        }
 
         // Lock mode offset when mode changes or newly running
         if (modeChanged || !wasRunning) {
@@ -4582,11 +4587,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           this.poolStartOffsetSec = Math.max(0, Math.round(rawSuiteSec - rawPoolSec));
         }
 
-        // ETA target in suite seconds (invariant total estimated suite duration)
-        if (data.eta_seconds != null && data.eta_seconds > 0) {
-          this.targetEndSuiteSec = Math.round(rawSuiteSec + Number(data.eta_seconds));
-        } else {
-          this.targetEndSuiteSec = null;
+        // ETA target in suite seconds (pinned between game finishes so LEFT counts down smoothly)
+        const playedChanged = (data.total_played !== this.lastSeenPlayed);
+        if (this.targetEndSuiteSec == null || playedChanged || modeChanged || !wasRunning) {
+          this.lastSeenPlayed = data.total_played;
+          if (data.eta_seconds != null && data.eta_seconds > 0) {
+            this.targetEndSuiteSec = clientSuiteSec + Math.round(Number(data.eta_seconds));
+          } else {
+            this.targetEndSuiteSec = null;
+          }
         }
 
         this.modeEtaTargets = {};
@@ -4606,6 +4615,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         this.targetEndSuiteSec = null;
         this.modeEtaTargets = {};
         this.lastRenderedSuiteSec = null;
+        this.lastSeenPlayed = null;
       }
 
       // Re-render immediately only on state transition or mode switch
@@ -7050,6 +7060,9 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         if parsed_path in ("/api/data", "/api/state"):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             if self.state:
@@ -7068,8 +7081,14 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             html_to_send = DASHBOARD_HTML
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.end_headers()
         self.wfile.write(html_to_send.encode("utf-8"))
+
+    def do_HEAD(self):
+        self.do_GET()
 
     def do_POST(self):
         if self.path in ("/api/skip", "/api/cancel", "/api/stop"):
