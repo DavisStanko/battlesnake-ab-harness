@@ -4483,21 +4483,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   // ── Centralized Unified Timer Architecture ───────────────────────────────────
   // Centralizes clock and tick management across the dashboard to eliminate visual jitter.
-  // Instead of separate drifting intervals or alternating frames, all visible timers derive
-  // their seconds functionally from wall-clock timestamps snapped to a shared 1000ms epoch boundary.
+  // All visible timers derive functionally from a single monotonic client clock and integer second tick.
+  // Clocks advance strictly once per second in exact unison across all displays and never oscillate.
 
   const TimerStore = {
     isRunning: false,
     runType: 'self',
     activeModeKey: null,
 
-    // Snapped baseline reference points (multiples of 1000ms aligned to shared epoch)
-    epochNow: 0,
-    suiteStartMs: 0,
-    modeStartMs: 0,
-    matrixStartMs: 0,
-    poolStartMs: 0,
-    totalEtaTargetMs: null,
+    // Monotonic anchor: client timestamp corresponding to suite start (t=0)
+    suiteStartMs: null,
+
+    // Fixed offsets locked per stage/mode relative to suite elapsed seconds
+    modeStartOffsetSec: 0,
+    matrixStartOffsetSec: null,
+    poolStartOffsetSec: null,
+
+    // ETA targets in terms of suite elapsed seconds
+    targetEndSuiteSec: null,
     modeEtaTargets: {},
 
     // Static durations for non-running states (IDLE, FINISHED, etc.)
@@ -4508,25 +4511,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       poolSec: 0,
     },
 
-    lastTickSecond: null,
+    lastRenderedSuiteSec: null,
     latestData: null,
-    forceRender: true,
 
     // Sync authoritative state from server poll
     sync(data) {
       if (!data) return;
       this.latestData = data;
       const running = (deriveUiState(data) === 'RUNNING');
+      const wasRunning = this.isRunning;
       this.isRunning = running;
       this.runType = data.run_type || 'self';
 
       const newMode = data.game_mode ? String(data.game_mode).toLowerCase() : null;
+      const modeChanged = (newMode !== this.activeModeKey);
       this.activeModeKey = newMode;
-
-      const nowWall = Date.now();
-      // Snap epoch to whole second boundary
-      const epochNow = Math.floor(nowWall / 1000) * 1000;
-      this.epochNow = epochNow;
 
       const rawSuiteSec = Math.max(0, Number(data.elapsed_seconds) || 0);
       const rawModeSec = Math.max(0, Number(data.mode_elapsed_seconds != null ? data.mode_elapsed_seconds : data.elapsed_seconds) || 0);
@@ -4557,16 +4556,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       };
 
       if (running) {
-        // Snap start references to multiples of 1000ms from the shared epochNow
-        this.suiteStartMs = epochNow - (Math.round(rawSuiteSec) * 1000);
-        this.modeStartMs = epochNow - (Math.round(rawModeSec) * 1000);
-        this.matrixStartMs = epochNow - (Math.round(rawMatrixSec) * 1000);
-        this.poolStartMs = epochNow - (Math.round(rawPoolSec) * 1000);
+        const nowMs = Date.now();
+        const expectedStartMs = nowMs - (rawSuiteSec * 1000);
 
+        // Anchor suiteStartMs if uninitialized, newly started, or drifted > 2.0s
+        if (this.suiteStartMs == null || !wasRunning || Math.abs((nowMs - this.suiteStartMs) / 1000 - rawSuiteSec) > 2.0) {
+          this.suiteStartMs = expectedStartMs;
+          if (this.lastRenderedSuiteSec == null || !wasRunning) {
+            this.lastRenderedSuiteSec = Math.floor(rawSuiteSec);
+          }
+        }
+
+        const clientSuiteSec = Math.max(0, Math.floor((nowMs - this.suiteStartMs) / 1000));
+
+        // Lock mode offset when mode changes or newly running
+        if (modeChanged || !wasRunning) {
+          this.modeStartOffsetSec = Math.max(0, Math.round(rawSuiteSec - rawModeSec));
+        }
+
+        // Lock stage offsets
+        if (this.matrixStartOffsetSec == null || !wasRunning) {
+          this.matrixStartOffsetSec = Math.max(0, Math.round(rawSuiteSec - rawMatrixSec));
+        }
+        if (this.poolStartOffsetSec == null || !wasRunning) {
+          this.poolStartOffsetSec = Math.max(0, Math.round(rawSuiteSec - rawPoolSec));
+        }
+
+        // ETA target in suite seconds (invariant total estimated suite duration)
         if (data.eta_seconds != null && data.eta_seconds > 0) {
-          this.totalEtaTargetMs = epochNow + (Math.round(Number(data.eta_seconds)) * 1000);
+          this.targetEndSuiteSec = Math.round(rawSuiteSec + Number(data.eta_seconds));
         } else {
-          this.totalEtaTargetMs = null;
+          this.targetEndSuiteSec = null;
         }
 
         this.modeEtaTargets = {};
@@ -4574,22 +4594,30 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           data.eta_breakdown.forEach(b => {
             if (b && b.mode && b.eta_seconds != null && b.eta_seconds > 0) {
               const mKey = b.mode.toLowerCase();
-              this.modeEtaTargets[mKey] = epochNow + (Math.round(Number(b.eta_seconds)) * 1000);
+              this.modeEtaTargets[mKey] = Math.round(Number(b.eta_seconds));
             }
           });
         }
       } else {
-        this.totalEtaTargetMs = null;
+        this.suiteStartMs = null;
+        this.modeStartOffsetSec = 0;
+        this.matrixStartOffsetSec = null;
+        this.poolStartOffsetSec = null;
+        this.targetEndSuiteSec = null;
         this.modeEtaTargets = {};
+        this.lastRenderedSuiteSec = null;
       }
 
-      this.forceRender = true;
-      this.tick();
+      // Re-render immediately only on state transition or mode switch
+      if (wasRunning !== running || modeChanged) {
+        const currentSec = running ? Math.max(0, Math.floor((Date.now() - this.suiteStartMs) / 1000)) : this.staticDurations.suiteSec;
+        this.lastRenderedSuiteSec = currentSec;
+        this.renderAllTimers(data, this.getSnapshot(currentSec));
+      }
     },
 
-    // Functionally evaluate snapshot from wall-clock timestamps
-    getSnapshot(nowMs) {
-      const t = nowMs || Date.now();
+    // Functionally evaluate snapshot from master suite second
+    getSnapshot(currentSuiteSec) {
       if (!this.isRunning) {
         return {
           suiteElapsed: this.staticDurations.suiteSec,
@@ -4601,24 +4629,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         };
       }
 
-      // Snapped start timestamps ensure (t - startMs) crosses integer seconds on the exact same millisecond
-      const suiteElapsed = Math.max(0, Math.floor((t - this.suiteStartMs) / 1000));
-      const modeElapsed = Math.max(0, Math.floor((t - this.modeStartMs) / 1000));
-      const matrixElapsed = Math.max(0, Math.floor((t - this.matrixStartMs) / 1000));
-      const poolElapsed = Math.max(0, Math.floor((t - this.poolStartMs) / 1000));
+      const suiteElapsed = Math.max(0, currentSuiteSec != null ? currentSuiteSec : (this.suiteStartMs != null ? Math.floor((Date.now() - this.suiteStartMs) / 1000) : this.staticDurations.suiteSec));
+      const modeElapsed = Math.max(0, suiteElapsed - (this.modeStartOffsetSec || 0));
+      const matrixElapsed = Math.max(0, suiteElapsed - (this.matrixStartOffsetSec || 0));
+      const poolElapsed = Math.max(0, suiteElapsed - (this.poolStartOffsetSec || 0));
 
       let totalEta = null;
-      if (this.totalEtaTargetMs != null) {
-        totalEta = Math.max(0, Math.ceil((this.totalEtaTargetMs - t) / 1000));
+      if (this.targetEndSuiteSec != null) {
+        totalEta = Math.max(0, this.targetEndSuiteSec - suiteElapsed);
       }
 
       const modeEtas = {};
-      for (const [mKey, targetMs] of Object.entries(this.modeEtaTargets)) {
-        if (mKey === this.activeModeKey) {
-          modeEtas[mKey] = Math.max(0, Math.ceil((targetMs - t) / 1000));
-        } else {
-          modeEtas[mKey] = Math.max(0, Math.round((targetMs - this.epochNow) / 1000));
-        }
+      for (const [mKey, etaSec] of Object.entries(this.modeEtaTargets)) {
+        modeEtas[mKey] = Math.max(0, etaSec);
       }
 
       return {
@@ -4633,16 +4656,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     // Centralized tick called at 100ms
     tick() {
+      if (!this.latestData) return;
+      if (!this.isRunning) return;
+
       const nowMs = Date.now();
-      const currentSecond = Math.floor(nowMs / 1000);
-      if (!this.forceRender && currentSecond === this.lastTickSecond) {
+      if (this.suiteStartMs == null) return;
+      const currentSuiteSec = Math.max(0, Math.floor((nowMs - this.suiteStartMs) / 1000));
+
+      // Strictly enforce: only render when integer second changes, and never go backwards
+      if (this.lastRenderedSuiteSec !== null && currentSuiteSec <= this.lastRenderedSuiteSec) {
         return;
       }
-      this.lastTickSecond = currentSecond;
-      this.forceRender = false;
 
-      if (!this.latestData) return;
-      const snapshot = this.getSnapshot(nowMs);
+      this.lastRenderedSuiteSec = currentSuiteSec;
+      const snapshot = this.getSnapshot(currentSuiteSec);
       this.renderAllTimers(this.latestData, snapshot);
     },
 
@@ -5184,14 +5211,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if (isSkipped) {
           etaText = '--';
         } else if (isCurrentActive) {
-          const unitData = data.unit_tests_data || {};
-          const unitSec = (unitData && unitData.duration_sec && unitData.duration_sec > 0) ? unitData.duration_sec : 0;
-          const depth = data.depth_data || {};
-          const depthSec = (depth && depth.duration_sec && depth.duration_sec > 0) ? depth.duration_sec : 0;
-          const poolElapsed = (data.mode_elapsed_seconds != null && data.mode_elapsed_seconds > 0)
-            ? data.mode_elapsed_seconds
-            : (dur != null && dur > 0 ? dur : Math.max(0, (data.elapsed_seconds || 0) - unitSec - depthSec));
-          etaText = (poolElapsed != null && poolElapsed > 0) ? formatDuration(poolElapsed) : '0:00';
+          const snap = TimerStore.getSnapshot(TimerStore.lastRenderedSuiteSec);
+          etaText = formatDuration(snap.modeElapsed);
         } else if (['BETTER', 'EQUAL', 'WORSE', 'PASSED', 'PARITY', 'FAILED', 'KEEP', 'REVERT'].includes(statusText) || dur != null) {
           etaText = (dur != null && dur > 0) ? formatDuration(dur) : '--';
         } else {
@@ -5313,7 +5334,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     } else if (unitData.status === 'RUNNING' || (isRunning && data.total_played === 0 && !depth.completed_positions)) {
       unitStatus = 'RUNNING';
-      unitDur = formatDuration(data.elapsed_seconds || 0, true);
+      unitDur = isRunning ? formatDuration(TimerStore.getSnapshot(TimerStore.lastRenderedSuiteSec).suiteElapsed, true) : formatDuration(data.elapsed_seconds || 0, true);
       autoSelectStage('unit');
     } else {
       unitStatus = 'QUEUED';
@@ -5349,7 +5370,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     } else if (runType === 'depth') {
       if (isRunning) {
         depthStatus = 'RUNNING';
-        depthDur = formatSeconds(data.elapsed_seconds || 0);
+        depthDur = formatDuration(TimerStore.getSnapshot(TimerStore.lastRenderedSuiteSec).suiteElapsed);
         autoSelectStage('depth');
       } else if (isComplete) {
         depthStatus = deriveDepthStatus(depth);
@@ -5360,7 +5381,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     } else if (isRunning && (unitStatus === 'DONE' || unitStatus === 'PASS') && (!data.total_played || data.total_played === 0) && (!depth.completed_positions || depth.completed_positions < 12)) {
       depthStatus = 'RUNNING';
-      depthDur = formatSeconds(data.elapsed_seconds || 0);
+      depthDur = formatDuration(TimerStore.getSnapshot(TimerStore.lastRenderedSuiteSec).suiteElapsed);
     } else if (isComplete && (depth.completed_positions >= 12 || depth.duration_sec)) {
       depthStatus = deriveDepthStatus(depth);
     } else {
@@ -5396,7 +5417,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     } else if (runType === 'self') {
       if (isRunning) {
         selfStatus = 'RUNNING';
-        selfDur = formatSeconds(computedMatrixElapsed);
+        selfDur = formatDuration(TimerStore.getSnapshot(TimerStore.lastRenderedSuiteSec).matrixElapsed);
         autoSelectStage('self');
       } else if (isComplete || completedModes > 0 || hasSelfProgress) {
         selfStatus = deriveSelfStatus();
@@ -5424,7 +5445,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       selfDur = formatSeconds(data.matrix_duration_sec != null ? data.matrix_duration_sec : (sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed));
     } else if (isRunning && (unitStatus === 'DONE' || unitStatus === 'PASS') && (!depth.duration_sec || depthStatus === 'DONE' || depthStatus === 'PASS' || depthStatus === 'PARITY' || depthStatus === 'BETTER' || depthStatus === 'EQUAL') && (completedModes < matrixList.length)) {
       selfStatus = 'RUNNING';
-      selfDur = formatSeconds(computedMatrixElapsed);
+      selfDur = formatDuration(TimerStore.getSnapshot(TimerStore.lastRenderedSuiteSec).matrixElapsed);
     } else {
       selfStatus = 'QUEUED';
     }
@@ -5446,8 +5467,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     } else if (pool.total_games && pool.total_games > 0) {
       if (isRunning && pool.total_games < (pool.max_games || 160)) {
         poolStatus = 'RUNNING';
-        const poolElapsed = poolDurSec || Math.max(0, (data.elapsed_seconds || 0) - unitTestSec - depthSec - (data.matrix_duration_sec || 0));
-        poolDur = formatSeconds(poolElapsed);
+        poolDur = formatDuration(TimerStore.getSnapshot(TimerStore.lastRenderedSuiteSec).poolElapsed);
         autoSelectStage('pool');
       } else {
         poolStatus = derivePoolStatus();
@@ -5455,8 +5475,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     } else if (isRunning && (matrixList.length > 0 && completedModes >= matrixList.length)) {
       poolStatus = 'RUNNING';
-      const poolElapsed = poolDurSec || Math.max(0, (data.elapsed_seconds || 0) - unitTestSec - depthSec - (data.matrix_duration_sec || 0));
-      poolDur = formatSeconds(poolElapsed);
+      poolDur = formatDuration(TimerStore.getSnapshot(TimerStore.lastRenderedSuiteSec).poolElapsed);
       autoSelectStage('pool');
     } else {
       poolStatus = 'QUEUED';
@@ -5616,16 +5635,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           zScoreText = `${z >= 0 ? '+' : ''}${z.toFixed(2)}`;
           zScoreColor = z >= 1.645 ? 'var(--pipeline-green)' : (z <= -1.645 ? 'var(--pipeline-red)' : 'var(--pipeline-amber)');
         }
-        const unitData = data.unit_tests_data || {};
-        const unitSec = (unitData && unitData.duration_sec && unitData.duration_sec > 0) ? unitData.duration_sec : 0;
-        const depth = data.depth_data || {};
-        const depthSec = (depth && depth.duration_sec && depth.duration_sec > 0) ? depth.duration_sec : 0;
-        const modeElapsed = (data.mode_elapsed_seconds != null && data.mode_elapsed_seconds > 0)
-          ? data.mode_elapsed_seconds
-          : (m.duration_sec != null && m.duration_sec > 0
-            ? m.duration_sec
-            : (data.matrix_elapsed_seconds != null ? data.matrix_elapsed_seconds : Math.max(0, (data.elapsed_seconds || 0) - unitSec - depthSec)));
-        etaText = (modeElapsed != null && modeElapsed > 0) ? formatDuration(modeElapsed) : '0:00';
+        const snap = TimerStore.getSnapshot(TimerStore.lastRenderedSuiteSec);
+        etaText = formatDuration(snap.modeElapsed);
       } else if (gamesVal > 0 && ['BETTER', 'EQUAL', 'WORSE', 'PASSED', 'PARITY', 'FAILED'].includes(effectiveStatus)) {
         const ws = (m.win_share != null ? m.win_share : (m.var_win_share != null ? m.var_win_share : varWS));
         scoreVal = (ws != null) ? `${ws.toFixed(1)}%` : '--';
@@ -6192,28 +6203,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       // Sync and tick unified timers
       TimerStore.sync(data);
 
-      const modeElapsed = TimerStore.staticDurations.modeSec || 0;
-
-      // Header Current Mode Live Rate Chip (Requirement 4)
-      let currentModeLabel = 'Mode';
-      if (runType === 'depth') {
-        currentModeLabel = 'Depth';
-      } else if (data.game_mode) {
-        const rawM = String(data.game_mode).toLowerCase();
-        if (rawM === 'duel') currentModeLabel = 'Duel';
-        else if (rawM === 'standard') currentModeLabel = 'Standard';
-        else if (rawM === 'constrictor') currentModeLabel = 'Constrictor';
-        else if (rawM === 'royale') currentModeLabel = 'Royale';
-        else currentModeLabel = rawM.charAt(0).toUpperCase() + rawM.slice(1);
-      }
-
-      const played = data.total_played || 0;
-      const pace = (isRunning && modeElapsed > 0) ? (played / modeElapsed) : 0;
-      const rateGpm = pace * 60;
-      const rateUnit = (runType === 'depth') ? 'pos/min' : 'games/min';
-      const rateStr = isRunning ? `${rateGpm.toFixed(1)} ${rateUnit}` : (isEmpty ? '--' : `0.0 ${rateUnit}`);
-      setText('headerStatRate', rateStr);
-
       // Shared metrics calculation
       const is4p = data.num_snakes === 4;
       const drawShare = is4p ? 0.25 : 0.5;
@@ -6237,7 +6226,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       updateHistoryTable(data);
 
       // Explicitly trigger render on synchronized data
-      TimerStore.renderAllTimers(data, TimerStore.getSnapshot());
+      TimerStore.renderAllTimers(data, TimerStore.getSnapshot(TimerStore.lastRenderedSuiteSec));
 
     } catch (err) {
       if (err && (err.name === 'AbortError' || err.message === 'The user aborted a request.')) {
