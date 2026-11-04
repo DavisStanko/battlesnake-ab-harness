@@ -530,6 +530,7 @@ def compute_serving_stats(
                 "fallback_total": 0,
                 "truncated_total": 0,
                 "overrun_total": 0,
+                "stale_dropped_total": 0,
             },
             "last_7_days": {
                 "games": 0,
@@ -539,6 +540,7 @@ def compute_serving_stats(
                 "fallback_total": 0,
                 "truncated_total": 0,
                 "overrun_total": 0,
+                "stale_dropped_total": 0,
             },
         }
 
@@ -599,6 +601,7 @@ def compute_serving_stats(
                 fallback = int(obj.get("fallback_count", obj.get("fallback", 0)))
                 truncated = int(obj.get("truncated_search_count", obj.get("truncated_total", obj.get("truncated", 0))))
                 overrun = int(obj.get("overrun_count", obj.get("overrun_total", obj.get("overrun", 0))))
+                stale_dropped = int(obj.get("stale_dropped_count", obj.get("stale_dropped_total", obj.get("stale_dropped", 0))))
 
                 if rec_date == today_date:
                     t = stats["today"]
@@ -609,6 +612,7 @@ def compute_serving_stats(
                     t["fallback_total"] += fallback
                     t["truncated_total"] += truncated
                     t["overrun_total"] += overrun
+                    t["stale_dropped_total"] += stale_dropped
 
                 if cutoff_7d_date <= rec_date <= today_date:
                     w = stats["last_7_days"]
@@ -619,6 +623,7 @@ def compute_serving_stats(
                     w["fallback_total"] += fallback
                     w["truncated_total"] += truncated
                     w["overrun_total"] += overrun
+                    w["stale_dropped_total"] += stale_dropped
     except Exception:
         return empty_stats()
 
