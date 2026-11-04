@@ -529,6 +529,7 @@ def compute_serving_stats(
                 "contention_total": 0,
                 "fallback_total": 0,
                 "truncated_total": 0,
+                "overrun_total": 0,
             },
             "last_7_days": {
                 "games": 0,
@@ -537,6 +538,7 @@ def compute_serving_stats(
                 "contention_total": 0,
                 "fallback_total": 0,
                 "truncated_total": 0,
+                "overrun_total": 0,
             },
         }
 
@@ -596,6 +598,7 @@ def compute_serving_stats(
                 contention = int(obj.get("contention_count", obj.get("contention", 0)))
                 fallback = int(obj.get("fallback_count", obj.get("fallback", 0)))
                 truncated = int(obj.get("truncated_search_count", obj.get("truncated_total", obj.get("truncated", 0))))
+                overrun = int(obj.get("overrun_count", obj.get("overrun_total", obj.get("overrun", 0))))
 
                 if rec_date == today_date:
                     t = stats["today"]
@@ -605,6 +608,7 @@ def compute_serving_stats(
                     t["contention_total"] += contention
                     t["fallback_total"] += fallback
                     t["truncated_total"] += truncated
+                    t["overrun_total"] += overrun
 
                 if cutoff_7d_date <= rec_date <= today_date:
                     w = stats["last_7_days"]
@@ -614,6 +618,7 @@ def compute_serving_stats(
                     w["contention_total"] += contention
                     w["fallback_total"] += fallback
                     w["truncated_total"] += truncated
+                    w["overrun_total"] += overrun
     except Exception:
         return empty_stats()
 
@@ -5249,16 +5254,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     // Helper to derive matrix status: WORSE, BETTER, or EQUAL
     function deriveSelfStatus() {
-      if (rec === 'REVERT' || rec === 'REJECT' || rec === 'WORSE') return 'WORSE';
-      const sType = (data.stop_type || '').toUpperCase();
-      if (['REVERT', 'FAILED', 'DISCONNECTED'].includes(sType)) return 'WORSE';
-      if (rec === 'KEEP' || rec === 'BETTER' || sType === 'KEEP') return 'BETTER';
-      if (rec === 'PARITY' || rec === 'EQUAL' || sType === 'PARITY' || sType === 'MATRIX_COMPLETE') return 'EQUAL';
+      if (interruptedStage === 'self') {
+        if (rec === 'REVERT' || rec === 'REJECT' || rec === 'WORSE') return 'WORSE';
+        const sType = (data.stop_type || '').toUpperCase();
+        if (['REVERT', 'FAILED', 'DISCONNECTED'].includes(sType)) return 'WORSE';
+      }
       const failedModes = matrixList.filter(m => ['FAILED', 'WORSE', 'REVERT'].includes(m.status)).length;
       if (failedModes > 0) return 'WORSE';
       const betterModes = matrixList.filter(m => ['BETTER', 'PASSED', 'KEEP'].includes(m.status)).length;
       const equalModes = matrixList.filter(m => ['EQUAL', 'PARITY'].includes(m.status)).length;
       if (betterModes > 0 && equalModes === 0) return 'BETTER';
+      if (equalModes > 0 || completedModes > 0) return 'EQUAL';
+      if (rec === 'KEEP' || rec === 'BETTER') return 'BETTER';
+      if (rec === 'PARITY' || rec === 'EQUAL') return 'EQUAL';
       return 'EQUAL';
     }
 
@@ -5367,18 +5375,24 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     } else if (isAborted && interruptedStage === 'self') {
       selfStatus = 'WORSE';
       autoSelectStage('self');
+    } else if (isAborted && interruptedStage === 'pool' && (completedModes > 0 || hasSelfProgress)) {
+      selfStatus = deriveSelfStatus();
+      const finalSec = (data.matrix_duration_sec != null && data.matrix_duration_sec > 0)
+        ? data.matrix_duration_sec
+        : (sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed);
+      selfDur = formatSeconds(finalSec);
     } else if (runType === 'self') {
       if (isRunning) {
         selfStatus = 'RUNNING';
         selfDur = formatSeconds(computedMatrixElapsed);
         autoSelectStage('self');
-      } else if (isComplete) {
+      } else if (isComplete || completedModes > 0 || hasSelfProgress) {
         selfStatus = deriveSelfStatus();
         const finalSec = (data.matrix_duration_sec != null && data.matrix_duration_sec > 0)
           ? data.matrix_duration_sec
           : (sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed);
         selfDur = formatSeconds(finalSec);
-        autoSelectStage('self');
+        if (isComplete) autoSelectStage('self');
       } else {
         selfStatus = 'QUEUED';
       }
@@ -5393,7 +5407,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         selfStatus = 'SKIPPED';
         selfDur = '--';
       }
-    } else if (isComplete && completedModes > 0) {
+    } else if ((isComplete || isAborted) && completedModes > 0) {
       selfStatus = deriveSelfStatus();
       selfDur = formatSeconds(data.matrix_duration_sec != null ? data.matrix_duration_sec : (sumMatrixSec > 0 ? sumMatrixSec : computedMatrixElapsed));
     } else if (isRunning && (unitStatus === 'DONE' || unitStatus === 'PASS' || unitStatus === 'EQUAL') && (!depth.duration_sec || depthStatus === 'DONE' || depthStatus === 'PASS' || depthStatus === 'PARITY' || depthStatus === 'BETTER' || depthStatus === 'EQUAL') && (completedModes < matrixList.length)) {
@@ -6745,12 +6759,9 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
         return "equal", "EQUAL"
 
     def py_derive_matrix_status(m_list, r_rec, s_stop):
-        if r_rec in ("REVERT", "REJECT", "WORSE") or s_stop in ("REVERT", "FAILED", "DISCONNECTED"):
-            return "worse", "WORSE"
-        if r_rec in ("KEEP", "BETTER") or s_stop == "KEEP":
-            return "better", "BETTER"
-        if r_rec in ("PARITY", "EQUAL") or s_stop in ("PARITY", "MATRIX_COMPLETE"):
-            return "equal", "EQUAL"
+        if interrupted_stage == "self":
+            if r_rec in ("REVERT", "REJECT", "WORSE") or s_stop in ("REVERT", "FAILED", "DISCONNECTED"):
+                return "worse", "WORSE"
         failed_cnt = sum(1 for m in m_list if m.get("status") in ("FAILED", "WORSE", "REVERT"))
         if failed_cnt > 0:
             return "worse", "WORSE"
@@ -6758,6 +6769,13 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
         equal_cnt = sum(1 for m in m_list if m.get("status") in ("EQUAL", "PARITY"))
         if better_cnt > 0 and equal_cnt == 0:
             return "better", "BETTER"
+        if equal_cnt > 0 or len(m_list) > 0:
+            return "equal", "EQUAL"
+        if r_rec in ("KEEP", "BETTER") or s_stop == "KEEP":
+            return "better", "BETTER"
+        if r_rec in ("PARITY", "EQUAL") or s_stop in ("PARITY", "MATRIX_COMPLETE"):
+            return "equal", "EQUAL"
+        return "worse", "WORSE"
         return "equal", "EQUAL"
 
     def py_derive_pool_status(p_data, r_rec):
@@ -6872,10 +6890,14 @@ def render_html_with_state(template_html: str, data: Optional[Dict[str, Any]] = 
             unit_status_text = "EQUAL"
             depth_status_clean, depth_status_text = py_derive_depth_status(depth_data)
             matrix_rail_class, matrix_rail_status = py_derive_matrix_status(matrix_list, rec, data.get("stop_type"))
-            matrix_dur_str = format_duration(float(matrix_dur_val)) if matrix_dur_val else "--"
+            if matrix_dur_val:
+                matrix_dur_str = format_duration(float(matrix_dur_val))
+            else:
+                sum_m_sec = sum(float(m.get("duration_sec", 0.0) or 0.0) for m in matrix_list)
+                matrix_dur_str = format_duration(sum_m_sec) if sum_m_sec > 0 else "--"
             pool_rail_class = "worse"
             pool_rail_status = "WORSE"
-            pool_dur_str = format_duration(float(pool_dur_val)) if pool_dur_val else elapsed_str
+            pool_dur_str = format_duration(float(pool_dur_val)) if pool_dur_val else "--"
     elif is_complete:
         unit_status_clean = "worse" if unit_status == "FAILED" else "equal"
         unit_status_text = "WORSE" if unit_status == "FAILED" else "EQUAL"
