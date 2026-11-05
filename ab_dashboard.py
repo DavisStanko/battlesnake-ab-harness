@@ -517,6 +517,11 @@ def compute_serving_stats(
     - contention_total
     - fallback_total
     - truncated_total
+    - overrun_total
+    - stale_dropped_total
+    - contention_wait_total_ms
+    - contention_wait_max_ms
+    - contention_waits_over_50ms
     """
     global _SERVING_STATS_CACHE, _SERVING_STATS_MTIME, _SERVING_STATS_SIZE
 
@@ -531,6 +536,9 @@ def compute_serving_stats(
                 "truncated_total": 0,
                 "overrun_total": 0,
                 "stale_dropped_total": 0,
+                "contention_wait_total_ms": 0.0,
+                "contention_wait_max_ms": 0.0,
+                "contention_waits_over_50ms": 0,
             },
             "last_7_days": {
                 "games": 0,
@@ -541,6 +549,9 @@ def compute_serving_stats(
                 "truncated_total": 0,
                 "overrun_total": 0,
                 "stale_dropped_total": 0,
+                "contention_wait_total_ms": 0.0,
+                "contention_wait_max_ms": 0.0,
+                "contention_waits_over_50ms": 0,
             },
         }
 
@@ -602,6 +613,9 @@ def compute_serving_stats(
                 truncated = int(obj.get("truncated_search_count", obj.get("truncated_total", obj.get("truncated", 0))))
                 overrun = int(obj.get("overrun_count", obj.get("overrun_total", obj.get("overrun", 0))))
                 stale_dropped = int(obj.get("stale_dropped_count", obj.get("stale_dropped_total", obj.get("stale_dropped", 0))))
+                wait_total = float(obj.get("contention_wait_total_ms", 0.0))
+                wait_max = float(obj.get("contention_wait_max_ms", 0.0))
+                waits_over_50 = int(obj.get("contention_waits_over_50ms", 0))
 
                 if rec_date == today_date:
                     t = stats["today"]
@@ -613,6 +627,9 @@ def compute_serving_stats(
                     t["truncated_total"] += truncated
                     t["overrun_total"] += overrun
                     t["stale_dropped_total"] += stale_dropped
+                    t["contention_wait_total_ms"] = round(t["contention_wait_total_ms"] + wait_total, 2)
+                    t["contention_wait_max_ms"] = round(max(t["contention_wait_max_ms"], wait_max), 2)
+                    t["contention_waits_over_50ms"] += waits_over_50
 
                 if cutoff_7d_date <= rec_date <= today_date:
                     w = stats["last_7_days"]
@@ -624,6 +641,9 @@ def compute_serving_stats(
                     w["truncated_total"] += truncated
                     w["overrun_total"] += overrun
                     w["stale_dropped_total"] += stale_dropped
+                    w["contention_wait_total_ms"] = round(w["contention_wait_total_ms"] + wait_total, 2)
+                    w["contention_wait_max_ms"] = round(max(w["contention_wait_max_ms"], wait_max), 2)
+                    w["contention_waits_over_50ms"] += waits_over_50
     except Exception:
         return empty_stats()
 
